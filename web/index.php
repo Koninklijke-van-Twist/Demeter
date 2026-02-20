@@ -77,7 +77,7 @@ function company_entity_url_with_query(string $baseUrl, string $environment, str
 
 function workorder_invoice_key(string $jobNo, string $jobTaskNo): string
 {
-    return mb_strtolower(trim($jobNo)) . '|' . mb_strtolower(trim($jobTaskNo));
+    return strtolower(trim($jobNo)) . '|' . strtolower(trim($jobTaskNo));
 }
 
 function escape_odata_string(string $value): string
@@ -87,7 +87,7 @@ function escape_odata_string(string $value): string
 
 function normalize_match_value(string $value): string
 {
-    return mb_strtolower(trim($value));
+    return strtolower(trim($value));
 }
 
 function parse_month_or_default(?string $value, DateTimeImmutable $fallback): DateTimeImmutable
