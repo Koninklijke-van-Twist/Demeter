@@ -753,35 +753,35 @@ $initialData = [
             text-decoration: line-through;
         }
 
-        .status-filter-btn.status-open {
-            background: #fff9db;
+        .status-open {
+            background: #ffffff;
         }
 
-        .status-filter-btn.status-signed {
+        .status-signed {
+            background: #f6f9e9;
+        }
+
+        .status-completed {
             background: #e9f9ee;
         }
 
-        .status-filter-btn.status-completed {
-            background: #e9f2ff;
-        }
-
-        .status-filter-btn.status-checked {
+        .status-checked {
             background: #fff1dd;
         }
 
-        .status-filter-btn.status-cancelled {
-            background: #c9a7a7;
+        .status-cancelled {
+            background: #ffa7a7;
         }
 
-        .status-filter-btn.status-closed {
+        .status-closed {
             background: #c5c5c5;
         }
 
-        .status-filter-btn.status-planned {
-            background: #f5ddff;
+        .status-planned {
+            background: #ddefff;
         }
 
-        .status-filter-btn.status-in-progress {
+        .status-in-progress {
             background: #ffe9e9;
         }
 
@@ -839,38 +839,6 @@ $initialData = [
 
         tbody tr:hover {
             filter: brightness(0.98);
-        }
-
-        tbody tr.status-open {
-            background: #fff9db;
-        }
-
-        tbody tr.status-signed {
-            background: #e9f9ee;
-        }
-
-        tbody tr.status-completed {
-            background: #e9f2ff;
-        }
-
-        tbody tr.status-checked {
-            background: #fff1dd;
-        }
-
-        tbody tr.status-cancelled {
-            background: #c9a7a7;
-        }
-
-        tbody tr.status-closed {
-            background: #c5c5c5;
-        }
-
-        tbody tr.status-planned {
-            background: #f5ddff;
-        }
-
-        tbody tr.status-in-progress {
-            background: #ffe9e9;
         }
 
         tbody tr.status-hidden-by-filter {
