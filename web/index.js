@@ -24,6 +24,9 @@
         key: 'No',
         direction: 'asc'
     };
+    const hiddenStatuses = new Set();
+    const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
+    const statusInfoMap = buildStatusInfoMap();
 
     if (!app)
     {
@@ -40,6 +43,11 @@
     summary.className = 'summary';
     summary.textContent = (showInvoiced ? 'Gefactureerde werkorders: ' : 'Niet-gefactureerde werkorders: ') + rows.length;
     app.appendChild(summary);
+
+    const statusFilterBar = document.createElement('div');
+    statusFilterBar.className = 'status-filter-bar';
+    app.appendChild(statusFilterBar);
+    renderStatusButtons();
 
     if (rows.length === 0)
     {
@@ -129,7 +137,13 @@
         for (const row of sorted)
         {
             const tr = document.createElement('tr');
-            tr.className = 'status-' + normalizeStatus(row.Status || '');
+            const statusKey = normalizeStatus(row.Status || '');
+            tr.className = 'status-' + statusKey;
+
+            if (hiddenStatuses.has(statusKey))
+            {
+                tr.classList.add('status-hidden-by-filter');
+            }
 
             for (const column of columns)
             {
@@ -140,6 +154,86 @@
 
             tbody.appendChild(tr);
         }
+    }
+
+    function renderStatusButtons ()
+    {
+        statusFilterBar.innerHTML = '';
+
+        const title = document.createElement('span');
+        title.className = 'status-filter-title';
+        title.textContent = 'Statusfilters:';
+        statusFilterBar.appendChild(title);
+
+        const orderedStatusKeys = Object.keys(statusInfoMap).sort(function (a, b)
+        {
+            const leftIndex = statusOrder.indexOf(a);
+            const rightIndex = statusOrder.indexOf(b);
+            if (leftIndex === -1 && rightIndex === -1) return a.localeCompare(b, 'nl', { sensitivity: 'base' });
+            if (leftIndex === -1) return 1;
+            if (rightIndex === -1) return -1;
+            return leftIndex - rightIndex;
+        });
+
+        for (const statusKey of orderedStatusKeys)
+        {
+            const info = statusInfoMap[statusKey];
+            if (!info) continue;
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'status-filter-btn status-' + statusKey;
+            button.textContent = info.label + ' (' + info.count + ')';
+            button.setAttribute('aria-pressed', hiddenStatuses.has(statusKey) ? 'false' : 'true');
+
+            if (hiddenStatuses.has(statusKey))
+            {
+                button.classList.add('is-off');
+            }
+
+            button.addEventListener('click', function ()
+            {
+                if (hiddenStatuses.has(statusKey))
+                {
+                    hiddenStatuses.delete(statusKey);
+                }
+                else
+                {
+                    hiddenStatuses.add(statusKey);
+                }
+
+                renderStatusButtons();
+                renderRows();
+            });
+
+            statusFilterBar.appendChild(button);
+        }
+    }
+
+    function buildStatusInfoMap ()
+    {
+        const map = {};
+        for (const row of rows)
+        {
+            const statusValue = String(row.Status || '').trim();
+            const key = normalizeStatus(statusValue);
+            if (!key)
+            {
+                continue;
+            }
+
+            if (!map[key])
+            {
+                map[key] = {
+                    label: statusValue || key,
+                    count: 0
+                };
+            }
+
+            map[key].count += 1;
+        }
+
+        return map;
     }
 
     function compareRows (a, b)

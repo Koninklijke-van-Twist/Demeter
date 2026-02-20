@@ -594,6 +594,67 @@ $initialData = [
             font-weight: 600;
         }
 
+        .status-filter-bar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 12px;
+            align-items: center;
+        }
+
+        .status-filter-title {
+            font-weight: 700;
+            color: #334155;
+            margin-right: 6px;
+        }
+
+        .status-filter-btn {
+            border: 1px solid #c8d3e1;
+            border-radius: 999px;
+            padding: 6px 10px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #1f2937;
+            cursor: pointer;
+        }
+
+        .status-filter-btn.is-off {
+            opacity: 0.45;
+            text-decoration: line-through;
+        }
+
+        .status-filter-btn.status-open {
+            background: #fff9db;
+        }
+
+        .status-filter-btn.status-signed {
+            background: #e9f9ee;
+        }
+
+        .status-filter-btn.status-completed {
+            background: #e9f2ff;
+        }
+
+        .status-filter-btn.status-checked {
+            background: #fff1dd;
+        }
+
+        .status-filter-btn.status-cancelled {
+            background: #c9a7a7;
+        }
+
+        .status-filter-btn.status-closed {
+            background: #c5c5c5;
+        }
+
+        .status-filter-btn.status-planned {
+            background: #f5ddff;
+        }
+
+        .status-filter-btn.status-in-progress {
+            background: #ffe9e9;
+        }
+
         .error {
             color: #b00020;
             margin-bottom: 12px;
@@ -677,6 +738,10 @@ $initialData = [
 
         tbody tr.status-in-progress {
             background: #ffe9e9;
+        }
+
+        tbody tr.status-hidden-by-filter {
+            display: none;
         }
 
         .empty {
