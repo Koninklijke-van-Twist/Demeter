@@ -170,7 +170,7 @@ try {
             '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
         ]);
 
-        $batchWorkorders = odata_get_all($workorderUrl, $auth, 3600);
+        $batchWorkorders = odata_get_all($workorderUrl, $auth, 18000);
         foreach ($batchWorkorders as $workorder) {
             if (!is_array($workorder)) {
                 continue;
@@ -226,7 +226,7 @@ try {
             '$filter' => implode(' or ', $filterParts),
         ]);
 
-        $batchProjects = odata_get_all($projectUrl, $auth, 3600);
+        $batchProjects = odata_get_all($projectUrl, $auth, 18000);
         foreach ($batchProjects as $project) {
             if (!is_array($project)) {
                 continue;
@@ -260,7 +260,7 @@ try {
                 '$filter' => $periodFilter,
             ]);
 
-            $batchInvoices = odata_get_all($invoiceUrl, $auth, 3600);
+            $batchInvoices = odata_get_all($invoiceUrl, $auth, 18000);
             foreach ($batchInvoices as $invoice) {
                 if (!is_array($invoice)) {
                     continue;
@@ -369,7 +369,7 @@ try {
                     '$filter' => $periodFilter,
                 ]);
 
-                $batchInvoices = odata_get_all($invoiceUrl, $auth, 3600);
+                $batchInvoices = odata_get_all($invoiceUrl, $auth, 18000);
                 foreach ($batchInvoices as $invoice) {
                     if (!is_array($invoice)) {
                         continue;
