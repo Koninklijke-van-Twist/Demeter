@@ -612,6 +612,36 @@ $initialData = [
             margin-right: 6px;
         }
 
+        .status-search-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-left: auto;
+        }
+
+        .status-search-form input {
+            border: 1px solid #c8d3e1;
+            border-radius: 8px;
+            padding: 6px 10px;
+            min-width: 220px;
+            font: inherit;
+        }
+
+        .status-search-form button {
+            border: 1px solid #1f4ea6;
+            background: #1f4ea6;
+            color: #fff;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .status-search-form button:hover {
+            background: #1a438e;
+        }
+
         .status-filter-btn {
             border: 1px solid #c8d3e1;
             border-radius: 999px;

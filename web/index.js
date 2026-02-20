@@ -25,6 +25,7 @@
         direction: 'asc'
     };
     const hiddenStatuses = new Set();
+    let appliedSearchText = '';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
     const statusInfoMap = buildStatusInfoMap();
 
@@ -48,6 +49,7 @@
     statusFilterBar.className = 'status-filter-bar';
     app.appendChild(statusFilterBar);
     renderStatusButtons();
+    renderSearchForm();
 
     if (rows.length === 0)
     {
@@ -90,6 +92,13 @@
     const tbody = document.createElement('tbody');
     table.appendChild(tbody);
     app.appendChild(table);
+
+    const noSearchResults = document.createElement('div');
+    noSearchResults.className = 'empty table-no-results';
+    noSearchResults.textContent = 'Geen regels gevonden voor deze zoekopdracht.';
+    noSearchResults.style.display = 'none';
+    app.appendChild(noSearchResults);
+
     renderHeader();
     renderRows();
 
@@ -133,17 +142,23 @@
     {
         tbody.innerHTML = '';
         const sorted = rows.slice().sort(compareRows);
+        let visibleCount = 0;
 
         for (const row of sorted)
         {
             const tr = document.createElement('tr');
             const statusKey = normalizeStatus(row.Status || '');
-            tr.className = 'status-' + statusKey;
-
             if (hiddenStatuses.has(statusKey))
             {
-                tr.classList.add('status-hidden-by-filter');
+                continue;
             }
+
+            if (!rowMatchesSearch(row))
+            {
+                continue;
+            }
+
+            tr.className = 'status-' + statusKey;
 
             for (const column of columns)
             {
@@ -153,7 +168,10 @@
             }
 
             tbody.appendChild(tr);
+            visibleCount += 1;
         }
+
+        noSearchResults.style.display = visibleCount === 0 ? '' : 'none';
     }
 
     function renderStatusButtons ()
@@ -208,6 +226,52 @@
 
             statusFilterBar.appendChild(button);
         }
+    }
+
+    function renderSearchForm ()
+    {
+        const searchForm = document.createElement('form');
+        searchForm.className = 'status-search-form';
+
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = 'Zoek in tabel';
+        searchInput.value = appliedSearchText;
+        searchInput.setAttribute('aria-label', 'Zoek in tabel');
+
+        const searchButton = document.createElement('button');
+        searchButton.type = 'submit';
+        searchButton.textContent = 'Zoek';
+
+        searchForm.addEventListener('submit', function (event)
+        {
+            event.preventDefault();
+            appliedSearchText = String(searchInput.value || '').trim().toLowerCase();
+            renderRows();
+        });
+
+        searchForm.appendChild(searchInput);
+        searchForm.appendChild(searchButton);
+        statusFilterBar.appendChild(searchForm);
+    }
+
+    function rowMatchesSearch (row)
+    {
+        if (appliedSearchText === '')
+        {
+            return true;
+        }
+
+        for (const column of columns)
+        {
+            const value = String(row[column.key] || '').toLowerCase();
+            if (value.includes(appliedSearchText))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     function buildStatusInfoMap ()
