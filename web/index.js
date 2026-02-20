@@ -7,13 +7,18 @@
     const showInvoiced = payload.gefactureerd === true;
     const columns = [
         { key: 'No', label: 'Werkorder' },
-        { key: 'Task_Description', label: 'Omschrijving' },
+        { key: 'Order_Type', label: 'Ordertype' },
+        { key: 'Customer_Id', label: 'Klant id' },
+        { key: 'Customer_Name', label: 'Klantnaam' },
+        { key: 'Start_Date', label: 'Startdatum' },
+        { key: 'Equipment_Number', label: 'Equipment nummer' },
+        { key: 'Description', label: 'Omschrijving' },
+        { key: 'Actual_Costs', label: 'Werkelijke kosten' },
+        { key: 'Total_Revenue', label: 'Totaalopbrengst' },
+        { key: 'Actual_Total', label: 'Werkelijk totaal' },
+        { key: 'Cost_Center', label: 'Kostenplaats' },
         { key: 'Status', label: 'Status' },
-        { key: 'Resource_Name', label: 'Monteur' },
-        { key: 'Main_Entity_Description', label: 'Hoofd entiteit' },
-        { key: 'Sub_Entity_Description', label: 'Sub entiteit' },
-        { key: 'Job_No', label: 'Project' },
-        { key: 'Project_Description', label: 'Projectnaam' }
+        { key: 'Notes', label: 'Notities' }
     ];
     if (showInvoiced)
     {
@@ -24,6 +29,13 @@
         key: 'No',
         direction: 'asc'
     };
+    const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
+    const currencyFormatter = new Intl.NumberFormat('nl-NL', {
+        style: 'currency',
+        currency: 'EUR',
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+    });
     const hiddenStatuses = new Set();
     let appliedSearchText = '';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
@@ -40,10 +52,20 @@
         return;
     }
 
+    const summaryRow = document.createElement('div');
+    summaryRow.className = 'summary-row';
     const summary = document.createElement('div');
     summary.className = 'summary';
     summary.textContent = (showInvoiced ? 'Gefactureerde werkorders: ' : 'Niet-gefactureerde werkorders: ') + rows.length;
-    app.appendChild(summary);
+    summaryRow.appendChild(summary);
+
+    const exportButton = document.createElement('button');
+    exportButton.type = 'button';
+    exportButton.className = 'export-btn';
+    exportButton.textContent = 'Export';
+    exportButton.addEventListener('click', exportVisibleRowsToCsv);
+    summaryRow.appendChild(exportButton);
+    app.appendChild(summaryRow);
 
     const statusFilterBar = document.createElement('div');
     statusFilterBar.className = 'status-filter-bar';
@@ -99,6 +121,35 @@
     noSearchResults.style.display = 'none';
     app.appendChild(noSearchResults);
 
+    const notesOverlay = document.createElement('div');
+    notesOverlay.className = 'notes-overlay';
+    notesOverlay.style.display = 'none';
+    notesOverlay.innerHTML = [
+        '<div class="notes-modal" role="dialog" aria-modal="true" aria-label="Notities">',
+        '<div class="notes-modal-head">',
+        '<strong>Notities</strong>',
+        '<button type="button" class="notes-close">Sluiten</button>',
+        '</div>',
+        '<div class="notes-modal-body"></div>',
+        '</div>'
+    ].join('');
+    app.appendChild(notesOverlay);
+
+    const notesBody = notesOverlay.querySelector('.notes-modal-body');
+    const notesCloseButton = notesOverlay.querySelector('.notes-close');
+
+    if (notesCloseButton)
+    {
+        notesCloseButton.addEventListener('click', closeNotesModal);
+    }
+    notesOverlay.addEventListener('click', function (event)
+    {
+        if (event.target === notesOverlay)
+        {
+            closeNotesModal();
+        }
+    });
+
     renderHeader();
     renderRows();
 
@@ -141,37 +192,84 @@
     function renderRows ()
     {
         tbody.innerHTML = '';
-        const sorted = rows.slice().sort(compareRows);
-        let visibleCount = 0;
+        const visibleRows = getVisibleSortedRows();
 
-        for (const row of sorted)
+        for (const row of visibleRows)
         {
             const tr = document.createElement('tr');
             const statusKey = normalizeStatus(row.Status || '');
-            if (hiddenStatuses.has(statusKey))
-            {
-                continue;
-            }
-
-            if (!rowMatchesSearch(row))
-            {
-                continue;
-            }
 
             tr.className = 'status-' + statusKey;
 
             for (const column of columns)
             {
                 const td = document.createElement('td');
-                td.textContent = String(row[column.key] || '');
+                if (column.key === 'Notes')
+                {
+                    const hasNotes = Array.isArray(row.Notes) && row.Notes.some(function (part)
+                    {
+                        return String((part && part.value) || '').trim() !== '';
+                    });
+
+                    if (hasNotes)
+                    {
+                        const button = document.createElement('button');
+                        button.type = 'button';
+                        button.className = 'notes-btn';
+                        button.textContent = 'Bekijk';
+                        button.addEventListener('click', function ()
+                        {
+                            openNotesModal(Array.isArray(row.Notes) ? row.Notes : []);
+                        });
+                        td.appendChild(button);
+                    }
+                    else
+                    {
+                        td.textContent = '';
+                    }
+                }
+                else
+                {
+                    if (column.key === 'Actual_Total')
+                    {
+                        const totalAmount = Number(row[column.key] || 0);
+                        if (totalAmount === 0)
+                        {
+                            td.textContent = '';
+                        }
+                        else
+                        {
+                            td.textContent = formatSignedCurrency(totalAmount);
+                            td.classList.add(totalAmount > 0 ? 'amount-positive' : 'amount-negative');
+                        }
+                    }
+                    else if (column.key === 'Actual_Costs' || column.key === 'Total_Revenue')
+                    {
+                        td.textContent = formatCurrencyOrZero(row[column.key]);
+                    }
+                    else if (numericSortKeys.has(column.key))
+                    {
+                        td.textContent = formatCurrencyOrEmpty(row[column.key]);
+                    }
+                    else
+                    {
+                        if (column.key === 'Equipment_Number')
+                        {
+                            td.textContent = getEquipmentDisplayValue(row);
+                        }
+                        else
+                        {
+                            td.textContent = String(row[column.key] || '');
+                        }
+                    }
+                }
                 tr.appendChild(td);
             }
 
             tbody.appendChild(tr);
-            visibleCount += 1;
         }
 
-        noSearchResults.style.display = visibleCount === 0 ? '' : 'none';
+        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
     }
 
     function renderStatusButtons ()
@@ -264,6 +362,26 @@
 
         for (const column of columns)
         {
+            if (column.key === 'Notes')
+            {
+                const notesSearch = String(row.Notes_Search || '').toLowerCase();
+                if (notesSearch.includes(appliedSearchText))
+                {
+                    return true;
+                }
+                continue;
+            }
+
+            if (column.key === 'Equipment_Number')
+            {
+                const equipmentValue = getEquipmentDisplayValue(row).toLowerCase();
+                if (equipmentValue.includes(appliedSearchText))
+                {
+                    return true;
+                }
+                continue;
+            }
+
             const value = String(row[column.key] || '').toLowerCase();
             if (value.includes(appliedSearchText))
             {
@@ -300,8 +418,113 @@
         return map;
     }
 
+    function getVisibleSortedRows ()
+    {
+        const sorted = rows.slice().sort(compareRows);
+        return sorted.filter(function (row)
+        {
+            const statusKey = normalizeStatus(row.Status || '');
+            if (hiddenStatuses.has(statusKey))
+            {
+                return false;
+            }
+
+            return rowMatchesSearch(row);
+        });
+    }
+
+    function exportVisibleRowsToCsv ()
+    {
+        const visibleRows = getVisibleSortedRows();
+        const delimiter = ';';
+        const headers = columns.map(function (column)
+        {
+            return column.label;
+        });
+
+        const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
+        for (const row of visibleRows)
+        {
+            const values = columns.map(function (column)
+            {
+                return getExportValue(row, column.key);
+            });
+            csvLines.push(values.map(escapeCsvValue).join(delimiter));
+        }
+
+        const csvContent = '\uFEFF' + csvLines.join('\r\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'demeter_export.csv';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+
+    function getExportValue (row, key)
+    {
+        if (key === 'Notes')
+        {
+            const parts = Array.isArray(row.Notes) ? row.Notes : [];
+            const lines = [];
+            for (const part of parts)
+            {
+                const label = String((part && part.label) || '').trim();
+                const value = String((part && part.value) || '').trim();
+                if (value === '')
+                {
+                    continue;
+                }
+                lines.push(label + ': ' + value);
+            }
+            return lines.join(' | ');
+        }
+
+        if (key === 'Equipment_Number')
+        {
+            return getEquipmentDisplayValue(row);
+        }
+
+        if (key === 'Actual_Total')
+        {
+            return formatSignedCurrency(row[key]);
+        }
+
+        if (key === 'Actual_Costs' || key === 'Total_Revenue')
+        {
+            return formatCurrencyOrZero(row[key]);
+        }
+
+        return String(row[key] || '');
+    }
+
+    function escapeCsvValue (value)
+    {
+        const text = String(value || '');
+        return '"' + text.replace(/"/g, '""') + '"';
+    }
+
     function compareRows (a, b)
     {
+        if (sortState.key === 'Equipment_Number')
+        {
+            const leftEquipment = getEquipmentDisplayValue(a);
+            const rightEquipment = getEquipmentDisplayValue(b);
+            const equipmentComparison = leftEquipment.localeCompare(rightEquipment, 'nl', { numeric: true, sensitivity: 'base' });
+            return sortState.direction === 'asc' ? equipmentComparison : -equipmentComparison;
+        }
+
+        if (numericSortKeys.has(sortState.key))
+        {
+            const leftNumber = Number(a[sortState.key] || 0);
+            const rightNumber = Number(b[sortState.key] || 0);
+            const difference = leftNumber - rightNumber;
+            return sortState.direction === 'asc' ? difference : -difference;
+        }
+
         const left = normalizeSortValue(a[sortState.key]);
         const right = normalizeSortValue(b[sortState.key]);
 
@@ -314,9 +537,105 @@
         return String(value || '').trim();
     }
 
+    function formatCurrencyOrEmpty (value)
+    {
+        const amount = Number(value || 0);
+        if (amount === 0)
+        {
+            return '';
+        }
+
+        return currencyFormatter.format(amount);
+    }
+
+    function formatSignedCurrency (value)
+    {
+        const amount = Number(value || 0);
+        if (amount === 0)
+        {
+            return '';
+        }
+
+        const sign = amount > 0 ? '+' : '-';
+        return sign + currencyFormatter.format(Math.abs(amount));
+    }
+
+    function formatCurrencyOrZero (value)
+    {
+        const amount = Number(value || 0);
+        if (amount === 0)
+        {
+            return '€ 0';
+        }
+
+        return currencyFormatter.format(amount);
+    }
+
     function normalizeStatus (value)
     {
         return String(value || '').trim().toLowerCase().replaceAll(" ", "-");
+    }
+
+    function getEquipmentDisplayValue (row)
+    {
+        const numberValue = String((row && row.Equipment_Number) || '').trim();
+        if (numberValue !== '')
+        {
+            return numberValue;
+        }
+
+        return String((row && row.Equipment_Name) || '').trim();
+    }
+
+    function openNotesModal (parts)
+    {
+        if (!notesBody)
+        {
+            return;
+        }
+
+        notesBody.innerHTML = '';
+        let hasVisibleNotes = false;
+
+        for (const part of parts)
+        {
+            const label = String((part && part.label) || '').trim();
+            const value = String((part && part.value) || '').trim();
+            if (value === '')
+            {
+                continue;
+            }
+
+            const section = document.createElement('div');
+            section.className = 'notes-section';
+
+            const heading = document.createElement('div');
+            heading.className = 'notes-section-title';
+            heading.textContent = label;
+
+            const content = document.createElement('pre');
+            content.className = 'notes-section-text';
+            content.textContent = value;
+
+            section.appendChild(heading);
+            section.appendChild(content);
+            notesBody.appendChild(section);
+            hasVisibleNotes = true;
+        }
+
+        if (!hasVisibleNotes)
+        {
+            const empty = document.createElement('div');
+            empty.textContent = 'Geen notities beschikbaar.';
+            notesBody.appendChild(empty);
+        }
+
+        notesOverlay.style.display = '';
+    }
+
+    function closeNotesModal ()
+    {
+        notesOverlay.style.display = 'none';
     }
 
     function escapeHtml (value)

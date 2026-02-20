@@ -165,8 +165,8 @@ try {
             continue;
         }
 
-        $workorderUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'AppWerkorders', [
-            '$select' => 'No,Task_Description,Status,Resource_Name,Main_Entity_Description,Sub_Entity_Description,Job_No,Job_Task_No,External_Document_No,Start_Date,End_Date',
+        $workorderUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'Werkorders', [
+            '$select' => 'No,Task_Code,Task_Description,Status,Job_No,Job_Task_No,External_Document_No,Start_Date,End_Date,Sub_Entity,Sub_Entity_Description,Component_No,Serial_No,Bill_to_Customer_No,Bill_to_Name,KVT_Sum_Work_Order_Cost_Items,KVT_Sum_Work_Order_Cost_Other,KVT_Sum_Work_Order_Revenue,Job_Dimension_1_Value,Memo,Memo_Internal_Use_Only,Memo_Invoice,KVT_Memo_Invoice_Details,KVT_Remarks_Invoicing',
             '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
         ]);
 
@@ -189,55 +189,6 @@ try {
 
             $seenWorkorders[$rowKey] = true;
             $workorders[] = $workorder;
-        }
-    }
-
-    $jobNos = [];
-    foreach ($workorders as $workorder) {
-        if (!is_array($workorder)) {
-            continue;
-        }
-
-        $jobNo = trim((string) ($workorder['Job_No'] ?? ''));
-        if ($jobNo === '') {
-            continue;
-        }
-
-        $jobNos[$jobNo] = true;
-    }
-
-    $jobNoList = array_keys($jobNos);
-    sort($jobNoList, SORT_NATURAL | SORT_FLAG_CASE);
-
-    $projectDescriptions = [];
-    $projectBatches = array_chunk($jobNoList, 20);
-    foreach ($projectBatches as $batch) {
-        $filterParts = [];
-        foreach ($batch as $projectNo) {
-            $filterParts[] = "No eq '" . escape_odata_string((string) $projectNo) . "'";
-        }
-
-        if ($filterParts === []) {
-            continue;
-        }
-
-        $projectUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'AppProjecten', [
-            '$select' => 'No,Description',
-            '$filter' => implode(' or ', $filterParts),
-        ]);
-
-        $batchProjects = odata_get_all($projectUrl, $auth, 18000);
-        foreach ($batchProjects as $project) {
-            if (!is_array($project)) {
-                continue;
-            }
-
-            $projectNo = trim((string) ($project['No'] ?? ''));
-            if ($projectNo === '') {
-                continue;
-            }
-
-            $projectDescriptions[$projectNo] = (string) ($project['Description'] ?? '');
         }
     }
 
@@ -482,18 +433,55 @@ try {
             continue;
         }
 
+        $costItems = (float) ($workorder['KVT_Sum_Work_Order_Cost_Items'] ?? 0);
+        $costOther = (float) ($workorder['KVT_Sum_Work_Order_Cost_Other'] ?? 0);
+        $actualCosts = $costItems + $costOther;
+        $totalRevenue = abs((float) ($workorder['KVT_Sum_Work_Order_Revenue'] ?? 0));
+        $actualTotal = $totalRevenue - $actualCosts;
+
+        $equipmentNumber = trim((string) ($workorder['Sub_Entity'] ?? ''));
+        if ($equipmentNumber === '') {
+            $equipmentNumber = trim((string) ($workorder['Component_No'] ?? ''));
+        }
+        if ($equipmentNumber === '') {
+            $equipmentNumber = trim((string) ($workorder['Serial_No'] ?? ''));
+        }
+
+        $notesParts = [
+            ['label' => 'KVT_Memo', 'value' => trim((string) ($workorder['Memo'] ?? ''))],
+            ['label' => 'KVT_Memo_Internal_Use_Only', 'value' => trim((string) ($workorder['Memo_Internal_Use_Only'] ?? ''))],
+            ['label' => 'KVT_Memo_Invoice', 'value' => trim((string) ($workorder['Memo_Invoice'] ?? ''))],
+            ['label' => 'KVT_Memo_Billing_Details', 'value' => trim((string) ($workorder['KVT_Memo_Invoice_Details'] ?? ''))],
+            ['label' => 'KVT_Remarks_Invoicing', 'value' => trim((string) ($workorder['KVT_Remarks_Invoicing'] ?? ''))],
+        ];
+
+        $notesSearchParts = [];
+        foreach ($notesParts as $notePart) {
+            $noteValue = trim((string) ($notePart['value'] ?? ''));
+            if ($noteValue !== '') {
+                $notesSearchParts[] = $noteValue;
+            }
+        }
+
         $rows[] = [
             'No' => (string) ($workorder['No'] ?? ''),
-            'Task_Description' => (string) ($workorder['Task_Description'] ?? ''),
+            'Order_Type' => (string) ($workorder['Task_Code'] ?? ''),
+            'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
+            'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
+            'Equipment_Number' => $equipmentNumber,
+            'Equipment_Name' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
+            'Description' => (string) ($workorder['Task_Description'] ?? ''),
+            'Customer_Name' => (string) ($workorder['Bill_to_Name'] ?? ''),
+            'Actual_Costs' => $actualCosts,
+            'Total_Revenue' => $totalRevenue,
+            'Actual_Total' => $actualTotal,
+            'Cost_Center' => (string) ($workorder['Job_Dimension_1_Value'] ?? ''),
             'Status' => (string) ($workorder['Status'] ?? ''),
-            'Resource_Name' => (string) ($workorder['Resource_Name'] ?? ''),
-            'Main_Entity_Description' => (string) ($workorder['Main_Entity_Description'] ?? ''),
-            'Sub_Entity_Description' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
-            'Job_No' => $jobNo,
-            'Project_Description' => (string) ($projectDescriptions[$jobNo] ?? ''),
+            'Notes' => $notesParts,
+            'Notes_Search' => implode("\n", $notesSearchParts),
             'Invoice_Id' => $matchedInvoiceId,
             'Invoice_Type' => $matchedInvoiceType,
-            'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
+            'Job_No' => $jobNo,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
         ];
     }
@@ -594,8 +582,30 @@ $initialData = [
         }
 
         .summary {
-            margin-bottom: 12px;
             font-weight: 600;
+        }
+
+        .summary-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+
+        .export-btn {
+            border: 1px solid #0f766e;
+            background: #0f766e;
+            color: #fff;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .export-btn:hover {
+            background: #0d625c;
         }
 
         .status-filter-bar {
@@ -640,6 +650,92 @@ $initialData = [
 
         .status-search-form button:hover {
             background: #1a438e;
+        }
+
+        .notes-btn {
+            border: 1px solid #1f4ea6;
+            background: #1f4ea6;
+            color: #fff;
+            border-radius: 8px;
+            padding: 5px 10px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .notes-btn:hover {
+            background: #1a438e;
+        }
+
+        .notes-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.45);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 2000;
+            padding: 20px;
+        }
+
+        .notes-modal {
+            width: min(860px, 95vw);
+            max-height: 85vh;
+            overflow: auto;
+            background: #fff;
+            border-radius: 12px;
+            border: 1px solid #dbe3ee;
+            box-shadow: 0 20px 30px rgba(15, 23, 42, 0.25);
+            padding: 14px;
+        }
+
+        .notes-modal-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .notes-close {
+            border: 1px solid #c8d3e1;
+            background: #fff;
+            border-radius: 8px;
+            padding: 5px 10px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .notes-section {
+            border: 1px solid #e7edf5;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            overflow: hidden;
+        }
+
+        .notes-section-title {
+            background: #f1f5fb;
+            color: #203a63;
+            font-weight: 700;
+            padding: 8px 10px;
+        }
+
+        .notes-section-text {
+            margin: 0;
+            padding: 10px;
+            white-space: pre-wrap;
+            font-family: inherit;
+            line-height: 1.4;
+        }
+
+        .amount-positive {
+            color: #0b6b2f;
+            font-weight: 700;
+        }
+
+        .amount-negative {
+            color: #b42318;
+            font-weight: 700;
         }
 
         .status-filter-btn {
@@ -709,7 +805,7 @@ $initialData = [
         table {
             width: 100%;
             border-collapse: collapse;
-            overflow: hidden;
+            overflow: visible;
             border-radius: 10px;
         }
 
@@ -727,6 +823,9 @@ $initialData = [
             color: #203a63;
             font-weight: 700;
             white-space: nowrap;
+            position: sticky;
+            top: 0;
+            z-index: 5;
         }
 
         th[role="button"] {
