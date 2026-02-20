@@ -37,6 +37,8 @@
         maximumFractionDigits: 2
     });
     const hiddenStatuses = new Set();
+    const manuallyHiddenStatuses = new Set();
+    let statusHintTimeoutId = null;
     let appliedSearchText = '';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
     const statusInfoMap = buildStatusInfoMap();
@@ -59,6 +61,10 @@
     summary.className = 'summary';
     summary.textContent = (showInvoiced ? 'Gefactureerde werkorders: ' : 'Niet-gefactureerde werkorders: ') + rows.length;
     summaryRow.appendChild(summary);
+
+    const statusHint = document.createElement('div');
+    statusHint.className = 'status-filter-hint';
+    statusHint.textContent = 'Tip: dubbel-klik op een filter om alleen die status weer te geven';
 
     const exportButton = document.createElement('button');
     exportButton.type = 'button';
@@ -312,6 +318,8 @@
                 }
             }
 
+            manuallyHiddenStatuses.clear();
+            updateStatusHint();
             renderStatusButtons();
             renderRows();
         });
@@ -338,12 +346,15 @@
                 if (hiddenStatuses.has(statusKey))
                 {
                     hiddenStatuses.delete(statusKey);
+                    manuallyHiddenStatuses.delete(statusKey);
                 }
                 else
                 {
                     hiddenStatuses.add(statusKey);
+                    manuallyHiddenStatuses.add(statusKey);
                 }
 
+                updateStatusHint();
                 renderStatusButtons();
                 renderRows();
             });
@@ -352,6 +363,8 @@
             {
                 event.preventDefault();
                 event.stopPropagation();
+
+                dismissStatusHint();
 
                 for (const otherStatusKey of orderedStatusKeys)
                 {
@@ -365,12 +378,16 @@
                     }
                 }
 
+                manuallyHiddenStatuses.clear();
+                updateStatusHint();
                 renderStatusButtons();
                 renderRows();
             });
 
             statusFilterBar.appendChild(button);
         }
+
+        statusFilterBar.appendChild(statusHint);
 
         renderSearchForm();
     }
@@ -674,6 +691,40 @@
         }
 
         return true;
+    }
+
+    function updateStatusHint ()
+    {
+        if (manuallyHiddenStatuses.size > 5)
+        {
+            statusHint.classList.add('is-visible');
+            if (statusHintTimeoutId !== null)
+            {
+                clearTimeout(statusHintTimeoutId);
+            }
+
+            statusHintTimeoutId = setTimeout(function ()
+            {
+                dismissStatusHint();
+            }, 20000);
+        }
+        else
+        {
+            statusHint.classList.remove('is-visible');
+        }
+    }
+
+    function dismissStatusHint ()
+    {
+        statusHint.classList.remove('is-visible');
+
+        if (statusHintTimeoutId !== null)
+        {
+            clearTimeout(statusHintTimeoutId);
+            statusHintTimeoutId = null;
+        }
+
+        manuallyHiddenStatuses.clear();
     }
 
     function getEquipmentDisplayValue (row)

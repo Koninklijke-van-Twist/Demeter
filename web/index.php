@@ -582,7 +582,7 @@ $initialData = [
         .summary-row {
             display: flex;
             align-items: center;
-            justify-content: space-between;
+            justify-content: flex-start;
             gap: 10px;
             margin-bottom: 12px;
         }
@@ -596,6 +596,7 @@ $initialData = [
             font: inherit;
             font-weight: 700;
             cursor: pointer;
+            margin-left: auto;
         }
 
         .export-btn:hover {
@@ -614,6 +615,27 @@ $initialData = [
             font-weight: 700;
             color: #334155;
             margin-right: 6px;
+        }
+
+        .status-filter-hint {
+            padding: 7px 10px;
+            border: 1px solid #dbe3ee;
+            border-radius: 8px;
+            background: #f8fafc;
+            color: #475569;
+            font-size: 12px;
+            opacity: 0;
+            visibility: hidden;
+            transform: translateY(-2px);
+            transition: opacity 220ms ease, transform 220ms ease, visibility 220ms ease;
+            pointer-events: none;
+            white-space: nowrap;
+        }
+
+        .status-filter-hint.is-visible {
+            opacity: 1;
+            visibility: visible;
+            transform: translateY(0);
         }
 
         .status-toggle-all-btn {
