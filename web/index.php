@@ -439,13 +439,7 @@ try {
         $totalRevenue = abs((float) ($workorder['KVT_Sum_Work_Order_Revenue'] ?? 0));
         $actualTotal = $totalRevenue - $actualCosts;
 
-        $equipmentNumber = trim((string) ($workorder['Sub_Entity'] ?? ''));
-        if ($equipmentNumber === '') {
-            $equipmentNumber = trim((string) ($workorder['Component_No'] ?? ''));
-        }
-        if ($equipmentNumber === '') {
-            $equipmentNumber = trim((string) ($workorder['Serial_No'] ?? ''));
-        }
+        $equipmentNumber = trim((string) ($workorder['Component_No'] ?? ''));
 
         $notesParts = [
             ['label' => 'KVT_Memo', 'value' => trim((string) ($workorder['Memo'] ?? ''))],
