@@ -53,11 +53,14 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 function odata_get_json(string $url, array $auth): array
 {
     $ch = curl_init($url);
+    $userAgent = 'Demeter-ODataClient/1.0 (Windows; nl-NL)';
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_USERAGENT => $userAgent,
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
+            "Accept-Language: nl-NL,nl;q=0.9,en;q=0.8",
         ],
     ]);
 

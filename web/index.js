@@ -40,6 +40,7 @@
     let appliedSearchText = '';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
     const statusInfoMap = buildStatusInfoMap();
+    initializeDefaultStatusFilters();
 
     if (!app)
     {
@@ -71,7 +72,6 @@
     statusFilterBar.className = 'status-filter-bar';
     app.appendChild(statusFilterBar);
     renderStatusButtons();
-    renderSearchForm();
 
     if (rows.length === 0)
     {
@@ -291,6 +291,32 @@
             return leftIndex - rightIndex;
         });
 
+        const toggleAllButton = document.createElement('button');
+        toggleAllButton.type = 'button';
+        toggleAllButton.className = 'status-toggle-all-btn';
+        toggleAllButton.textContent = areAllStatusesEnabled(orderedStatusKeys) ? 'Alles uit' : 'Alles aan';
+        toggleAllButton.addEventListener('click', function ()
+        {
+            if (areAllStatusesEnabled(orderedStatusKeys))
+            {
+                for (const statusKey of orderedStatusKeys)
+                {
+                    hiddenStatuses.add(statusKey);
+                }
+            }
+            else
+            {
+                for (const statusKey of orderedStatusKeys)
+                {
+                    hiddenStatuses.delete(statusKey);
+                }
+            }
+
+            renderStatusButtons();
+            renderRows();
+        });
+        statusFilterBar.appendChild(toggleAllButton);
+
         for (const statusKey of orderedStatusKeys)
         {
             const info = statusInfoMap[statusKey];
@@ -322,8 +348,31 @@
                 renderRows();
             });
 
+            button.addEventListener('dblclick', function (event)
+            {
+                event.preventDefault();
+                event.stopPropagation();
+
+                for (const otherStatusKey of orderedStatusKeys)
+                {
+                    if (otherStatusKey === statusKey)
+                    {
+                        hiddenStatuses.delete(otherStatusKey);
+                    }
+                    else
+                    {
+                        hiddenStatuses.add(otherStatusKey);
+                    }
+                }
+
+                renderStatusButtons();
+                renderRows();
+            });
+
             statusFilterBar.appendChild(button);
         }
+
+        renderSearchForm();
     }
 
     function renderSearchForm ()
@@ -573,7 +622,58 @@
 
     function normalizeStatus (value)
     {
-        return String(value || '').trim().toLowerCase().replaceAll(" ", "-");
+        const normalized = String(value || '').trim().toLowerCase();
+        const aliases = {
+            'open': 'open',
+            'afgesloten': 'closed',
+            'geannuleerd': 'cancelled',
+            'gecontroleerd': 'checked',
+            'gepland': 'planned',
+            'onderhanden': 'in-progress',
+            'ondertekend': 'signed',
+            'uitgevoerd': 'completed'
+        };
+
+        if (aliases[normalized])
+        {
+            return aliases[normalized];
+        }
+
+        return normalized.replaceAll(' ', '-');
+    }
+
+    function initializeDefaultStatusFilters ()
+    {
+        if (!statusInfoMap['in-progress'])
+        {
+            return;
+        }
+
+        for (const statusKey of Object.keys(statusInfoMap))
+        {
+            if (statusKey !== 'in-progress')
+            {
+                hiddenStatuses.add(statusKey);
+            }
+        }
+    }
+
+    function areAllStatusesEnabled (statusKeys)
+    {
+        if (!Array.isArray(statusKeys) || statusKeys.length === 0)
+        {
+            return false;
+        }
+
+        for (const statusKey of statusKeys)
+        {
+            if (hiddenStatuses.has(statusKey))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     function getEquipmentDisplayValue (row)

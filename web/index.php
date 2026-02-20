@@ -616,6 +616,21 @@ $initialData = [
             margin-right: 6px;
         }
 
+        .status-toggle-all-btn {
+            border: 1px solid #334155;
+            background: #334155;
+            color: #fff;
+            border-radius: 999px;
+            padding: 6px 10px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .status-toggle-all-btn:hover {
+            background: #1f2937;
+        }
+
         .status-search-form {
             display: inline-flex;
             align-items: center;
