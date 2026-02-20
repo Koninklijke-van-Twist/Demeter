@@ -538,7 +538,7 @@
             const lines = [];
             for (const part of parts)
             {
-                const label = String((part && part.label) || '').trim();
+                const label = String((part && part.label) || '').trim().replaceAll("_", " ");
                 const value = String((part && part.value) || '').trim();
                 if (value === '')
                 {
@@ -750,7 +750,7 @@
 
         for (const part of parts)
         {
-            const label = String((part && part.label) || '').trim();
+            const label = String((part && part.label) || '').trim().replaceAll("_", " ");
             const value = String((part && part.value) || '').trim();
             if (value === '')
             {
