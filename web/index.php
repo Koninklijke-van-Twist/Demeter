@@ -40,6 +40,140 @@ require __DIR__ . "/auth.php";
 require_once __DIR__ . "/logincheck.php";
 require_once __DIR__ . "/odata.php";
 
+function current_user_email_or_fallback(): string
+{
+    if (isset($_SESSION) && is_array($_SESSION)) {
+        $sessionUser = $_SESSION['user'] ?? null;
+        if (is_array($sessionUser)) {
+            $email = trim((string) ($sessionUser['email'] ?? ''));
+            if ($email !== '') {
+                return $email;
+            }
+        }
+    }
+
+    return 'ict@kvt.nl';
+}
+
+function memo_setting_keys(): array
+{
+    return [
+        'Memo_KVT_Memo',
+        'Memo_KVT_Memo_Internal_Use_Only',
+        'Memo_KVT_Memo_Invoice',
+        'Memo_KVT_Memo_Billing_Details',
+        'Memo_KVT_Remarks_Invoicing',
+    ];
+}
+
+function usersettings_file_path_for_email(string $email): string
+{
+    $safeEmail = preg_replace('/[^a-z0-9@._-]/i', '_', strtolower(trim($email)));
+    if (!is_string($safeEmail) || trim($safeEmail) === '') {
+        $safeEmail = 'ict@kvt.nl';
+    }
+
+    return __DIR__ . '/cache/usersettings/' . $safeEmail . '.txt';
+}
+
+function default_memo_column_settings(): array
+{
+    $settings = [];
+    foreach (memo_setting_keys() as $key) {
+        $settings[$key] = true;
+    }
+
+    return $settings;
+}
+
+function load_memo_column_settings(string $email): array
+{
+    $defaults = default_memo_column_settings();
+    $path = usersettings_file_path_for_email($email);
+    if (!is_file($path) || !is_readable($path)) {
+        return $defaults;
+    }
+
+    $raw = file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return $defaults;
+    }
+
+    $parsed = json_decode($raw, true);
+    if (!is_array($parsed)) {
+        return $defaults;
+    }
+
+    $configured = $parsed['memo_columns'] ?? null;
+    if (!is_array($configured)) {
+        return $defaults;
+    }
+
+    $merged = $defaults;
+    foreach ($merged as $key => $value) {
+        if (array_key_exists($key, $configured)) {
+            $merged[$key] = (bool) $configured[$key];
+        }
+    }
+
+    return $merged;
+}
+
+function save_memo_column_settings(string $email, array $input): bool
+{
+    $normalized = default_memo_column_settings();
+    foreach ($normalized as $key => $value) {
+        if (array_key_exists($key, $input)) {
+            $normalized[$key] = (bool) $input[$key];
+        }
+    }
+
+    $directory = __DIR__ . '/cache/usersettings';
+    if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
+        return false;
+    }
+
+    $path = usersettings_file_path_for_email($email);
+    $payload = [
+        'memo_columns' => $normalized,
+        'updated_at' => gmdate('c'),
+    ];
+
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if (!is_string($json)) {
+        return false;
+    }
+
+    return file_put_contents($path, $json, LOCK_EX) !== false;
+}
+
+$currentUserEmail = current_user_email_or_fallback();
+
+if (($_GET['action'] ?? '') === 'save_user_settings') {
+    header('Content-Type: application/json; charset=utf-8');
+
+    $rawInput = file_get_contents('php://input');
+    $decoded = json_decode(is_string($rawInput) ? $rawInput : '', true);
+    $memoColumns = is_array($decoded) ? ($decoded['memo_columns'] ?? null) : null;
+    if (!is_array($memoColumns)) {
+        http_response_code(400);
+        echo json_encode(['ok' => false, 'error' => 'Ongeldige instellingen'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    $saved = save_memo_column_settings($currentUserEmail, $memoColumns);
+    if (!$saved) {
+        http_response_code(500);
+        echo json_encode(['ok' => false, 'error' => 'Instellingen opslaan mislukt'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        exit;
+    }
+
+    echo json_encode(['ok' => true], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+$memoColumnSettings = load_memo_column_settings($currentUserEmail);
+
 $companies = [
     "Koninklijke van Twist",
     "Hunter van Twist",
@@ -51,7 +185,17 @@ if (!in_array($selectedCompany, $companies, true)) {
     $selectedCompany = $companies[0];
 }
 
-$showInvoiced = strtolower(trim((string) ($_GET['gefactureerd'] ?? 'false'))) === 'true';
+$invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? '')));
+if ($invoiceFilter === '' && array_key_exists('gefactureerd', $_GET)) {
+    $legacyShowInvoiced = strtolower(trim((string) ($_GET['gefactureerd'] ?? 'false'))) === 'true';
+    $invoiceFilter = $legacyShowInvoiced ? 'invoiced' : 'uninvoiced';
+}
+
+if (!in_array($invoiceFilter, ['both', 'uninvoiced', 'invoiced'], true)) {
+    $invoiceFilter = 'both';
+}
+
+$showInvoiced = $invoiceFilter === 'both' || $invoiceFilter === 'invoiced';
 
 function company_entity_url(string $baseUrl, string $environment, string $company, string $entitySet, array $selectFields = []): string
 {
@@ -138,17 +282,6 @@ if ($fromMonth > $toMonth) {
 
 $fromMonthValue = $fromMonth->format('Y-m');
 $toMonthValue = $toMonth->format('Y-m');
-
-$toggleQuery = [
-    'company' => $selectedCompany,
-    'from_month' => $fromMonthValue,
-    'to_month' => $toMonthValue,
-];
-if (!$showInvoiced) {
-    $toggleQuery['gefactureerd'] = 'true';
-}
-$toggleUrl = '?' . http_build_query($toggleQuery, '', '&', PHP_QUERY_RFC3986);
-$toggleLabel = $showInvoiced ? 'Toon niet-gefactureerd' : 'Toon gefactureerd';
 
 $rows = [];
 $errorMessage = null;
@@ -258,20 +391,17 @@ try {
 
         $invoiceJobOnly[normalize_match_value($invoiceJobNo)] = [
             'id' => $invoiceDocumentNo,
-            'type' => 'project',
         ];
 
         if ($invoiceJobTaskNo !== '') {
             $invoiceKeys[workorder_invoice_key($invoiceJobNo, $invoiceJobTaskNo)] = [
                 'id' => $invoiceDocumentNo,
-                'type' => 'project',
             ];
         }
 
         if ($invoiceDocumentNo !== '') {
             $invoiceReferences[normalize_match_value($invoiceDocumentNo)] = [
                 'id' => $invoiceDocumentNo,
-                'type' => 'project',
             ];
         }
     }
@@ -356,7 +486,6 @@ try {
                         $sourceInvoiceNo = trim((string) ($invoice['No'] ?? ''));
                         $invoiceReferences[normalize_match_value($referenceValue)] = [
                             'id' => $sourceInvoiceNo,
-                            'type' => $entity === 'SalesInvoices' ? 'sales' : 'service',
                         ];
                     }
                 }
@@ -379,7 +508,6 @@ try {
 
         $isInvoiced = false;
         $matchedInvoiceId = '';
-        $matchedInvoiceType = '';
         if ($jobNo !== '') {
             $candidateKeys = [];
             if ($jobTaskNo !== '') {
@@ -393,7 +521,6 @@ try {
                 if (isset($invoiceKeys[$candidateKey])) {
                     $isInvoiced = true;
                     $matchedInvoiceId = (string) (($invoiceKeys[$candidateKey]['id'] ?? '') ?: '');
-                    $matchedInvoiceType = (string) (($invoiceKeys[$candidateKey]['type'] ?? '') ?: '');
                     break;
                 }
             }
@@ -401,7 +528,6 @@ try {
             if (!$isInvoiced && isset($invoiceJobOnly[$normalizedJobNo])) {
                 $isInvoiced = true;
                 $matchedInvoiceId = (string) (($invoiceJobOnly[$normalizedJobNo]['id'] ?? '') ?: '');
-                $matchedInvoiceType = (string) (($invoiceJobOnly[$normalizedJobNo]['type'] ?? '') ?: '');
             }
 
             if (!$isInvoiced) {
@@ -418,18 +544,17 @@ try {
                     if (isset($invoiceReferences[$referenceCandidate])) {
                         $isInvoiced = true;
                         $matchedInvoiceId = (string) (($invoiceReferences[$referenceCandidate]['id'] ?? '') ?: '');
-                        $matchedInvoiceType = (string) (($invoiceReferences[$referenceCandidate]['type'] ?? '') ?: '');
                         break;
                     }
                 }
             }
         }
 
-        if ($showInvoiced && !$isInvoiced) {
+        if ($invoiceFilter === 'invoiced' && !$isInvoiced) {
             continue;
         }
 
-        if (!$showInvoiced && $isInvoiced) {
+        if ($invoiceFilter === 'uninvoiced' && $isInvoiced) {
             continue;
         }
 
@@ -474,7 +599,6 @@ try {
             'Notes' => $notesParts,
             'Notes_Search' => implode("\n", $notesSearchParts),
             'Invoice_Id' => $matchedInvoiceId,
-            'Invoice_Type' => $matchedInvoiceType,
             'Job_No' => $jobNo,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
         ];
@@ -491,6 +615,9 @@ $initialData = [
     'company' => $selectedCompany,
     'from_month' => $fromMonthValue,
     'to_month' => $toMonthValue,
+    'invoice_filter' => $invoiceFilter,
+    'memo_column_settings' => $memoColumnSettings,
+    'save_user_settings_url' => 'index.php?action=save_user_settings',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
     'error' => $errorMessage,
@@ -561,22 +688,83 @@ $initialData = [
             background: #1a438e;
         }
 
-        .toggle-mode-btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            text-decoration: none;
-            font: inherit;
-            border: 1px solid #0f766e;
-            border-radius: 8px;
-            padding: 7px 10px;
-            background: #0f766e;
-            color: #fff;
-            font-weight: 700;
+        .memo-menu-wrap {
+            position: relative;
+            margin-left: auto;
         }
 
-        .toggle-mode-btn:hover {
-            background: #0d625c;
+        .memo-menu-trigger {
+            display: inline-flex;
+            align-items: center;
+            border: 1px solid #334155;
+            background: #334155;
+            color: #fff;
+            border-radius: 8px;
+            padding: 7px 10px;
+            font: inherit;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .memo-menu-trigger:hover {
+            background: #1f2937;
+        }
+
+        .memo-menu-panel {
+            position: absolute;
+            top: calc(100% + 6px);
+            right: 0;
+            min-width: 320px;
+            background: #fff;
+            border: 1px solid #dbe3ee;
+            border-radius: 10px;
+            box-shadow: 0 10px 20px rgba(15, 23, 42, 0.16);
+            padding: 10px;
+            z-index: 30;
+            display: none;
+        }
+
+        .memo-menu-panel.is-open {
+            display: block;
+        }
+
+        .memo-menu-title {
+            font-weight: 700;
+            color: #334155;
+            margin-bottom: 6px;
+        }
+
+        .memo-menu-actions {
+            display: flex;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .memo-menu-action-btn {
+            border: 1px solid #c8d3e1;
+            background: #f8fafc;
+            color: #1f2937;
+            border-radius: 6px;
+            padding: 4px 8px;
+            font: inherit;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+
+        .memo-menu-action-btn:hover {
+            background: #eef2f7;
+        }
+
+        .memo-menu-option {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 0;
+        }
+
+        .memo-menu-option input {
+            margin: 0;
         }
 
         .summary {
@@ -589,6 +777,10 @@ $initialData = [
             justify-content: flex-start;
             gap: 10px;
             margin-bottom: 12px;
+        }
+
+        .workorders-table {
+            font-size: 9pt;
         }
 
         .export-btn {
@@ -842,6 +1034,7 @@ $initialData = [
             border-collapse: collapse;
             overflow: visible;
             border-radius: 10px;
+            table-layout: fixed;
         }
 
         th,
@@ -849,7 +1042,7 @@ $initialData = [
             border-bottom: 1px solid #e7edf5;
             padding: 10px 12px;
             text-align: left;
-            min-width: 100px;
+            min-width: 0;
             vertical-align: top;
         }
 
@@ -857,7 +1050,7 @@ $initialData = [
             background: #f1f5fb;
             color: #203a63;
             font-weight: 700;
-            white-space: nowrap;
+            white-space: normal;
             position: sticky;
             top: 0;
             z-index: 5;
@@ -866,6 +1059,151 @@ $initialData = [
         th[role="button"] {
             cursor: pointer;
             user-select: none;
+        }
+
+        .column-header-label {
+            display: block;
+            white-space: normal;
+            line-height: 1.15;
+            word-break: normal;
+            overflow-wrap: normal;
+            hyphens: auto;
+        }
+
+        th.col-compact,
+        td.col-compact {
+            width: 88px;
+            min-width: 88px;
+            max-width: 88px;
+            padding: 8px 8px;
+        }
+
+        td.col-compact {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        th.col-status,
+        td.col-status {
+            width: 96px;
+            min-width: 96px;
+            max-width: 96px;
+        }
+
+        th.col-workorder,
+        td.col-workorder {
+            width: 78px;
+            min-width: 78px;
+            max-width: 78px;
+        }
+
+        th.col-ordertype,
+        td.col-ordertype {
+            width: 72px;
+            min-width: 72px;
+            max-width: 72px;
+        }
+
+        th.col-project-no,
+        td.col-project-no {
+            width: 86px;
+            min-width: 86px;
+            max-width: 86px;
+        }
+
+        th.col-customer-id,
+        td.col-customer-id {
+            width: 66px;
+            min-width: 66px;
+            max-width: 66px;
+        }
+
+        th.col-start-date,
+        td.col-start-date {
+            width: 78px;
+            min-width: 78px;
+            max-width: 78px;
+        }
+
+        th.col-equipment-number,
+        td.col-equipment-number {
+            width: 92px;
+            min-width: 92px;
+            max-width: 92px;
+        }
+
+        td.col-workorder,
+        td.col-ordertype,
+        td.col-project-no,
+        td.col-customer-id,
+        td.col-start-date,
+        td.col-equipment-number {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        th.col-compact-cost-center,
+        td.col-compact-cost-center {
+            width: 62px;
+            min-width: 62px;
+            max-width: 62px;
+        }
+
+        th.col-notes,
+        td.col-notes {
+            width: 76px;
+            min-width: 76px;
+            max-width: 76px;
+            text-align: center;
+            padding: 8px 6px;
+        }
+
+        th.cost-center-th {
+            white-space: normal;
+            min-width: 62px;
+        }
+
+        .cost-center-filter-wrap {
+            margin-top: 6px;
+        }
+
+        .cost-center-filter {
+            width: 100%;
+            box-sizing: border-box;
+            font: inherit;
+            border: 1px solid #c8d3e1;
+            border-radius: 6px;
+            padding: 3px 4px;
+            background: #fff;
+        }
+
+        .memo-cell-full {
+            white-space: pre-wrap;
+            min-width: 180px;
+            font-size: 7pt;
+        }
+
+        th.col-memo-remarks,
+        td.col-memo-remarks {
+            width: 120px;
+            min-width: 120px;
+            max-width: 120px;
+        }
+
+        td.col-memo-remarks {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .memo-cell-clickable {
+            cursor: pointer;
+        }
+
+        .memo-cell-clickable:hover {
+            background: #f8fafc;
         }
 
         th[role="button"]:hover {
@@ -908,11 +1246,32 @@ $initialData = [
         <input id="fromMonth" type="month" name="from_month" value="<?= htmlspecialchars($fromMonthValue) ?>">
         <label for="toMonth">Tot</label>
         <input id="toMonth" type="month" name="to_month" value="<?= htmlspecialchars($toMonthValue) ?>">
-        <?php if ($showInvoiced): ?>
-            <input type="hidden" name="gefactureerd" value="true">
-        <?php endif; ?>
+        <label for="invoiceFilter">Factuurfilter</label>
+        <select id="invoiceFilter" name="invoice_filter">
+            <option value="both" <?= $invoiceFilter === 'both' ? 'selected' : '' ?>>Beide</option>
+            <option value="uninvoiced" <?= $invoiceFilter === 'uninvoiced' ? 'selected' : '' ?>>Ongefactureerd</option>
+            <option value="invoiced" <?= $invoiceFilter === 'invoiced' ? 'selected' : '' ?>>Gefactureerd</option>
+        </select>
         <button type="submit">Toon</button>
-        <a href="<?= htmlspecialchars($toggleUrl) ?>" class="toggle-mode-btn"><?= htmlspecialchars($toggleLabel) ?></a>
+        <div class="memo-menu-wrap" id="memoMenuWrap">
+            <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Memo kolommen</button>
+            <div class="memo-menu-panel" id="memoMenuPanel">
+                <div class="memo-menu-title">Toon als eigen kolom</div>
+                <div class="memo-menu-actions">
+                    <button type="button" class="memo-menu-action-btn" id="memoMenuAll">Alles</button>
+                    <button type="button" class="memo-menu-action-btn" id="memoMenuNone">Niets</button>
+                </div>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo">KVT Memo</label>
+                <label class="memo-menu-option"><input type="checkbox"
+                        data-memo-key="Memo_KVT_Memo_Internal_Use_Only">KVT Memo Internal Use Only</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">KVT Memo
+                    Invoice</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">KVT
+                    Memo Billing Details</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">KVT
+                    Remarks Invoicing</label>
+            </div>
+        </div>
         <noscript><button type="submit">Toon</button></noscript>
     </form>
 

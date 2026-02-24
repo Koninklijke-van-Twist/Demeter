@@ -4,32 +4,58 @@
     const payload = window.workorderOverviewData || {};
     const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
     const error = typeof payload.error === 'string' ? payload.error : null;
-    const showInvoiced = payload.gefactureerd === true;
-    const columns = [
+    const invoiceFilter = typeof payload.invoice_filter === 'string' ? payload.invoice_filter : 'both';
+    const showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
+    const baseColumns = [
         { key: 'No', label: 'Werkorder' },
         { key: 'Order_Type', label: 'Ordertype' },
-        { key: 'Customer_Id', label: 'Klant id' },
+        { key: 'Job_No', label: 'Project No' },
+        { key: 'Customer_Id', label: 'Klant No' },
         { key: 'Customer_Name', label: 'Klantnaam' },
         { key: 'Start_Date', label: 'Startdatum' },
-        { key: 'Equipment_Number', label: 'Equipment nummer' },
+        { key: 'Equipment_Number', label: 'Equipment No' },
         { key: 'Description', label: 'Omschrijving' },
         { key: 'Actual_Costs', label: 'Werkelijke kosten' },
         { key: 'Total_Revenue', label: 'Totaalopbrengst' },
         { key: 'Actual_Total', label: 'Werkelijk totaal' },
         { key: 'Cost_Center', label: 'Kostenplaats' },
-        { key: 'Status', label: 'Status' },
-        { key: 'Notes', label: 'Notities' }
+        { key: 'Status', label: 'Status' }
     ];
-    if (showInvoiced)
+    const memoFields = [
+        { key: 'Memo_KVT_Memo', label: 'KVT_Memo', noteLabel: 'KVT_Memo' },
+        { key: 'Memo_KVT_Memo_Internal_Use_Only', label: 'KVT_Memo_Internal_Use_Only', noteLabel: 'KVT_Memo_Internal_Use_Only' },
+        { key: 'Memo_KVT_Memo_Invoice', label: 'KVT_Memo_Invoice', noteLabel: 'KVT_Memo_Invoice' },
+        { key: 'Memo_KVT_Memo_Billing_Details', label: 'KVT_Memo_Billing_Details', noteLabel: 'KVT_Memo_Billing_Details' },
+        { key: 'Memo_KVT_Remarks_Invoicing', label: 'KVT_Remarks_Invoicing', noteLabel: 'KVT_Remarks_Invoicing' }
+    ];
+    const memoFieldByKey = {};
+    for (const field of memoFields)
     {
-        columns.push({ key: 'Invoice_Id', label: 'Invoice ID' });
-        columns.push({ key: 'Invoice_Type', label: 'Invoice Type' });
+        memoFieldByKey[field.key] = field;
     }
+
+    const loadedMemoSettings = payload && typeof payload.memo_column_settings === 'object' && payload.memo_column_settings !== null
+        ? payload.memo_column_settings
+        : {};
+    const saveUserSettingsUrl = typeof payload.save_user_settings_url === 'string' ? payload.save_user_settings_url : 'index.php?action=save_user_settings';
+    const selectedMemoColumnKeys = new Set();
+    for (const field of memoFields)
+    {
+        if (loadedMemoSettings[field.key] !== false)
+        {
+            selectedMemoColumnKeys.add(field.key);
+        }
+    }
+
+    let columns = buildTableColumns();
+    const exportColumns = buildExportColumns();
     const sortState = {
         key: 'No',
         direction: 'asc'
     };
     const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
+    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Cost_Center', 'Status']);
+    const costCenterOptions = buildCostCenterOptions();
     const currencyFormatter = new Intl.NumberFormat('nl-NL', {
         style: 'currency',
         currency: 'EUR',
@@ -40,14 +66,24 @@
     const manuallyHiddenStatuses = new Set();
     let statusHintTimeoutId = null;
     let appliedSearchText = '';
+    let selectedCostCenter = 'all';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
     const statusInfoMap = buildStatusInfoMap();
-    initializeDefaultStatusFilters();
+    // initializeDefaultStatusFilters(); // Commented: alles altijd standaard aanzetten.
 
     if (!app)
     {
         return;
     }
+
+    const memoMenuWrap = document.getElementById('memoMenuWrap');
+    const memoMenuTrigger = document.getElementById('memoMenuTrigger');
+    const memoMenuPanel = document.getElementById('memoMenuPanel');
+    const memoMenuAll = document.getElementById('memoMenuAll');
+    const memoMenuNone = document.getElementById('memoMenuNone');
+    const memoMenuInputs = memoMenuPanel
+        ? Array.from(memoMenuPanel.querySelectorAll('input[data-memo-key]'))
+        : [];
 
     if (error)
     {
@@ -59,7 +95,17 @@
     summaryRow.className = 'summary-row';
     const summary = document.createElement('div');
     summary.className = 'summary';
-    summary.textContent = (showInvoiced ? 'Gefactureerde werkorders: ' : 'Niet-gefactureerde werkorders: ') + rows.length;
+    let summaryPrefix = 'Werkorders (beide): ';
+    if (invoiceFilter === 'invoiced')
+    {
+        summaryPrefix = 'Gefactureerde werkorders: ';
+    }
+    else if (invoiceFilter === 'uninvoiced')
+    {
+        summaryPrefix = 'Niet-gefactureerde werkorders: ';
+    }
+
+    summary.textContent = summaryPrefix + rows.length;
     summaryRow.appendChild(summary);
 
     const statusHint = document.createElement('div');
@@ -91,31 +137,8 @@
     const table = document.createElement('table');
     table.className = 'workorders-table';
     const thead = document.createElement('thead');
-    const headRow = document.createElement('tr');
-
-    for (const column of columns)
-    {
-        const th = document.createElement('th');
-        th.setAttribute('role', 'button');
-        th.tabIndex = 0;
-        th.dataset.sortKey = column.key;
-        th.title = 'Klik om te sorteren';
-        th.addEventListener('click', function ()
-        {
-            updateSort(column.key);
-        });
-        th.addEventListener('keydown', function (event)
-        {
-            if (event.key === 'Enter' || event.key === ' ')
-            {
-                event.preventDefault();
-                updateSort(column.key);
-            }
-        });
-        headRow.appendChild(th);
-    }
-
-    thead.appendChild(headRow);
+    let headRow = document.createElement('tr');
+    const headerLabelByKey = {};
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
     table.appendChild(tbody);
@@ -156,8 +179,340 @@
         }
     });
 
+    initializeMemoMenu();
+    renderTableHeader();
     renderHeader();
     renderRows();
+
+    function buildTableColumns ()
+    {
+        const list = baseColumns.slice();
+        const hasGroupedMemoFields = getGroupedMemoFields().length > 0;
+
+        for (const field of memoFields)
+        {
+            if (selectedMemoColumnKeys.has(field.key))
+            {
+                list.push({ key: field.key, label: field.label, isMemoField: true });
+            }
+        }
+
+        if (showInvoiced)
+        {
+            list.push({ key: 'Invoice_Id', label: 'Invoice ID' });
+        }
+
+        if (hasGroupedMemoFields)
+        {
+            list.push({ key: 'Notes', label: 'Notities' });
+        }
+
+        return list;
+    }
+
+    function buildExportColumns ()
+    {
+        const list = baseColumns.slice();
+
+        for (const field of memoFields)
+        {
+            list.push({ key: field.key, label: field.label, isMemoField: true });
+        }
+
+        if (showInvoiced)
+        {
+            list.push({ key: 'Invoice_Id', label: 'Invoice ID' });
+        }
+
+        return list;
+    }
+
+    function getGroupedMemoFields ()
+    {
+        return memoFields.filter(function (field)
+        {
+            return !selectedMemoColumnKeys.has(field.key);
+        });
+    }
+
+    function initializeMemoMenu ()
+    {
+        syncMemoMenuInputs();
+
+        if (memoMenuTrigger && memoMenuPanel)
+        {
+            memoMenuTrigger.addEventListener('click', function ()
+            {
+                memoMenuPanel.classList.toggle('is-open');
+            });
+        }
+
+        if (memoMenuPanel)
+        {
+            memoMenuPanel.addEventListener('click', function (event)
+            {
+                event.stopPropagation();
+            });
+        }
+
+        if (memoMenuWrap)
+        {
+            memoMenuWrap.addEventListener('click', function (event)
+            {
+                event.stopPropagation();
+            });
+        }
+
+        document.addEventListener('click', function ()
+        {
+            if (memoMenuPanel)
+            {
+                memoMenuPanel.classList.remove('is-open');
+            }
+        });
+
+        for (const input of memoMenuInputs)
+        {
+            input.addEventListener('change', function ()
+            {
+                const memoKey = String(input.dataset.memoKey || '');
+                if (!isMemoFieldKey(memoKey))
+                {
+                    return;
+                }
+
+                if (input.checked)
+                {
+                    selectedMemoColumnKeys.add(memoKey);
+                }
+                else
+                {
+                    selectedMemoColumnKeys.delete(memoKey);
+                }
+
+                applyMemoColumnSelection();
+                saveMemoColumnSettings();
+            });
+        }
+
+        if (memoMenuAll)
+        {
+            memoMenuAll.addEventListener('click', function ()
+            {
+                setAllMemoColumnsSelected(true);
+            });
+        }
+
+        if (memoMenuNone)
+        {
+            memoMenuNone.addEventListener('click', function ()
+            {
+                setAllMemoColumnsSelected(false);
+            });
+        }
+    }
+
+    function setAllMemoColumnsSelected (selected)
+    {
+        if (selected)
+        {
+            for (const field of memoFields)
+            {
+                selectedMemoColumnKeys.add(field.key);
+            }
+        }
+        else
+        {
+            selectedMemoColumnKeys.clear();
+        }
+
+        applyMemoColumnSelection();
+        saveMemoColumnSettings();
+    }
+
+    function syncMemoMenuInputs ()
+    {
+        for (const input of memoMenuInputs)
+        {
+            const memoKey = String(input.dataset.memoKey || '');
+            input.checked = selectedMemoColumnKeys.has(memoKey);
+        }
+    }
+
+    function applyMemoColumnSelection ()
+    {
+        columns = buildTableColumns();
+
+        if (!columns.some(function (column)
+        {
+            return column.key === sortState.key;
+        }))
+        {
+            sortState.key = 'No';
+            sortState.direction = 'asc';
+        }
+
+        syncMemoMenuInputs();
+        renderTableHeader();
+        renderHeader();
+        renderRows();
+    }
+
+    function saveMemoColumnSettings ()
+    {
+        const memoColumns = {};
+        for (const field of memoFields)
+        {
+            memoColumns[field.key] = selectedMemoColumnKeys.has(field.key);
+        }
+
+        fetch(saveUserSettingsUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ memo_columns: memoColumns })
+        }).catch(function ()
+        {
+        });
+    }
+
+    function renderTableHeader ()
+    {
+        thead.innerHTML = '';
+        headRow = document.createElement('tr');
+        for (const key of Object.keys(headerLabelByKey))
+        {
+            delete headerLabelByKey[key];
+        }
+
+        for (const column of columns)
+        {
+            const th = document.createElement('th');
+            if (compactColumnKeys.has(column.key))
+            {
+                th.classList.add('col-compact');
+            }
+
+            if (column.key === 'Cost_Center')
+            {
+                th.classList.add('col-compact-cost-center');
+            }
+
+            if (column.key === 'Notes')
+            {
+                th.classList.add('col-notes');
+            }
+
+            if (column.key === 'Status')
+            {
+                th.classList.add('col-status');
+            }
+
+            if (column.key === 'No')
+            {
+                th.classList.add('col-workorder');
+            }
+
+            if (column.key === 'Order_Type')
+            {
+                th.classList.add('col-ordertype');
+            }
+
+            if (column.key === 'Job_No')
+            {
+                th.classList.add('col-project-no');
+            }
+
+            if (column.key === 'Customer_Id')
+            {
+                th.classList.add('col-customer-id');
+            }
+
+            if (column.key === 'Start_Date')
+            {
+                th.classList.add('col-start-date');
+            }
+
+            if (column.key === 'Equipment_Number')
+            {
+                th.classList.add('col-equipment-number');
+            }
+
+            if (column.key === 'Memo_KVT_Remarks_Invoicing')
+            {
+                th.classList.add('col-memo-remarks');
+            }
+
+            th.setAttribute('role', 'button');
+            th.tabIndex = 0;
+            th.dataset.sortKey = column.key;
+            th.title = 'Klik om te sorteren';
+            th.addEventListener('click', function ()
+            {
+                updateSort(column.key);
+            });
+            th.addEventListener('keydown', function (event)
+            {
+                if (event.key === 'Enter' || event.key === ' ')
+                {
+                    event.preventDefault();
+                    updateSort(column.key);
+                }
+            });
+
+            const label = document.createElement('span');
+            label.className = 'column-header-label';
+            th.appendChild(label);
+            headerLabelByKey[column.key] = label;
+
+            if (column.key === 'Cost_Center')
+            {
+                th.classList.add('cost-center-th');
+
+                const filterWrapper = document.createElement('div');
+                filterWrapper.className = 'cost-center-filter-wrap';
+
+                const filterSelect = document.createElement('select');
+                filterSelect.className = 'cost-center-filter';
+
+                const allOption = document.createElement('option');
+                allOption.value = 'all';
+                allOption.textContent = 'Alle';
+                filterSelect.appendChild(allOption);
+
+                for (const optionValue of costCenterOptions)
+                {
+                    const option = document.createElement('option');
+                    option.value = optionValue;
+                    option.textContent = optionValue;
+                    filterSelect.appendChild(option);
+                }
+
+                filterSelect.value = selectedCostCenter;
+                filterSelect.addEventListener('change', function ()
+                {
+                    selectedCostCenter = String(filterSelect.value || 'all');
+                    renderRows();
+                });
+
+                for (const eventName of ['click', 'dblclick', 'mousedown', 'keydown'])
+                {
+                    filterSelect.addEventListener(eventName, function (event)
+                    {
+                        event.stopPropagation();
+                    });
+                }
+
+                filterWrapper.appendChild(filterSelect);
+                th.appendChild(filterWrapper);
+            }
+
+            headRow.appendChild(th);
+        }
+
+        thead.appendChild(headRow);
+    }
 
     function updateSort (key)
     {
@@ -191,7 +546,13 @@
 
             const active = sortState.key === key;
             const arrow = active ? (sortState.direction === 'asc' ? ' ▲' : ' ▼') : '';
-            th.textContent = column.label + arrow;
+            const label = headerLabelByKey[key];
+            if (!label)
+            {
+                continue;
+            }
+
+            label.textContent = formatDisplayLabel(column.label) + arrow;
         }
     }
 
@@ -210,9 +571,81 @@
             for (const column of columns)
             {
                 const td = document.createElement('td');
+                if (compactColumnKeys.has(column.key))
+                {
+                    td.classList.add('col-compact');
+                }
+
+                if (column.key === 'Cost_Center')
+                {
+                    td.classList.add('col-compact-cost-center');
+                }
+
                 if (column.key === 'Notes')
                 {
-                    const hasNotes = Array.isArray(row.Notes) && row.Notes.some(function (part)
+                    td.classList.add('col-notes');
+                }
+
+                if (column.key === 'Status')
+                {
+                    td.classList.add('col-status');
+                }
+
+                if (column.key === 'No')
+                {
+                    td.classList.add('col-workorder');
+                }
+
+                if (column.key === 'Order_Type')
+                {
+                    td.classList.add('col-ordertype');
+                }
+
+                if (column.key === 'Job_No')
+                {
+                    td.classList.add('col-project-no');
+                }
+
+                if (column.key === 'Customer_Id')
+                {
+                    td.classList.add('col-customer-id');
+                }
+
+                if (column.key === 'Start_Date')
+                {
+                    td.classList.add('col-start-date');
+                }
+
+                if (column.key === 'Equipment_Number')
+                {
+                    td.classList.add('col-equipment-number');
+                }
+
+                if (column.key === 'Memo_KVT_Remarks_Invoicing')
+                {
+                    td.classList.add('col-memo-remarks');
+                }
+
+                if (column.key === 'Notes')
+                {
+                    const groupedMemoFields = getGroupedMemoFields();
+                    const groupedLabelSet = new Set(groupedMemoFields.map(function (field)
+                    {
+                        return field.noteLabel;
+                    }));
+
+                    const groupedParts = (Array.isArray(row.Notes) ? row.Notes : []).filter(function (part)
+                    {
+                        const label = String((part && part.label) || '').trim();
+                        if (!groupedLabelSet.has(label))
+                        {
+                            return false;
+                        }
+
+                        return String((part && part.value) || '').trim() !== '';
+                    });
+
+                    const hasNotes = groupedParts.some(function (part)
                     {
                         return String((part && part.value) || '').trim() !== '';
                     });
@@ -225,13 +658,34 @@
                         button.textContent = 'Bekijk';
                         button.addEventListener('click', function ()
                         {
-                            openNotesModal(Array.isArray(row.Notes) ? row.Notes : []);
+                            openNotesModal(groupedParts);
                         });
                         td.appendChild(button);
                     }
                     else
                     {
                         td.textContent = '';
+                    }
+                }
+                else if (isMemoFieldKey(column.key))
+                {
+                    const memoValue = getMemoFieldValue(row, column.key);
+                    td.textContent = memoValue;
+                    td.classList.add('memo-cell-full');
+
+                    if (memoValue.trim() !== '')
+                    {
+                        const memoField = memoFieldByKey[column.key];
+                        td.classList.add('memo-cell-clickable');
+                        td.addEventListener('click', function ()
+                        {
+                            openNotesModal([
+                                {
+                                    label: memoField ? memoField.noteLabel : column.key,
+                                    value: memoValue,
+                                }
+                            ]);
+                        });
                     }
                 }
                 else
@@ -426,15 +880,16 @@
             return true;
         }
 
+        const notesSearch = String(row.Notes_Search || '').toLowerCase();
+        if (notesSearch.includes(appliedSearchText))
+        {
+            return true;
+        }
+
         for (const column of columns)
         {
             if (column.key === 'Notes')
             {
-                const notesSearch = String(row.Notes_Search || '').toLowerCase();
-                if (notesSearch.includes(appliedSearchText))
-                {
-                    return true;
-                }
                 continue;
             }
 
@@ -442,6 +897,16 @@
             {
                 const equipmentValue = getEquipmentDisplayValue(row).toLowerCase();
                 if (equipmentValue.includes(appliedSearchText))
+                {
+                    return true;
+                }
+                continue;
+            }
+
+            if (isMemoFieldKey(column.key))
+            {
+                const memoValue = getMemoFieldValue(row, column.key).toLowerCase();
+                if (memoValue.includes(appliedSearchText))
                 {
                     return true;
                 }
@@ -484,11 +949,41 @@
         return map;
     }
 
+    function buildCostCenterOptions ()
+    {
+        const values = new Set();
+
+        for (const row of rows)
+        {
+            const value = String(row.Cost_Center || '').trim();
+            if (value === '')
+            {
+                continue;
+            }
+
+            values.add(value);
+        }
+
+        return Array.from(values).sort(function (a, b)
+        {
+            return a.localeCompare(b, 'nl', { numeric: true, sensitivity: 'base' });
+        });
+    }
+
     function getVisibleSortedRows ()
     {
         const sorted = rows.slice().sort(compareRows);
         return sorted.filter(function (row)
         {
+            if (selectedCostCenter !== 'all')
+            {
+                const rowCostCenter = String(row.Cost_Center || '').trim();
+                if (rowCostCenter !== selectedCostCenter)
+                {
+                    return false;
+                }
+            }
+
             const statusKey = normalizeStatus(row.Status || '');
             if (hiddenStatuses.has(statusKey))
             {
@@ -503,15 +998,15 @@
     {
         const visibleRows = getVisibleSortedRows();
         const delimiter = ';';
-        const headers = columns.map(function (column)
+        const headers = exportColumns.map(function (column)
         {
-            return column.label;
+            return formatDisplayLabel(column.label);
         });
 
         const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
         for (const row of visibleRows)
         {
-            const values = columns.map(function (column)
+            const values = exportColumns.map(function (column)
             {
                 return getExportValue(row, column.key);
             });
@@ -532,6 +1027,11 @@
 
     function getExportValue (row, key)
     {
+        if (isMemoFieldKey(key))
+        {
+            return getMemoFieldValue(row, key);
+        }
+
         if (key === 'Notes')
         {
             const parts = Array.isArray(row.Notes) ? row.Notes : [];
@@ -591,8 +1091,8 @@
             return sortState.direction === 'asc' ? difference : -difference;
         }
 
-        const left = normalizeSortValue(a[sortState.key]);
-        const right = normalizeSortValue(b[sortState.key]);
+        const left = normalizeSortValue(getColumnValueForSorting(a, sortState.key));
+        const right = normalizeSortValue(getColumnValueForSorting(b, sortState.key));
 
         const comparison = left.localeCompare(right, 'nl', { numeric: true, sensitivity: 'base' });
         return sortState.direction === 'asc' ? comparison : -comparison;
@@ -601,6 +1101,66 @@
     function normalizeSortValue (value)
     {
         return String(value || '').trim();
+    }
+
+    function formatDisplayLabel (value)
+    {
+        return String(value || '').replaceAll('_', ' ').trim();
+    }
+
+    function isMemoFieldKey (key)
+    {
+        return Object.prototype.hasOwnProperty.call(memoFieldByKey, key);
+    }
+
+    function getMemoFieldValue (row, memoKey)
+    {
+        if (!row || typeof row !== 'object')
+        {
+            return '';
+        }
+
+        if (!row.__memoValues)
+        {
+            const mappedValues = {};
+            const parts = Array.isArray(row.Notes) ? row.Notes : [];
+
+            for (const part of parts)
+            {
+                const label = String((part && part.label) || '').trim();
+                if (label === '')
+                {
+                    continue;
+                }
+
+                mappedValues[label] = String((part && part.value) || '');
+            }
+
+            row.__memoValues = mappedValues;
+        }
+
+        const field = memoFieldByKey[memoKey];
+        if (!field)
+        {
+            return '';
+        }
+
+        return String(row.__memoValues[field.noteLabel] || '');
+    }
+
+    function getColumnValueForSorting (row, key)
+    {
+        if (key === 'Equipment_Number')
+        {
+            return getEquipmentDisplayValue(row);
+        }
+
+        if (isMemoFieldKey(key))
+        {
+            return getMemoFieldValue(row, key);
+        }
+
+        return row[key];
     }
 
     function formatCurrencyOrEmpty (value)
