@@ -1791,7 +1791,16 @@ $initialData = [
             padding: 10px 12px;
             text-align: left;
             min-width: 0;
+            max-width: 220px;
             vertical-align: top;
+        }
+
+        td {
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
 
         th {
@@ -1827,9 +1836,9 @@ $initialData = [
         }
 
         td.col-compact {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
         }
 
         th.col-status,
@@ -1887,9 +1896,9 @@ $initialData = [
         td.col-customer-id,
         td.col-start-date,
         td.col-equipment-number {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
         }
 
         td.invoice-id-clickable {
@@ -1948,6 +1957,7 @@ $initialData = [
         .memo-cell-full {
             white-space: pre-wrap;
             min-width: 180px;
+            max-width: 220px;
             font-size: 7pt;
         }
 
@@ -1959,9 +1969,9 @@ $initialData = [
         }
 
         td.col-memo-remarks {
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
+            white-space: normal;
+            overflow: visible;
+            text-overflow: clip;
         }
 
         .memo-cell-clickable {
