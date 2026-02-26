@@ -1,8 +1,18 @@
 (function ()
 {
     const app = document.getElementById('app');
+    const pageLoader = document.getElementById('pageLoader');
+    const pageLoaderText = document.getElementById('pageLoaderText');
+    const controlsForm = document.querySelector('form.controls');
+    const companySelect = document.getElementById('companySelect');
+    const fromMonthInput = document.getElementById('fromMonth');
+    const toMonthInput = document.getElementById('toMonth');
+    const invoiceFilterSelect = document.getElementById('invoiceFilter');
     const payload = window.workorderOverviewData || {};
     const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
+    const invoiceDetailsById = payload && typeof payload.invoice_details_by_id === 'object' && payload.invoice_details_by_id !== null
+        ? payload.invoice_details_by_id
+        : {};
     const error = typeof payload.error === 'string' ? payload.error : null;
     const invoiceFilter = typeof payload.invoice_filter === 'string' ? payload.invoice_filter : 'both';
     const showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
@@ -53,8 +63,13 @@
         key: 'No',
         direction: 'asc'
     };
+    const amountColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
     const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
     const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Cost_Center', 'Status']);
+    const workorderAmountTooltip = 'Geen factuur gevonden voor deze werkorder - kosten en opbrengst worden gehaald uit de werkordergegevens.';
+    const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
+    const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
+    const invoiceAmountModalMessage = 'Deze bedragen komen direct uit de gekoppelde factuur en gelden als de meest betrouwbare bron.';
     const costCenterOptions = buildCostCenterOptions();
     const currencyFormatter = new Intl.NumberFormat('nl-NL', {
         style: 'currency',
@@ -71,8 +86,11 @@
     const statusInfoMap = buildStatusInfoMap();
     // initializeDefaultStatusFilters(); // Commented: alles altijd standaard aanzetten.
 
+    initializePageLoaderHandlers();
+
     if (!app)
     {
+        hidePageLoader();
         return;
     }
 
@@ -88,6 +106,7 @@
     if (error)
     {
         app.innerHTML = '<div class="error">Fout bij ophalen van OData: ' + escapeHtml(error) + '</div>';
+        hidePageLoader();
         return;
     }
 
@@ -131,18 +150,23 @@
         empty.className = 'empty';
         empty.textContent = 'Geen open werkorders gevonden.';
         app.appendChild(empty);
+        hidePageLoader();
         return;
     }
 
     const table = document.createElement('table');
     table.className = 'workorders-table';
+    const tableScrollWrap = document.createElement('div');
+    tableScrollWrap.className = 'table-scroll-wrap';
     const thead = document.createElement('thead');
     let headRow = document.createElement('tr');
     const headerLabelByKey = {};
     table.appendChild(thead);
     const tbody = document.createElement('tbody');
     table.appendChild(tbody);
-    app.appendChild(table);
+    tableScrollWrap.appendChild(table);
+    app.appendChild(tableScrollWrap);
+    initializeTableDragScroll(tableScrollWrap);
 
     const noSearchResults = document.createElement('div');
     noSearchResults.className = 'empty table-no-results';
@@ -156,7 +180,7 @@
     notesOverlay.innerHTML = [
         '<div class="notes-modal" role="dialog" aria-modal="true" aria-label="Notities">',
         '<div class="notes-modal-head">',
-        '<strong>Notities</strong>',
+        '<strong class="notes-modal-title">Notities</strong>',
         '<button type="button" class="notes-close">Sluiten</button>',
         '</div>',
         '<div class="notes-modal-body"></div>',
@@ -165,6 +189,7 @@
     app.appendChild(notesOverlay);
 
     const notesBody = notesOverlay.querySelector('.notes-modal-body');
+    const notesModalTitle = notesOverlay.querySelector('.notes-modal-title');
     const notesCloseButton = notesOverlay.querySelector('.notes-close');
 
     if (notesCloseButton)
@@ -183,6 +208,169 @@
     renderTableHeader();
     renderHeader();
     renderRows();
+    hidePageLoader();
+
+    function initializePageLoaderHandlers ()
+    {
+        if (controlsForm)
+        {
+            controlsForm.addEventListener('submit', function ()
+            {
+                showPageLoader('Gegevens laden...');
+            });
+        }
+
+        const reloadTriggerInputs = [companySelect, fromMonthInput, toMonthInput, invoiceFilterSelect].filter(Boolean);
+        for (const inputElement of reloadTriggerInputs)
+        {
+            inputElement.addEventListener('change', function ()
+            {
+                if (inputElement === fromMonthInput || inputElement === toMonthInput || inputElement === invoiceFilterSelect)
+                {
+                    showPageLoader('Filter toepassen...');
+                    return;
+                }
+
+                showPageLoader('Gegevens laden...');
+            });
+        }
+
+        window.addEventListener('beforeunload', function ()
+        {
+            showPageLoader('Gegevens laden...');
+        });
+    }
+
+    function initializeTableDragScroll (scrollElement)
+    {
+        if (!scrollElement)
+        {
+            return;
+        }
+
+        let isPointerDown = false;
+        let hasDragged = false;
+        let suppressClick = false;
+        let startClientX = 0;
+        let startClientY = 0;
+        let startScrollLeft = 0;
+        let startScrollTop = 0;
+        let startWindowScrollY = 0;
+
+        const interactiveSelector = 'button, input, select, textarea, a, [role="button"], .notes-btn, .memo-cell-clickable, .invoice-id-clickable, .amount-info-clickable';
+
+        function endDrag ()
+        {
+            if (!isPointerDown)
+            {
+                return;
+            }
+
+            isPointerDown = false;
+            scrollElement.classList.remove('is-dragging-scroll');
+            document.body.classList.remove('dragging-table-scroll');
+
+            if (hasDragged)
+            {
+                suppressClick = true;
+                window.setTimeout(function ()
+                {
+                    suppressClick = false;
+                }, 0);
+            }
+        }
+
+        scrollElement.addEventListener('mousedown', function (event)
+        {
+            if (event.button !== 0)
+            {
+                return;
+            }
+
+            const target = event.target;
+            if (target instanceof Element && target.closest(interactiveSelector))
+            {
+                return;
+            }
+
+            isPointerDown = true;
+            hasDragged = false;
+            startClientX = event.clientX;
+            startClientY = event.clientY;
+            startScrollLeft = scrollElement.scrollLeft;
+            startScrollTop = scrollElement.scrollTop;
+            startWindowScrollY = window.scrollY || window.pageYOffset || 0;
+
+            scrollElement.classList.add('is-dragging-scroll');
+            document.body.classList.add('dragging-table-scroll');
+            event.preventDefault();
+        });
+
+        window.addEventListener('mousemove', function (event)
+        {
+            if (!isPointerDown)
+            {
+                return;
+            }
+
+            const deltaX = event.clientX - startClientX;
+            const deltaY = event.clientY - startClientY;
+            if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)
+            {
+                hasDragged = true;
+            }
+
+            scrollElement.scrollLeft = startScrollLeft - deltaX;
+
+            if (scrollElement.scrollHeight > scrollElement.clientHeight)
+            {
+                scrollElement.scrollTop = startScrollTop - deltaY;
+            }
+            else
+            {
+                window.scrollTo(window.scrollX, startWindowScrollY - deltaY);
+            }
+        });
+
+        window.addEventListener('mouseup', endDrag);
+        window.addEventListener('blur', endDrag);
+
+        scrollElement.addEventListener('click', function (event)
+        {
+            if (!suppressClick)
+            {
+                return;
+            }
+
+            event.preventDefault();
+            event.stopPropagation();
+        }, true);
+    }
+
+    function showPageLoader (text)
+    {
+        if (!pageLoader)
+        {
+            return;
+        }
+
+        if (pageLoaderText && typeof text === 'string' && text.trim() !== '')
+        {
+            pageLoaderText.textContent = text;
+        }
+
+        pageLoader.classList.add('is-visible');
+    }
+
+    function hidePageLoader ()
+    {
+        if (!pageLoader)
+        {
+            return;
+        }
+
+        pageLoader.classList.remove('is-visible');
+    }
 
     function buildTableColumns ()
     {
@@ -199,7 +387,7 @@
 
         if (showInvoiced)
         {
-            list.push({ key: 'Invoice_Id', label: 'Invoice ID' });
+            list.push({ key: 'Invoice_Id', label: 'Factuur ID' });
         }
 
         if (hasGroupedMemoFields)
@@ -221,7 +409,7 @@
 
         if (showInvoiced)
         {
-            list.push({ key: 'Invoice_Id', label: 'Invoice ID' });
+            list.push({ key: 'Invoice_Id', label: 'Factuur ID' });
         }
 
         return list;
@@ -565,6 +753,8 @@
         {
             const tr = document.createElement('tr');
             const statusKey = normalizeStatus(row.Status || '');
+            const workorderAmountCells = [];
+            let invoiceIdCell = null;
 
             tr.className = 'status-' + statusKey;
 
@@ -624,6 +814,11 @@
                 if (column.key === 'Memo_KVT_Remarks_Invoicing')
                 {
                     td.classList.add('col-memo-remarks');
+                }
+
+                if (column.key === 'Invoice_Id')
+                {
+                    invoiceIdCell = td;
                 }
 
                 if (column.key === 'Notes')
@@ -723,13 +918,87 @@
                         }
                     }
                 }
+
+                if (amountColumnKeys.has(column.key))
+                {
+                    const amountSourceInfo = getAmountSourceInfo(column.key, row);
+                    if (amountSourceInfo.source === 'invoice')
+                    {
+                        td.title = invoiceAmountTooltip;
+                    }
+                    else if (amountSourceInfo.source === 'mixed')
+                    {
+                        td.title = 'Deze waarde is samengesteld uit meerdere bronnen (factuur en werkorder). Klik voor details.';
+                    }
+                    else
+                    {
+                        td.title = workorderAmountTooltip;
+                    }
+                    td.classList.add('amount-info-clickable');
+                    td.addEventListener('click', function ()
+                    {
+                        openAmountSourceModal(column.key, row);
+                    });
+
+                    const matchPath = String(row.Invoice_Match_Path || '').trim();
+                    if (amountSourceInfo.source === 'invoice' && matchPath === 'project_dimension_2')
+                    {
+                        td.classList.add('amount-underline-project');
+                    }
+                    else if (amountSourceInfo.source !== 'invoice')
+                    {
+                        td.classList.add('amount-underline-workorder');
+                        workorderAmountCells.push(td);
+                    }
+                }
+
+                if (column.key === 'Invoice_Id')
+                {
+                    const invoiceIdValue = String(row.Invoice_Id || '').trim();
+                    if (invoiceIdValue !== '')
+                    {
+                        const matchPath = String(row.Invoice_Match_Path || '').trim();
+                        const invoiceSuffix = matchPath === 'project_dimension_2' ? ' (PRJ)' : ' (WO)';
+                        td.textContent = invoiceIdValue + invoiceSuffix;
+                        td.classList.add('invoice-id-clickable');
+                        td.title = 'Klik voor factuurdetails';
+                        td.addEventListener('click', function ()
+                        {
+                            openInvoiceDetailsModal(invoiceIdValue);
+                        });
+                    }
+                }
+
                 tr.appendChild(td);
+            }
+
+            if (workorderAmountCells.length > 0 && invoiceIdCell)
+            {
+                for (const amountCell of workorderAmountCells)
+                {
+                    amountCell.addEventListener('mouseenter', function ()
+                    {
+                        triggerInvoiceCellBlink(invoiceIdCell);
+                    });
+
+                    amountCell.addEventListener('mouseleave', function ()
+                    {
+                        invoiceIdCell.classList.remove('invoice-cell-blink');
+                    });
+                }
             }
 
             tbody.appendChild(tr);
         }
 
         noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+    }
+
+    function triggerInvoiceCellBlink (cell)
+    {
+        cell.classList.remove('invoice-cell-blink');
+        void cell.offsetWidth;
+        cell.classList.add('invoice-cell-blink');
     }
 
     function renderStatusButtons ()
@@ -1305,6 +1574,11 @@
             return;
         }
 
+        if (notesModalTitle)
+        {
+            notesModalTitle.textContent = 'Notities';
+        }
+
         notesBody.innerHTML = '';
         let hasVisibleNotes = false;
 
@@ -1340,6 +1614,214 @@
             empty.textContent = 'Geen notities beschikbaar.';
             notesBody.appendChild(empty);
         }
+
+        notesOverlay.style.display = '';
+    }
+
+    function openInvoiceDetailsModal (invoiceId)
+    {
+        if (!notesBody)
+        {
+            return;
+        }
+
+        const normalizedInvoiceId = String(invoiceId || '').trim();
+        const details = invoiceDetailsById[normalizedInvoiceId];
+
+        if (notesModalTitle)
+        {
+            notesModalTitle.textContent = normalizedInvoiceId === ''
+                ? 'Factuurdetails'
+                : 'Factuurdetails: ' + normalizedInvoiceId;
+        }
+
+        notesBody.innerHTML = '';
+
+        if (!details || typeof details !== 'object')
+        {
+            const empty = document.createElement('div');
+            empty.textContent = 'Geen factuurdetails beschikbaar.';
+            notesBody.appendChild(empty);
+            notesOverlay.style.display = '';
+            return;
+        }
+
+        const entries = Object.entries(details);
+        if (entries.length === 0)
+        {
+            const empty = document.createElement('div');
+            empty.textContent = 'Geen factuurdetails beschikbaar.';
+            notesBody.appendChild(empty);
+            notesOverlay.style.display = '';
+            return;
+        }
+
+        for (const detailEntry of entries)
+        {
+            const key = String(detailEntry[0] || '').trim();
+            if (key === '')
+            {
+                continue;
+            }
+
+            const value = detailEntry[1];
+            let valueText = '';
+            if (Array.isArray(value))
+            {
+                valueText = value.join(', ');
+            }
+            else
+            {
+                valueText = String(value ?? '').trim();
+            }
+
+            if (valueText === '')
+            {
+                continue;
+            }
+
+            const section = document.createElement('div');
+            section.className = 'notes-section';
+
+            const heading = document.createElement('div');
+            heading.className = 'notes-section-title';
+            heading.textContent = key.replaceAll('_', ' ');
+
+            const content = document.createElement('pre');
+            content.className = 'notes-section-text';
+            content.textContent = valueText;
+
+            section.appendChild(heading);
+            section.appendChild(content);
+            notesBody.appendChild(section);
+        }
+
+        if (notesBody.children.length === 0)
+        {
+            const empty = document.createElement('div');
+            empty.textContent = 'Geen factuurdetails beschikbaar.';
+            notesBody.appendChild(empty);
+        }
+
+        notesOverlay.style.display = '';
+    }
+
+    function getAmountSourceInfo (columnKey, row)
+    {
+        const safeRow = row && typeof row === 'object' ? row : {};
+
+        if (columnKey === 'Actual_Costs')
+        {
+            return {
+                source: safeRow.Actual_Costs_Source === 'invoice' ? 'invoice' : 'workorder',
+                reason: String(safeRow.Actual_Costs_Source_Reason || '').trim(),
+                label: 'Werkelijke kosten'
+            };
+        }
+
+        if (columnKey === 'Total_Revenue')
+        {
+            return {
+                source: safeRow.Total_Revenue_Source === 'invoice' ? 'invoice' : 'workorder',
+                reason: String(safeRow.Total_Revenue_Source_Reason || '').trim(),
+                label: 'Totaalopbrengst'
+            };
+        }
+
+        return {
+            source: safeRow.Actual_Total_Source === 'invoice' ? 'invoice' : (safeRow.Actual_Total_Source === 'workorder' ? 'workorder' : 'mixed'),
+            reason: String(safeRow.Actual_Total_Source_Reason || '').trim(),
+            label: 'Werkelijk totaal'
+        };
+    }
+
+    function openAmountSourceModal (columnKey, row)
+    {
+        if (!notesBody)
+        {
+            return;
+        }
+
+        const sourceInfo = getAmountSourceInfo(columnKey, row);
+        const source = sourceInfo.source;
+        const diagnostics = row && typeof row === 'object' ? row : {};
+        const sourceReason = String(diagnostics.Amount_Source_Reason || '').trim();
+        const matchPath = String(diagnostics.Invoice_Match_Path || '').trim();
+        const matchSource = String(diagnostics.Invoice_Match_Source || '').trim();
+        const invoiceId = String(diagnostics.Invoice_Id || '').trim();
+        const invoiceBasisLabel = matchPath === 'project_dimension_2' ? 'projectbasis' : 'werkorderbasis';
+        const message = source === 'invoice'
+            ? invoiceAmountModalMessage + ' Gevonden op ' + invoiceBasisLabel + '.'
+            : (source === 'workorder' ? workorderAmountModalMessage : 'Dit totaal gebruikt een combinatie van bronnen (factuur en werkorder).');
+        let matchPathLabel = '(onbekend)';
+        if (matchPath === 'job_task')
+        {
+            matchPathLabel = 'Werkorderbasis (job + taak)';
+        }
+        else if (matchPath === 'job')
+        {
+            matchPathLabel = 'Werkorderbasis (job)';
+        }
+        else if (matchPath === 'reference')
+        {
+            matchPathLabel = 'Referentie-match (document/referentie)';
+        }
+        else if (matchPath === 'project_dimension_2')
+        {
+            matchPathLabel = 'Projectbasis, niet werkorderbasis';
+        }
+        else if (matchPath === 'none')
+        {
+            matchPathLabel = 'Geen match';
+        }
+
+        const projectMatchNote = matchPath === 'project_dimension_2'
+            ? 'Let op: deze factuur is op projectbasis gematcht, niet op werkordernummer.'
+            : '';
+
+        if (notesModalTitle)
+        {
+            notesModalTitle.textContent = 'Herkomst bedragen';
+        }
+
+        notesBody.innerHTML = '';
+
+        const section = document.createElement('div');
+        section.className = 'notes-section';
+
+        const heading = document.createElement('div');
+        heading.className = 'notes-section-title';
+        heading.textContent = sourceInfo.label + ' · Bron: ' + (source === 'invoice' ? ('factuur (' + invoiceBasisLabel + ')') : (source === 'workorder' ? 'werkorder' : 'gemengd'));
+
+        const content = document.createElement('pre');
+        content.className = 'notes-section-text';
+        content.textContent = message;
+
+        section.appendChild(heading);
+        section.appendChild(content);
+        notesBody.appendChild(section);
+
+        const diagnosticsSection = document.createElement('div');
+        diagnosticsSection.className = 'notes-section';
+
+        const diagnosticsHeading = document.createElement('div');
+        diagnosticsHeading.className = 'notes-section-title';
+        diagnosticsHeading.textContent = 'Diagnose';
+
+        const diagnosticsContent = document.createElement('pre');
+        diagnosticsContent.className = 'notes-section-text';
+        diagnosticsContent.textContent = [
+            'Factuur ID: ' + (invoiceId === '' ? '(leeg)' : invoiceId),
+            'Matchpad: ' + matchPathLabel,
+            'Matchbron: ' + (matchSource === '' ? '(onbekend)' : matchSource),
+            'Kolomreden: ' + (sourceInfo.reason === '' ? '(geen detail)' : sourceInfo.reason),
+            'Rijreden: ' + (sourceReason === '' ? '(geen detail)' : sourceReason),
+            projectMatchNote,
+        ].join('\n');
+
+        diagnosticsSection.appendChild(diagnosticsHeading);
+        diagnosticsSection.appendChild(diagnosticsContent);
+        notesBody.appendChild(diagnosticsSection);
 
         notesOverlay.style.display = '';
     }

@@ -2,6 +2,16 @@
 
 function consolelog($text)
 {
+    static $enabled = null;
+    if ($enabled === null) {
+        $flag = getenv('DEMETER_DEBUG_ODATA');
+        $enabled = is_string($flag) && in_array(strtolower(trim($flag)), ['1', 'true', 'yes', 'on'], true);
+    }
+
+    if (!$enabled) {
+        return;
+    }
+
     file_put_contents('php://stdout', $text);
 }
 
@@ -123,7 +133,7 @@ function maybe_cleanup_expired_cache_files(): void
 {
     $markerPath = cache_cleanup_marker_path();
     $now = time();
-    $intervalSeconds = 60;
+    $intervalSeconds = 300;
 
     if (is_file($markerPath)) {
         $lastRun = (int) @file_get_contents($markerPath);
@@ -149,13 +159,7 @@ function maybe_cleanup_expired_cache_files(): void
             continue;
         }
 
-        $cached = read_cache_payload($path, 0);
-        if ($cached['delete']) {
-            @unlink($path);
-            continue;
-        }
-
-        $fallbackMaxAge = 86400;
+        $fallbackMaxAge = 21600;
         $age = $now - (int) @filemtime($path);
         if ($age > $fallbackMaxAge) {
             @unlink($path);
