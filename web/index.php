@@ -730,6 +730,20 @@ try {
                         $sourceSeen[$sourceKey] = true;
                     }
 
+                    $sourceInvoiceNo = trim((string) ($invoice['No'] ?? ''));
+                    if ($sourceInvoiceNo !== '') {
+                        if (!isset($invoiceDetailsById[$sourceInvoiceNo])) {
+                            $invoiceDetailsById[$sourceInvoiceNo] = [
+                                'Source' => $entity,
+                                'Invoice_Id' => $sourceInvoiceNo,
+                            ];
+                        }
+
+                        merge_non_empty_invoice_fields($invoiceDetailsById[$sourceInvoiceNo], $invoice);
+                        $invoiceDetailsById[$sourceInvoiceNo]['Source'] = (string) ($invoiceDetailsById[$sourceInvoiceNo]['Source'] ?? $entity);
+                        $invoiceDetailsById[$sourceInvoiceNo]['Invoice_Id'] = $sourceInvoiceNo;
+                    }
+
                     $referenceCandidates = [
                         trim((string) ($invoice['External_Document_No'] ?? '')),
                         trim((string) ($invoice['Your_Reference'] ?? '')),
@@ -738,20 +752,6 @@ try {
                     foreach ($referenceCandidates as $referenceValue) {
                         if ($referenceValue === '') {
                             continue;
-                        }
-
-                        $sourceInvoiceNo = trim((string) ($invoice['No'] ?? ''));
-                        if ($sourceInvoiceNo !== '') {
-                            if (!isset($invoiceDetailsById[$sourceInvoiceNo])) {
-                                $invoiceDetailsById[$sourceInvoiceNo] = [
-                                    'Source' => $entity,
-                                    'Invoice_Id' => $sourceInvoiceNo,
-                                ];
-                            }
-
-                            merge_non_empty_invoice_fields($invoiceDetailsById[$sourceInvoiceNo], $invoice);
-                            $invoiceDetailsById[$sourceInvoiceNo]['Source'] = (string) ($invoiceDetailsById[$sourceInvoiceNo]['Source'] ?? $entity);
-                            $invoiceDetailsById[$sourceInvoiceNo]['Invoice_Id'] = $sourceInvoiceNo;
                         }
 
                         $normalizedReferenceValue = normalize_match_value($referenceValue);
@@ -1137,7 +1137,7 @@ try {
             }
         }
 
-        if ($matchedInvoiceId !== '' && $totalRevenueSource !== 'invoice') {
+        if ($matchedInvoiceId !== '') {
             if (isset($invoiceLineFinancialByType['sales'][$matchedInvoiceId]) && is_array($invoiceLineFinancialByType['sales'][$matchedInvoiceId])) {
                 $salesLineFinancials = $invoiceLineFinancialByType['sales'][$matchedInvoiceId];
                 $salesRevenue = (float) ($salesLineFinancials['revenue'] ?? 0);
@@ -1149,7 +1149,7 @@ try {
                     $actualCostsSourceReason = 'Kosten uit SalesInvoiceSalesLines (afgeleid op Factuur ID).';
                 }
 
-                if ($salesRevenue > 0) {
+                if ($salesRevenue > 0 && $totalRevenueSource !== 'invoice') {
                     $totalRevenue = $salesRevenue;
                     $totalRevenueSource = 'invoice';
                     $totalRevenueSourceReason = 'Opbrengst uit SalesInvoiceSalesLines (afgeleid op Factuur ID).';
@@ -1168,7 +1168,7 @@ try {
                     $actualCostsSourceReason = 'Kosten uit ServiceInvoiceServLines (afgeleid op Factuur ID).';
                 }
 
-                if ($serviceRevenue > 0) {
+                if ($serviceRevenue > 0 && $totalRevenueSource !== 'invoice') {
                     $totalRevenue = $serviceRevenue;
                     $totalRevenueSource = 'invoice';
                     $totalRevenueSourceReason = 'Opbrengst uit ServiceInvoiceServLines (afgeleid op Factuur ID).';
@@ -1665,7 +1665,7 @@ $initialData = [
 
         .amount-underline-project {
             text-decoration-line: underline;
-            text-decoration-color: #60a5fa;
+            text-decoration-color: #60a5fa88;
             text-decoration-thickness: 1px;
             text-underline-offset: 3px;
             text-decoration-skip-ink: none;

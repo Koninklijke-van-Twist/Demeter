@@ -1776,7 +1776,7 @@
         }
 
         const projectMatchNote = matchPath === 'project_dimension_2'
-            ? 'Let op: deze factuur is op projectbasis gematcht, niet op werkordernummer.'
+            ? '⚠️ Let op: deze factuur is op projectbasis gematcht, niet op werkordernummer.'
             : '';
 
         if (notesModalTitle)
