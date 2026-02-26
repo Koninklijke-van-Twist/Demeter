@@ -29,7 +29,8 @@
         { key: 'Total_Revenue', label: 'Totaalopbrengst' },
         { key: 'Actual_Total', label: 'Werkelijk totaal' },
         { key: 'Cost_Center', label: 'Kostenplaats' },
-        { key: 'Status', label: 'Status' }
+        { key: 'Status', label: 'Status' },
+        { key: 'Document_Status', label: 'Documentstatus' }
     ];
     const memoFields = [
         { key: 'Memo_KVT_Memo', label: 'Memo', noteLabel: 'KVT_Memo' },
@@ -65,7 +66,7 @@
     };
     const amountColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
     const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
-    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Cost_Center', 'Status']);
+    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Cost_Center', 'Status', 'Document_Status']);
     const workorderAmountTooltip = 'Geen factuur gevonden voor deze werkorder - kosten en opbrengst worden gehaald uit de werkordergegevens.';
     const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
     const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
@@ -592,7 +593,7 @@
                 th.classList.add('col-notes');
             }
 
-            if (column.key === 'Status')
+            if (column.key === 'Status' || column.key === 'Document_Status')
             {
                 th.classList.add('col-status');
             }
@@ -776,7 +777,7 @@
                     td.classList.add('col-notes');
                 }
 
-                if (column.key === 'Status')
+                if (column.key === 'Status' || column.key === 'Document_Status')
                 {
                     td.classList.add('col-status');
                 }
