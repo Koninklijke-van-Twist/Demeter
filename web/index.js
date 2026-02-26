@@ -32,11 +32,11 @@
         { key: 'Status', label: 'Status' }
     ];
     const memoFields = [
-        { key: 'Memo_KVT_Memo', label: 'KVT_Memo', noteLabel: 'KVT_Memo' },
-        { key: 'Memo_KVT_Memo_Internal_Use_Only', label: 'KVT_Memo_Internal_Use_Only', noteLabel: 'KVT_Memo_Internal_Use_Only' },
-        { key: 'Memo_KVT_Memo_Invoice', label: 'KVT_Memo_Invoice', noteLabel: 'KVT_Memo_Invoice' },
-        { key: 'Memo_KVT_Memo_Billing_Details', label: 'KVT_Memo_Billing_Details', noteLabel: 'KVT_Memo_Billing_Details' },
-        { key: 'Memo_KVT_Remarks_Invoicing', label: 'KVT_Remarks_Invoicing', noteLabel: 'KVT_Remarks_Invoicing' }
+        { key: 'Memo_KVT_Memo', label: 'Memo', noteLabel: 'KVT_Memo' },
+        { key: 'Memo_KVT_Memo_Internal_Use_Only', label: 'Memo Intern Gebruik', noteLabel: 'KVT_Memo_Internal_Use_Only' },
+        { key: 'Memo_KVT_Memo_Invoice', label: 'Memo Factuur', noteLabel: 'KVT_Memo_Invoice' },
+        { key: 'Memo_KVT_Memo_Billing_Details', label: 'Memo Bijzonderheden Facturatie', noteLabel: 'KVT_Memo_Billing_Details' },
+        { key: 'Memo_KVT_Remarks_Invoicing', label: 'Bijzonderheden Facturatie', noteLabel: 'KVT_Remarks_Invoicing' }
     ];
     const memoFieldByKey = {};
     for (const field of memoFields)

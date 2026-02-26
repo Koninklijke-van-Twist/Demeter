@@ -740,7 +740,7 @@ try {
                         }
 
                         merge_non_empty_invoice_fields($invoiceDetailsById[$sourceInvoiceNo], $invoice);
-                        $invoiceDetailsById[$sourceInvoiceNo]['Source'] = (string) ($invoiceDetailsById[$sourceInvoiceNo]['Source'] ?? $entity);
+                        $invoiceDetailsById[$sourceInvoiceNo]['Source'] = $entity;
                         $invoiceDetailsById[$sourceInvoiceNo]['Invoice_Id'] = $sourceInvoiceNo;
                     }
 
@@ -1138,43 +1138,44 @@ try {
         }
 
         if ($matchedInvoiceId !== '') {
-            if (isset($invoiceLineFinancialByType['sales'][$matchedInvoiceId]) && is_array($invoiceLineFinancialByType['sales'][$matchedInvoiceId])) {
-                $salesLineFinancials = $invoiceLineFinancialByType['sales'][$matchedInvoiceId];
-                $salesRevenue = (float) ($salesLineFinancials['revenue'] ?? 0);
-                $salesCosts = (float) ($salesLineFinancials['costs'] ?? 0);
+            $preferredTypes = [];
+            if ($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') {
+                $preferredTypes[] = $resolvedInvoiceSource;
+            }
 
-                if ($salesCosts > 0) {
-                    $actualCosts = $salesCosts;
+            foreach (['sales', 'service'] as $candidateType) {
+                if (!in_array($candidateType, $preferredTypes, true)) {
+                    $preferredTypes[] = $candidateType;
+                }
+            }
+
+            foreach ($preferredTypes as $candidateType) {
+                $candidateFinancials = $invoiceLineFinancialByType[$candidateType][$matchedInvoiceId] ?? null;
+                if (!is_array($candidateFinancials)) {
+                    continue;
+                }
+
+                $candidateRevenue = (float) ($candidateFinancials['revenue'] ?? 0);
+                $candidateCosts = (float) ($candidateFinancials['costs'] ?? 0);
+                $candidateEntity = $candidateType === 'sales' ? 'SalesInvoiceSalesLines' : 'ServiceInvoiceServLines';
+
+                if ($candidateCosts > 0 && $actualCostsSource !== 'invoice') {
+                    $actualCosts = $candidateCosts;
                     $actualCostsSource = 'invoice';
-                    $actualCostsSourceReason = 'Kosten uit SalesInvoiceSalesLines (afgeleid op Factuur ID).';
+                    $actualCostsSourceReason = 'Kosten uit ' . $candidateEntity . ' (afgeleid op Factuur ID).';
                 }
 
-                if ($salesRevenue > 0 && $totalRevenueSource !== 'invoice') {
-                    $totalRevenue = $salesRevenue;
+                if ($candidateRevenue > 0 && $totalRevenueSource !== 'invoice') {
+                    $totalRevenue = $candidateRevenue;
                     $totalRevenueSource = 'invoice';
-                    $totalRevenueSourceReason = 'Opbrengst uit SalesInvoiceSalesLines (afgeleid op Factuur ID).';
+                    $totalRevenueSourceReason = 'Opbrengst uit ' . $candidateEntity . ' (afgeleid op Factuur ID).';
                     $amountSource = 'invoice';
-                    $amountSourceReason = 'Opbrengst uit SalesInvoice-regels gevonden op basis van Factuur ID.';
-                    $resolvedInvoiceSource = 'sales';
-                }
-            } elseif (isset($invoiceLineFinancialByType['service'][$matchedInvoiceId]) && is_array($invoiceLineFinancialByType['service'][$matchedInvoiceId])) {
-                $serviceLineFinancials = $invoiceLineFinancialByType['service'][$matchedInvoiceId];
-                $serviceRevenue = (float) ($serviceLineFinancials['revenue'] ?? 0);
-                $serviceCosts = (float) ($serviceLineFinancials['costs'] ?? 0);
-
-                if ($serviceCosts > 0) {
-                    $actualCosts = $serviceCosts;
-                    $actualCostsSource = 'invoice';
-                    $actualCostsSourceReason = 'Kosten uit ServiceInvoiceServLines (afgeleid op Factuur ID).';
+                    $amountSourceReason = 'Opbrengst uit ' . $candidateEntity . ' gevonden op basis van Factuur ID.';
+                    $resolvedInvoiceSource = $candidateType;
                 }
 
-                if ($serviceRevenue > 0 && $totalRevenueSource !== 'invoice') {
-                    $totalRevenue = $serviceRevenue;
-                    $totalRevenueSource = 'invoice';
-                    $totalRevenueSourceReason = 'Opbrengst uit ServiceInvoiceServLines (afgeleid op Factuur ID).';
-                    $amountSource = 'invoice';
-                    $amountSourceReason = 'Opbrengst uit ServiceInvoice-regels gevonden op basis van Factuur ID.';
-                    $resolvedInvoiceSource = 'service';
+                if ($actualCostsSource === 'invoice' && $totalRevenueSource === 'invoice') {
+                    break;
                 }
             }
         }
@@ -2032,15 +2033,15 @@ $initialData = [
                     <button type="button" class="memo-menu-action-btn" id="memoMenuAll">Alles</button>
                     <button type="button" class="memo-menu-action-btn" id="memoMenuNone">Niets</button>
                 </div>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo">KVT Memo</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo">Memo</label>
                 <label class="memo-menu-option"><input type="checkbox"
-                        data-memo-key="Memo_KVT_Memo_Internal_Use_Only">KVT Memo Internal Use Only</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">KVT Memo
-                    Invoice</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">KVT
-                    Memo Billing Details</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">KVT
-                    Remarks Invoicing</label>
+                        data-memo-key="Memo_KVT_Memo_Internal_Use_Only">Memo Intern Gebruik</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">Memo
+                    Factuur</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">
+                    Memo Bijzonderheden Facturatie</label>
+                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">
+                    Bijzonderheden Facturatie</label>
             </div>
         </div>
         <noscript><button type="submit">Toon</button></noscript>
