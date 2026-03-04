@@ -209,6 +209,7 @@
     renderTableHeader();
     renderHeader();
     renderRows();
+    updateSummaryCount();
     hidePageLoader();
 
     function initializePageLoaderHandlers ()
@@ -682,6 +683,8 @@
                 filterSelect.addEventListener('change', function ()
                 {
                     selectedCostCenter = String(filterSelect.value || 'all');
+                    updateSummaryCount();
+                    renderStatusButtons();
                     renderRows();
                 });
 
@@ -747,6 +750,7 @@
 
     function renderRows ()
     {
+        updateSummaryCount();
         tbody.innerHTML = '';
         const visibleRows = getVisibleSortedRows();
 
@@ -1005,6 +1009,7 @@
     function renderStatusButtons ()
     {
         statusFilterBar.innerHTML = '';
+        const statusCounts = getStatusCountsForSelectedCostCenter();
 
         const title = document.createElement('span');
         title.className = 'status-filter-title';
@@ -1057,7 +1062,7 @@
             const button = document.createElement('button');
             button.type = 'button';
             button.className = 'status-filter-btn status-' + statusKey;
-            button.textContent = info.label + ' (' + info.count + ')';
+            button.textContent = info.label + ' (' + (statusCounts[statusKey] || 0) + ')';
             button.setAttribute('aria-pressed', hiddenStatuses.has(statusKey) ? 'false' : 'true');
 
             if (hiddenStatuses.has(statusKey))
@@ -1238,6 +1243,49 @@
         {
             return a.localeCompare(b, 'nl', { numeric: true, sensitivity: 'base' });
         });
+    }
+
+    function getStatusCountsForSelectedCostCenter ()
+    {
+        const counts = {};
+
+        for (const row of rows)
+        {
+            if (selectedCostCenter !== 'all')
+            {
+                const rowCostCenter = String(row.Cost_Center || '').trim();
+                if (rowCostCenter !== selectedCostCenter)
+                {
+                    continue;
+                }
+            }
+
+            const statusKey = normalizeStatus(row.Status || '');
+            if (!statusKey)
+            {
+                continue;
+            }
+
+            counts[statusKey] = (counts[statusKey] || 0) + 1;
+        }
+
+        return counts;
+    }
+
+    function updateSummaryCount ()
+    {
+        let count = rows.length;
+
+        if (selectedCostCenter !== 'all')
+        {
+            count = rows.filter(function (row)
+            {
+                const rowCostCenter = String(row.Cost_Center || '').trim();
+                return rowCostCenter === selectedCostCenter;
+            }).length;
+        }
+
+        summary.textContent = summaryPrefix + count;
     }
 
     function getVisibleSortedRows ()
