@@ -389,7 +389,7 @@ try {
         }
 
         $workorderUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'Werkorders', [
-            '$select' => 'No,Task_Code,Task_Description,Status,KVT_Document_Status,Job_No,Job_Task_No,External_Document_No,Start_Date,End_Date,Sub_Entity,Sub_Entity_Description,Component_No,Serial_No,Bill_to_Customer_No,Bill_to_Name,KVT_Sum_Work_Order_Cost_Items,KVT_Sum_Work_Order_Cost_Other,KVT_Sum_Work_Order_Revenue,Job_Dimension_1_Value,Memo,Memo_Internal_Use_Only,Memo_Invoice,KVT_Memo_Invoice_Details,KVT_Remarks_Invoicing',
+            '$select' => 'No,Task_Code,Task_Description,Status,KVT_Document_Status,Job_No,Job_Task_No,Contract_No,External_Document_No,Start_Date,End_Date,Sub_Entity,Sub_Entity_Description,Component_No,Serial_No,Bill_to_Customer_No,Bill_to_Name,KVT_Sum_Work_Order_Cost_Items,KVT_Sum_Work_Order_Cost_Other,KVT_Sum_Work_Order_Revenue,Job_Dimension_1_Value,Memo,Memo_Internal_Use_Only,Memo_Invoice,KVT_Memo_Invoice_Details,KVT_Remarks_Invoicing',
             '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
         ]);
 
@@ -1227,6 +1227,7 @@ try {
         $rows[] = [
             'No' => (string) ($workorder['No'] ?? ''),
             'Order_Type' => (string) ($workorder['Task_Code'] ?? ''),
+            'Contract_No' => (string) ($workorder['Contract_No'] ?? ''),
             'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
             'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
             'Equipment_Number' => $equipmentNumber,

@@ -379,6 +379,8 @@
         const list = baseColumns.slice();
         const hasGroupedMemoFields = getGroupedMemoFields().length > 0;
 
+        list.push({ key: 'Contract_No', label: 'Contractnummer' });
+
         for (const field of memoFields)
         {
             if (selectedMemoColumnKeys.has(field.key))
@@ -403,6 +405,8 @@
     function buildExportColumns ()
     {
         const list = baseColumns.slice();
+
+        list.push({ key: 'Contract_No', label: 'Contractnummer' });
 
         for (const field of memoFields)
         {
