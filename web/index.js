@@ -20,6 +20,7 @@
         { key: 'No', label: 'Werkorder' },
         { key: 'Order_Type', label: 'Ordertype' },
         { key: 'Job_No', label: 'Project Nr.' },
+        { key: 'Contract_No', label: 'Contractnummer' },
         { key: 'Customer_Id', label: 'Klant Nr.' },
         { key: 'Customer_Name', label: 'Klantnaam' },
         { key: 'Start_Date', label: 'Startdatum' },
@@ -379,8 +380,6 @@
         const list = baseColumns.slice();
         const hasGroupedMemoFields = getGroupedMemoFields().length > 0;
 
-        list.push({ key: 'Contract_No', label: 'Contractnummer' });
-
         for (const field of memoFields)
         {
             if (selectedMemoColumnKeys.has(field.key))
@@ -405,8 +404,6 @@
     function buildExportColumns ()
     {
         const list = baseColumns.slice();
-
-        list.push({ key: 'Contract_No', label: 'Contractnummer' });
 
         for (const field of memoFields)
         {
@@ -1397,6 +1394,27 @@
 
     function compareRows (a, b)
     {
+        const leftProjectNo = normalizeSortValue(getColumnValueForSorting(a, 'Job_No'));
+        const rightProjectNo = normalizeSortValue(getColumnValueForSorting(b, 'Job_No'));
+        const projectComparison = leftProjectNo.localeCompare(rightProjectNo, 'nl', { numeric: true, sensitivity: 'base' });
+        if (projectComparison !== 0)
+        {
+            return projectComparison;
+        }
+
+        const activeSortComparison = compareRowsByActiveSort(a, b);
+        if (activeSortComparison !== 0)
+        {
+            return activeSortComparison;
+        }
+
+        const leftNo = normalizeSortValue(getColumnValueForSorting(a, 'No'));
+        const rightNo = normalizeSortValue(getColumnValueForSorting(b, 'No'));
+        return leftNo.localeCompare(rightNo, 'nl', { numeric: true, sensitivity: 'base' });
+    }
+
+    function compareRowsByActiveSort (a, b)
+    {
         if (sortState.key === 'Equipment_Number')
         {
             const leftEquipment = getEquipmentDisplayValue(a);
@@ -1415,7 +1433,6 @@
 
         const left = normalizeSortValue(getColumnValueForSorting(a, sortState.key));
         const right = normalizeSortValue(getColumnValueForSorting(b, sortState.key));
-
         const comparison = left.localeCompare(right, 'nl', { numeric: true, sensitivity: 'base' });
         return sortState.direction === 'asc' ? comparison : -comparison;
     }

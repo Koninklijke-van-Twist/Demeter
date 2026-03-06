@@ -1259,6 +1259,11 @@ try {
     }
 
     usort($rows, function (array $a, array $b): int {
+        $projectCompare = strnatcasecmp((string) ($a['Job_No'] ?? ''), (string) ($b['Job_No'] ?? ''));
+        if ($projectCompare !== 0) {
+            return $projectCompare;
+        }
+
         return strnatcasecmp((string) ($a['No'] ?? ''), (string) ($b['No'] ?? ''));
     });
 } catch (Throwable $error) {
