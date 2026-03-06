@@ -1735,7 +1735,7 @@ $initialData = [
             box-sizing: border-box;
             overflow-x: auto;
             overflow-y: auto;
-            max-height: clamp(280px, calc(100dvh - 260px), 75dvh);
+            max-height: 65vh;
             -webkit-overflow-scrolling: touch;
             cursor: grab;
         }
@@ -1790,13 +1790,6 @@ $initialData = [
             position: sticky;
             top: 0;
             z-index: 15;
-        }
-
-        @media (max-width: 900px) {
-            .table-scroll-wrap {
-                max-height: clamp(220px, calc(100vh - 430px), 60vh);
-                max-height: clamp(220px, calc(100dvh - 430px), 60dvh);
-            }
         }
 
         th[role="button"] {
@@ -1984,9 +1977,19 @@ $initialData = [
             border-top: 2px solid #94a3b8;
             border-left: 2px solid #94a3b8;
             border-bottom: 1px solid #d8e1ef;
+            padding: 0;
+            position: relative;
+        }
+
+        .project-group-summary-content {
             position: sticky;
             left: 0;
-            z-index: 10;
+            z-index: 11;
+            display: inline-block;
+            min-width: max-content;
+            padding: 10px 12px;
+            background: #eef4ff;
+            white-space: nowrap;
         }
 
         .project-group-summary-sep {

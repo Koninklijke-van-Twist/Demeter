@@ -131,6 +131,7 @@
     const statusHint = document.createElement('div');
     statusHint.className = 'status-filter-hint';
     statusHint.textContent = 'Tip: dubbel-klik op een filter om alleen die status weer te geven';
+    let tableScrollWrap = null;
 
     const exportButton = document.createElement('button');
     exportButton.type = 'button';
@@ -157,7 +158,7 @@
 
     const table = document.createElement('table');
     table.className = 'workorders-table';
-    const tableScrollWrap = document.createElement('div');
+    tableScrollWrap = document.createElement('div');
     tableScrollWrap.className = 'table-scroll-wrap';
     const thead = document.createElement('thead');
     let headRow = document.createElement('tr');
@@ -168,6 +169,7 @@
     tableScrollWrap.appendChild(table);
     app.appendChild(tableScrollWrap);
     initializeTableDragScroll(tableScrollWrap);
+    initializeTableScrollWrapAutoHeight();
 
     const noSearchResults = document.createElement('div');
     noSearchResults.className = 'empty table-no-results';
@@ -210,6 +212,7 @@
     renderHeader();
     renderRows();
     updateSummaryCount();
+    syncTableScrollWrapMaxHeight();
     hidePageLoader();
 
     function initializePageLoaderHandlers ()
@@ -241,6 +244,63 @@
         {
             showPageLoader('Gegevens laden...');
         });
+    }
+
+    function initializeTableScrollWrapAutoHeight ()
+    {
+        let rafId = 0;
+
+        const scheduleSync = function ()
+        {
+            if (rafId !== 0)
+            {
+                cancelAnimationFrame(rafId);
+            }
+
+            rafId = requestAnimationFrame(function ()
+            {
+                rafId = 0;
+                syncTableScrollWrapMaxHeight();
+            });
+        };
+
+        window.addEventListener('resize', scheduleSync, { passive: true });
+        window.addEventListener('orientationchange', scheduleSync, { passive: true });
+        window.addEventListener('scroll', scheduleSync, { passive: true });
+
+        if (window.visualViewport)
+        {
+            window.visualViewport.addEventListener('resize', scheduleSync, { passive: true });
+            window.visualViewport.addEventListener('scroll', scheduleSync, { passive: true });
+        }
+
+        scheduleSync();
+    }
+
+    function syncTableScrollWrapMaxHeight ()
+    {
+        if (!tableScrollWrap)
+        {
+            return;
+        }
+
+        const viewportHeight = Math.floor(
+            (window.visualViewport && window.visualViewport.height)
+            || window.innerHeight
+            || document.documentElement.clientHeight
+            || 0
+        );
+
+        if (viewportHeight <= 0)
+        {
+            return;
+        }
+
+        const rect = tableScrollWrap.getBoundingClientRect();
+        const bottomViewportPadding = 16;
+        const availableHeight = Math.floor(viewportHeight - rect.top - bottomViewportPadding);
+        const targetHeight = (availableHeight > 0 ? availableHeight : 120) - 20;
+        tableScrollWrap.style.maxHeight = targetHeight + 'px';
     }
 
     function initializeTableDragScroll (scrollElement)
@@ -817,18 +877,30 @@
         headerCell.colSpan = columns.length;
         headerCell.className = 'project-group-summary-cell';
 
-        const projectLabel = projectKey !== '' ? projectKey : '(geen projectnr)';
-        headerCell.innerHTML = [
-            '<strong>Project: </strong>' + escapeHtml(projectLabel),
-            '<span class="project-group-summary-sep">|</span>',
-            '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(totalCosts)),
-            '<span class="project-group-summary-sep">|</span>',
-            '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(totalRevenue)),
-            '<span class="project-group-summary-sep">|</span>',
-            '<strong>Project taakregels: </strong>' + escapeHtml(String(taskLineCount)),
-            '<span class="project-group-summary-sep">|</span>',
-            '<strong>Werkorders: </strong>' + escapeHtml(String(workorderCount))
-        ].join(' ');
+        if (projectKey === '')
+        {
+            headerCell.innerHTML = [
+                '<div class="project-group-summary-content">',
+                '<strong>Werkorders zonder project: </strong>' + escapeHtml(String(workorderCount)),
+                '</div>'
+            ].join(' ');
+        }
+        else
+        {
+            headerCell.innerHTML = [
+                '<div class="project-group-summary-content">',
+                '<strong>Project: </strong>' + escapeHtml(projectKey),
+                '<span class="project-group-summary-sep">|</span>',
+                '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(totalCosts)),
+                '<span class="project-group-summary-sep">|</span>',
+                '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(totalRevenue)),
+                '<span class="project-group-summary-sep">|</span>',
+                '<strong>Project taakregels: </strong>' + escapeHtml(String(taskLineCount)),
+                '<span class="project-group-summary-sep">|</span>',
+                '<strong>Werkorders: </strong>' + escapeHtml(String(workorderCount)),
+                '</div>'
+            ].join(' ');
+        }
 
         headerRow.appendChild(headerCell);
         tbody.appendChild(headerRow);
@@ -1209,6 +1281,7 @@
         statusFilterBar.appendChild(statusHint);
 
         renderSearchForm();
+        syncTableScrollWrapMaxHeight();
     }
 
     function renderSearchForm ()
