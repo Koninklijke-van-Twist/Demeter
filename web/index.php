@@ -3,6 +3,13 @@ ini_set('display_errors', 1);
 ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
+$second = 1;
+$minute = $second * 60;
+$hour = $minute * 60;
+$day = $hour * 24;
+
+$ttl = $hour;
+
 ob_start();
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -393,7 +400,7 @@ try {
             '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
         ]);
 
-        $batchWorkorders = odata_get_all($workorderUrl, $auth, 18000);
+        $batchWorkorders = odata_get_all($workorderUrl, $auth, $ttl);
         foreach ($batchWorkorders as $workorder) {
             if (!is_array($workorder)) {
                 continue;
@@ -435,7 +442,7 @@ try {
                 '$filter' => $periodFilter,
             ]);
 
-            $batchInvoices = odata_get_all($invoiceUrl, $auth, 18000);
+            $batchInvoices = odata_get_all($invoiceUrl, $auth, $ttl);
             foreach ($batchInvoices as $invoice) {
                 if (!is_array($invoice)) {
                     continue;
@@ -679,7 +686,7 @@ try {
                             '$filter' => $periodFilter,
                         ]);
 
-                        $batchInvoices = odata_get_all($invoiceUrl, $auth, 18000);
+                        $batchInvoices = odata_get_all($invoiceUrl, $auth, $ttl);
                         $loaded = true;
                         break;
                     } catch (Throwable $ignoredSelectError) {
@@ -850,7 +857,7 @@ try {
                         '$filter' => $filter,
                     ]);
 
-                    $batchLines = odata_get_all($lineUrl, $auth, 18000);
+                    $batchLines = odata_get_all($lineUrl, auth: $auth, ttlSeconds: $ttl);
                     $loaded = true;
                     break;
                 } catch (Throwable $ignoredLineSelectError) {

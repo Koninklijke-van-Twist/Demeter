@@ -315,9 +315,13 @@
         let suppressClick = false;
         let startClientX = 0;
         let startClientY = 0;
+        let latestClientX = 0;
+        let latestClientY = 0;
         let startScrollLeft = 0;
         let startScrollTop = 0;
         let startWindowScrollY = 0;
+        let canScrollVertically = false;
+        let dragRafId = 0;
 
         const interactiveSelector = 'button, input, select, textarea, a, [role="button"], .notes-btn, .memo-cell-clickable, .invoice-id-clickable, .amount-info-clickable';
 
@@ -326,6 +330,12 @@
             if (!isPointerDown)
             {
                 return;
+            }
+
+            if (dragRafId !== 0)
+            {
+                cancelAnimationFrame(dragRafId);
+                dragRafId = 0;
             }
 
             isPointerDown = false;
@@ -340,6 +350,39 @@
                     suppressClick = false;
                 }, 0);
             }
+        }
+
+        function applyDragPosition ()
+        {
+            dragRafId = 0;
+            if (!isPointerDown)
+            {
+                return;
+            }
+
+            const deltaX = latestClientX - startClientX;
+            const deltaY = latestClientY - startClientY;
+
+            scrollElement.scrollLeft = startScrollLeft - deltaX;
+
+            if (canScrollVertically)
+            {
+                scrollElement.scrollTop = startScrollTop - deltaY;
+            }
+            else
+            {
+                window.scrollTo(window.scrollX, startWindowScrollY - deltaY);
+            }
+        }
+
+        function scheduleDragPositionUpdate ()
+        {
+            if (dragRafId !== 0)
+            {
+                return;
+            }
+
+            dragRafId = requestAnimationFrame(applyDragPosition);
         }
 
         scrollElement.addEventListener('mousedown', function (event)
@@ -359,9 +402,12 @@
             hasDragged = false;
             startClientX = event.clientX;
             startClientY = event.clientY;
+            latestClientX = event.clientX;
+            latestClientY = event.clientY;
             startScrollLeft = scrollElement.scrollLeft;
             startScrollTop = scrollElement.scrollTop;
             startWindowScrollY = window.scrollY || window.pageYOffset || 0;
+            canScrollVertically = scrollElement.scrollHeight > scrollElement.clientHeight;
 
             scrollElement.classList.add('is-dragging-scroll');
             document.body.classList.add('dragging-table-scroll');
@@ -375,23 +421,16 @@
                 return;
             }
 
-            const deltaX = event.clientX - startClientX;
-            const deltaY = event.clientY - startClientY;
+            latestClientX = event.clientX;
+            latestClientY = event.clientY;
+            const deltaX = latestClientX - startClientX;
+            const deltaY = latestClientY - startClientY;
             if (Math.abs(deltaX) > 3 || Math.abs(deltaY) > 3)
             {
                 hasDragged = true;
             }
 
-            scrollElement.scrollLeft = startScrollLeft - deltaX;
-
-            if (scrollElement.scrollHeight > scrollElement.clientHeight)
-            {
-                scrollElement.scrollTop = startScrollTop - deltaY;
-            }
-            else
-            {
-                window.scrollTo(window.scrollX, startWindowScrollY - deltaY);
-            }
+            scheduleDragPositionUpdate();
         });
 
         window.addEventListener('mouseup', endDrag);
