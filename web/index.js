@@ -970,9 +970,19 @@
         }
 
         const visibleRows = getVisibleSortedRows();
+        let previousProjectKey = null;
         for (const row of visibleRows)
         {
             const tr = renderWorkorderRow(row);
+            if (keepProjectWorkordersTogether)
+            {
+                const currentProjectKey = normalizeSortValue(row.Job_No || '');
+                if (previousProjectKey !== null && currentProjectKey !== previousProjectKey)
+                {
+                    tr.classList.add('project-break-row');
+                }
+                previousProjectKey = currentProjectKey;
+            }
             tbody.appendChild(tr);
         }
 

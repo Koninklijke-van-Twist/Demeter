@@ -2144,6 +2144,10 @@ $initialData = [
             border-bottom: 2px solid #94a3b8;
         }
 
+        .project-break-row td {
+            border-top: 3px solid #64748b;
+        }
+
         tbody tr.status-hidden-by-filter {
             display: none;
         }
