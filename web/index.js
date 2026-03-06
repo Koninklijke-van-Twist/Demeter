@@ -889,25 +889,7 @@
             return;
         }
 
-        const totalCosts = projectRows.reduce(function (sum, row)
-        {
-            return sum + Number(row.Actual_Costs || 0);
-        }, 0);
-        const totalRevenue = projectRows.reduce(function (sum, row)
-        {
-            return sum + Number(row.Total_Revenue || 0);
-        }, 0);
-        const taskLineKeys = new Set();
-        for (const row of projectRows)
-        {
-            const taskNo = normalizeSortValue(row.Job_Task_No || '');
-            if (taskNo !== '')
-            {
-                taskLineKeys.add(taskNo);
-            }
-        }
-        const taskLineCount = taskLineKeys.size;
-        const workorderCount = projectRows.length;
+        const summary = buildProjectGroupSummary(projectRows, projectKey);
 
         const headerRow = document.createElement('tr');
         headerRow.className = 'project-group-summary-row';
@@ -916,11 +898,11 @@
         headerCell.colSpan = columns.length;
         headerCell.className = 'project-group-summary-cell';
 
-        if (projectKey === '')
+        if (summary.isWithoutProject)
         {
             headerCell.innerHTML = [
                 '<div class="project-group-summary-content">',
-                '<strong>Werkorders zonder project: </strong>' + escapeHtml(String(workorderCount)),
+                '<strong>' + escapeHtml(summary.text) + '</strong>',
                 '</div>'
             ].join(' ');
         }
@@ -928,15 +910,15 @@
         {
             headerCell.innerHTML = [
                 '<div class="project-group-summary-content">',
-                '<strong>Project: </strong>' + escapeHtml(projectKey),
+                '<strong>Project: </strong>' + escapeHtml(summary.projectLabel),
                 '<span class="project-group-summary-sep">|</span>',
-                '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(totalCosts)),
+                '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalCosts)),
                 '<span class="project-group-summary-sep">|</span>',
-                '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(totalRevenue)),
+                '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalRevenue)),
                 '<span class="project-group-summary-sep">|</span>',
-                '<strong>Project taakregels: </strong>' + escapeHtml(String(taskLineCount)),
+                '<strong>Project taakregels: </strong>' + escapeHtml(String(summary.taskLineCount)),
                 '<span class="project-group-summary-sep">|</span>',
-                '<strong>Werkorders: </strong>' + escapeHtml(String(workorderCount)),
+                '<strong>Werkorders: </strong>' + escapeHtml(String(summary.workorderCount)),
                 '</div>'
             ].join(' ');
         }
@@ -956,6 +938,60 @@
 
             tbody.appendChild(tr);
         }
+    }
+
+    function buildProjectGroupSummary (projectRows, projectKey)
+    {
+        const totalCosts = projectRows.reduce(function (sum, row)
+        {
+            return sum + Number(row.Actual_Costs || 0);
+        }, 0);
+        const totalRevenue = projectRows.reduce(function (sum, row)
+        {
+            return sum + Number(row.Total_Revenue || 0);
+        }, 0);
+        const taskLineKeys = new Set();
+        for (const row of projectRows)
+        {
+            const taskNo = normalizeSortValue(row.Job_Task_No || '');
+            if (taskNo !== '')
+            {
+                taskLineKeys.add(taskNo);
+            }
+        }
+
+        const taskLineCount = taskLineKeys.size;
+        const workorderCount = projectRows.length;
+        const projectLabel = normalizeSortValue(projectKey);
+
+        if (projectLabel === '')
+        {
+            return {
+                isWithoutProject: true,
+                projectLabel: '',
+                totalCosts: totalCosts,
+                totalRevenue: totalRevenue,
+                taskLineCount: taskLineCount,
+                workorderCount: workorderCount,
+                text: 'Werkorders zonder project: ' + String(workorderCount)
+            };
+        }
+
+        return {
+            isWithoutProject: false,
+            projectLabel: projectLabel,
+            totalCosts: totalCosts,
+            totalRevenue: totalRevenue,
+            taskLineCount: taskLineCount,
+            workorderCount: workorderCount,
+            text: [
+                'Project: ' + projectLabel,
+                'Kosten: ' + formatCurrencyOrZero(totalCosts),
+                'Opbrengst: ' + formatCurrencyOrZero(totalRevenue),
+                'Project taakregels: ' + String(taskLineCount),
+                'Werkorders: ' + String(workorderCount)
+            ].join(' | ')
+        };
     }
 
     function renderWorkorderRow (row)
@@ -1524,14 +1560,50 @@
         });
 
         const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
+        let groupRows = [];
+        let activeProjectKey = '';
+
+        const flushGroup = function ()
+        {
+            if (groupRows.length === 0)
+            {
+                return;
+            }
+
+            const summary = buildProjectGroupSummary(groupRows, activeProjectKey);
+            const summaryValues = new Array(exportColumns.length).fill('');
+            summaryValues[0] = summary.text;
+            csvLines.push(summaryValues.map(escapeCsvValue).join(delimiter));
+
+            for (const row of groupRows)
+            {
+                const values = exportColumns.map(function (column)
+                {
+                    return getExportValue(row, column.key);
+                });
+                csvLines.push(values.map(escapeCsvValue).join(delimiter));
+            }
+        };
+
         for (const row of visibleRows)
         {
-            const values = exportColumns.map(function (column)
+            const projectKey = normalizeSortValue(row.Job_No || '');
+            if (groupRows.length === 0)
             {
-                return getExportValue(row, column.key);
-            });
-            csvLines.push(values.map(escapeCsvValue).join(delimiter));
+                activeProjectKey = projectKey;
+            }
+
+            if (groupRows.length > 0 && projectKey !== activeProjectKey)
+            {
+                flushGroup();
+                groupRows = [];
+                activeProjectKey = projectKey;
+            }
+
+            groupRows.push(row);
         }
+
+        flushGroup();
 
         const csvContent = '\uFEFF' + csvLines.join('\r\n');
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
