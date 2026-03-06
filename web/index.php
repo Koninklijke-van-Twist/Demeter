@@ -537,7 +537,6 @@ try {
     $invoiceReferences = [];
     $invoiceProjectDimension2 = [];
     $invoiceFinancialByJobTask = [];
-    $invoiceFinancialByJob = [];
     $invoiceFinancialByDocument = [];
     foreach ($invoices as $invoice) {
         if (!is_array($invoice)) {
@@ -565,25 +564,10 @@ try {
             continue;
         }
 
-        $normalizedInvoiceJobNo = normalize_match_value($invoiceJobNo);
-
         $invoiceJobOnly[normalize_match_value($invoiceJobNo)] = [
             'id' => $invoiceDocumentNo,
             'source' => 'AppProjectInvoices',
         ];
-
-        if (!isset($invoiceFinancialByJob[$normalizedInvoiceJobNo])) {
-            $invoiceFinancialByJob[$normalizedInvoiceJobNo] = [
-                'costs' => 0.0,
-                'revenue' => 0.0,
-                'id' => '',
-            ];
-        }
-        $invoiceFinancialByJob[$normalizedInvoiceJobNo]['costs'] += $invoiceCosts;
-        $invoiceFinancialByJob[$normalizedInvoiceJobNo]['revenue'] += $invoiceRevenue;
-        if ($invoiceDocumentNo !== '') {
-            $invoiceFinancialByJob[$normalizedInvoiceJobNo]['id'] = $invoiceDocumentNo;
-        }
 
         if ($invoiceJobTaskNo !== '') {
             $invoiceKeys[workorder_invoice_key($invoiceJobNo, $invoiceJobTaskNo)] = [
@@ -1060,25 +1044,7 @@ try {
                 break;
             }
 
-            if ($amountSource === 'workorder' && $normalizedJobNo !== '' && isset($invoiceFinancialByJob[$normalizedJobNo])) {
-                $financials = $invoiceFinancialByJob[$normalizedJobNo];
-                $actualCosts = (float) ($financials['costs'] ?? 0);
-                $totalRevenue = (float) ($financials['revenue'] ?? 0);
-                $amountSource = 'invoice';
-                $amountSourceReason = 'Factuurbedragen gevonden via AppProjectInvoices job-koppeling.';
-                $matchedInvoiceSource = 'AppProjectInvoices';
-                $actualCostsSource = 'invoice';
-                $actualCostsSourceReason = 'Kosten uit AppProjectInvoices via job-koppeling.';
-                $totalRevenueSource = 'invoice';
-                $totalRevenueSourceReason = 'Opbrengst uit AppProjectInvoices via job-koppeling.';
-
-                $financialInvoiceId = trim((string) ($financials['id'] ?? ''));
-                if ($financialInvoiceId !== '') {
-                    $matchedInvoiceId = $financialInvoiceId;
-                }
-            }
-
-            if ($matchedInvoiceId !== '' && isset($invoiceFinancialByDocument[$matchedInvoiceId])) {
+            if (($invoiceMatchPath === 'job_task' || $invoiceMatchPath === 'reference') && $matchedInvoiceId !== '' && isset($invoiceFinancialByDocument[$matchedInvoiceId])) {
                 $financialsByDocument = $invoiceFinancialByDocument[$matchedInvoiceId];
                 $actualCosts = (float) ($financialsByDocument['costs'] ?? 0);
                 $totalRevenue = (float) ($financialsByDocument['revenue'] ?? 0);
@@ -1091,7 +1057,7 @@ try {
             }
         }
 
-        if (($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') && $matchedInvoiceId !== '') {
+        if (($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') && $matchedInvoiceId !== '' && $invoiceMatchPath !== 'project_dimension_2') {
             $lineFinancials = $invoiceLineFinancialByType[$resolvedInvoiceSource][$matchedInvoiceId] ?? null;
             if (is_array($lineFinancials)) {
                 $lineRevenue = (float) ($lineFinancials['revenue'] ?? 0);
@@ -1137,7 +1103,7 @@ try {
             }
         }
 
-        if ($matchedInvoiceId !== '') {
+        if ($matchedInvoiceId !== '' && $invoiceMatchPath !== 'project_dimension_2') {
             $preferredTypes = [];
             if ($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') {
                 $preferredTypes[] = $resolvedInvoiceSource;
@@ -1254,6 +1220,7 @@ try {
             'Invoice_Match_Path' => $invoiceMatchPath,
             'Invoice_Match_Source' => $matchedInvoiceSource,
             'Job_No' => $jobNo,
+            'Job_Task_No' => $jobTaskNo,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
         ];
     }
@@ -1759,12 +1726,16 @@ $initialData = [
             border-radius: 12px;
             box-shadow: 0 2px 10px rgba(15, 23, 42, 0.06);
             padding: 14px;
+            overflow: hidden;
         }
 
         .table-scroll-wrap {
             width: 100%;
+            max-width: 100%;
+            box-sizing: border-box;
             overflow-x: auto;
-            overflow-y: visible;
+            overflow-y: auto;
+            max-height: clamp(280px, calc(100dvh - 260px), 75dvh);
             -webkit-overflow-scrolling: touch;
             cursor: grab;
         }
@@ -1780,7 +1751,8 @@ $initialData = [
 
         table {
             width: 100%;
-            border-collapse: collapse;
+            border-collapse: separate;
+            border-spacing: 0;
             overflow: visible;
             border-radius: 10px;
             table-layout: fixed;
@@ -1814,9 +1786,17 @@ $initialData = [
             color: #203a63;
             font-weight: 700;
             white-space: normal;
+            position: -webkit-sticky;
             position: sticky;
             top: 0;
-            z-index: 5;
+            z-index: 15;
+        }
+
+        @media (max-width: 900px) {
+            .table-scroll-wrap {
+                max-height: clamp(220px, calc(100vh - 430px), 60vh);
+                max-height: clamp(220px, calc(100dvh - 430px), 60dvh);
+            }
         }
 
         th[role="button"] {
@@ -1994,6 +1974,32 @@ $initialData = [
 
         tbody tr:hover {
             filter: brightness(0.98);
+        }
+
+        .project-group-summary-cell {
+            background: #eef4ff;
+            color: #1f355a;
+            font-size: 12px;
+            font-weight: 700;
+            border-top: 2px solid #94a3b8;
+            border-left: 2px solid #94a3b8;
+            border-bottom: 1px solid #d8e1ef;
+            position: sticky;
+            left: 0;
+            z-index: 10;
+        }
+
+        .project-group-summary-sep {
+            color: #64748b;
+            padding: 0 6px;
+        }
+
+        .project-group-row td {
+            border-left: 2px solid #94a3b8;
+        }
+
+        .project-group-last-row td {
+            border-bottom: 2px solid #94a3b8;
         }
 
         tbody tr.status-hidden-by-filter {

@@ -19,7 +19,6 @@
     const baseColumns = [
         { key: 'No', label: 'Werkorder' },
         { key: 'Order_Type', label: 'Ordertype' },
-        { key: 'Job_No', label: 'Project Nr.' },
         { key: 'Contract_No', label: 'Contractnummer' },
         { key: 'Customer_Id', label: 'Klant Nr.' },
         { key: 'Customer_Name', label: 'Klantnaam' },
@@ -755,249 +754,339 @@
         tbody.innerHTML = '';
         const visibleRows = getVisibleSortedRows();
 
+        let groupRows = [];
+        let activeProjectKey = '';
+
         for (const row of visibleRows)
         {
-            const tr = document.createElement('tr');
-            const statusKey = normalizeStatus(row.Status || '');
-            const workorderAmountCells = [];
-            let invoiceIdCell = null;
-
-            tr.className = 'status-' + statusKey;
-
-            for (const column of columns)
+            const projectKey = normalizeSortValue(row.Job_No || '');
+            if (groupRows.length === 0)
             {
-                const td = document.createElement('td');
-                if (compactColumnKeys.has(column.key))
-                {
-                    td.classList.add('col-compact');
-                }
-
-                if (column.key === 'Cost_Center')
-                {
-                    td.classList.add('col-compact-cost-center');
-                }
-
-                if (column.key === 'Notes')
-                {
-                    td.classList.add('col-notes');
-                }
-
-                if (column.key === 'Status' || column.key === 'Document_Status')
-                {
-                    td.classList.add('col-status');
-                }
-
-                if (column.key === 'No')
-                {
-                    td.classList.add('col-workorder');
-                }
-
-                if (column.key === 'Order_Type')
-                {
-                    td.classList.add('col-ordertype');
-                }
-
-                if (column.key === 'Job_No')
-                {
-                    td.classList.add('col-project-no');
-                }
-
-                if (column.key === 'Customer_Id')
-                {
-                    td.classList.add('col-customer-id');
-                }
-
-                if (column.key === 'Start_Date')
-                {
-                    td.classList.add('col-start-date');
-                }
-
-                if (column.key === 'Equipment_Number')
-                {
-                    td.classList.add('col-equipment-number');
-                }
-
-                if (column.key === 'Memo_KVT_Remarks_Invoicing')
-                {
-                    td.classList.add('col-memo-remarks');
-                }
-
-                if (column.key === 'Invoice_Id')
-                {
-                    invoiceIdCell = td;
-                }
-
-                if (column.key === 'Notes')
-                {
-                    const groupedMemoFields = getGroupedMemoFields();
-                    const groupedLabelSet = new Set(groupedMemoFields.map(function (field)
-                    {
-                        return field.noteLabel;
-                    }));
-
-                    const groupedParts = (Array.isArray(row.Notes) ? row.Notes : []).filter(function (part)
-                    {
-                        const label = String((part && part.label) || '').trim();
-                        if (!groupedLabelSet.has(label))
-                        {
-                            return false;
-                        }
-
-                        return String((part && part.value) || '').trim() !== '';
-                    });
-
-                    const hasNotes = groupedParts.some(function (part)
-                    {
-                        return String((part && part.value) || '').trim() !== '';
-                    });
-
-                    if (hasNotes)
-                    {
-                        const button = document.createElement('button');
-                        button.type = 'button';
-                        button.className = 'notes-btn';
-                        button.textContent = 'Bekijk';
-                        button.addEventListener('click', function ()
-                        {
-                            openNotesModal(groupedParts);
-                        });
-                        td.appendChild(button);
-                    }
-                    else
-                    {
-                        td.textContent = '';
-                    }
-                }
-                else if (isMemoFieldKey(column.key))
-                {
-                    const memoValue = getMemoFieldValue(row, column.key);
-                    td.textContent = memoValue;
-                    td.classList.add('memo-cell-full');
-
-                    if (memoValue.trim() !== '')
-                    {
-                        const memoField = memoFieldByKey[column.key];
-                        td.classList.add('memo-cell-clickable');
-                        td.addEventListener('click', function ()
-                        {
-                            openNotesModal([
-                                {
-                                    label: memoField ? memoField.noteLabel : column.key,
-                                    value: memoValue,
-                                }
-                            ]);
-                        });
-                    }
-                }
-                else
-                {
-                    if (column.key === 'Actual_Total')
-                    {
-                        const totalAmount = Number(row[column.key] || 0);
-                        if (totalAmount === 0)
-                        {
-                            td.textContent = '';
-                        }
-                        else
-                        {
-                            td.textContent = formatSignedCurrency(totalAmount);
-                            td.classList.add(totalAmount > 0 ? 'amount-positive' : 'amount-negative');
-                        }
-                    }
-                    else if (column.key === 'Actual_Costs' || column.key === 'Total_Revenue')
-                    {
-                        td.textContent = formatCurrencyOrZero(row[column.key]);
-                    }
-                    else if (numericSortKeys.has(column.key))
-                    {
-                        td.textContent = formatCurrencyOrEmpty(row[column.key]);
-                    }
-                    else
-                    {
-                        if (column.key === 'Equipment_Number')
-                        {
-                            td.textContent = getEquipmentDisplayValue(row);
-                        }
-                        else
-                        {
-                            td.textContent = String(row[column.key] || '');
-                        }
-                    }
-                }
-
-                if (amountColumnKeys.has(column.key))
-                {
-                    const amountSourceInfo = getAmountSourceInfo(column.key, row);
-                    if (amountSourceInfo.source === 'invoice')
-                    {
-                        td.title = invoiceAmountTooltip;
-                    }
-                    else if (amountSourceInfo.source === 'mixed')
-                    {
-                        td.title = 'Deze waarde is samengesteld uit meerdere bronnen (factuur en werkorder). Klik voor details.';
-                    }
-                    else
-                    {
-                        td.title = workorderAmountTooltip;
-                    }
-                    td.classList.add('amount-info-clickable');
-                    td.addEventListener('click', function ()
-                    {
-                        openAmountSourceModal(column.key, row);
-                    });
-
-                    const matchPath = String(row.Invoice_Match_Path || '').trim();
-                    if (amountSourceInfo.source === 'invoice' && matchPath === 'project_dimension_2')
-                    {
-                        td.classList.add('amount-underline-project');
-                    }
-                    else if (amountSourceInfo.source !== 'invoice')
-                    {
-                        td.classList.add('amount-underline-workorder');
-                        workorderAmountCells.push(td);
-                    }
-                }
-
-                if (column.key === 'Invoice_Id')
-                {
-                    const invoiceIdValue = String(row.Invoice_Id || '').trim();
-                    if (invoiceIdValue !== '')
-                    {
-                        const matchPath = String(row.Invoice_Match_Path || '').trim();
-                        const invoiceSuffix = matchPath === 'project_dimension_2' ? ' (PRJ)' : ' (WO)';
-                        td.textContent = invoiceIdValue + invoiceSuffix;
-                        td.classList.add('invoice-id-clickable');
-                        td.title = 'Klik voor factuurdetails';
-                        td.addEventListener('click', function ()
-                        {
-                            openInvoiceDetailsModal(invoiceIdValue);
-                        });
-                    }
-                }
-
-                tr.appendChild(td);
+                activeProjectKey = projectKey;
             }
 
-            if (workorderAmountCells.length > 0 && invoiceIdCell)
+            if (groupRows.length > 0 && projectKey !== activeProjectKey)
             {
-                for (const amountCell of workorderAmountCells)
-                {
-                    amountCell.addEventListener('mouseenter', function ()
-                    {
-                        triggerInvoiceCellBlink(invoiceIdCell);
-                    });
+                appendProjectGroupRows(groupRows, activeProjectKey);
+                groupRows = [];
+                activeProjectKey = projectKey;
+            }
 
-                    amountCell.addEventListener('mouseleave', function ()
-                    {
-                        invoiceIdCell.classList.remove('invoice-cell-blink');
-                    });
-                }
+            groupRows.push(row);
+        }
+
+        if (groupRows.length > 0)
+        {
+            appendProjectGroupRows(groupRows, activeProjectKey);
+        }
+
+        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+    }
+
+    function appendProjectGroupRows (projectRows, projectKey)
+    {
+        if (!Array.isArray(projectRows) || projectRows.length === 0)
+        {
+            return;
+        }
+
+        const totalCosts = projectRows.reduce(function (sum, row)
+        {
+            return sum + Number(row.Actual_Costs || 0);
+        }, 0);
+        const totalRevenue = projectRows.reduce(function (sum, row)
+        {
+            return sum + Number(row.Total_Revenue || 0);
+        }, 0);
+        const taskLineKeys = new Set();
+        for (const row of projectRows)
+        {
+            const taskNo = normalizeSortValue(row.Job_Task_No || '');
+            if (taskNo !== '')
+            {
+                taskLineKeys.add(taskNo);
+            }
+        }
+        const taskLineCount = taskLineKeys.size;
+        const workorderCount = projectRows.length;
+
+        const headerRow = document.createElement('tr');
+        headerRow.className = 'project-group-summary-row';
+
+        const headerCell = document.createElement('td');
+        headerCell.colSpan = columns.length;
+        headerCell.className = 'project-group-summary-cell';
+
+        const projectLabel = projectKey !== '' ? projectKey : '(geen projectnr)';
+        headerCell.innerHTML = [
+            '<strong>Project: </strong>' + escapeHtml(projectLabel),
+            '<span class="project-group-summary-sep">|</span>',
+            '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(totalCosts)),
+            '<span class="project-group-summary-sep">|</span>',
+            '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(totalRevenue)),
+            '<span class="project-group-summary-sep">|</span>',
+            '<strong>Project taakregels: </strong>' + escapeHtml(String(taskLineCount)),
+            '<span class="project-group-summary-sep">|</span>',
+            '<strong>Werkorders: </strong>' + escapeHtml(String(workorderCount))
+        ].join(' ');
+
+        headerRow.appendChild(headerCell);
+        tbody.appendChild(headerRow);
+
+        for (let index = 0; index < projectRows.length; index += 1)
+        {
+            const row = projectRows[index];
+            const tr = renderWorkorderRow(row);
+            tr.classList.add('project-group-row');
+            if (index === projectRows.length - 1)
+            {
+                tr.classList.add('project-group-last-row');
             }
 
             tbody.appendChild(tr);
         }
+    }
 
-        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+    function renderWorkorderRow (row)
+    {
+        const tr = document.createElement('tr');
+        const statusKey = normalizeStatus(row.Status || '');
+        const workorderAmountCells = [];
+        let invoiceIdCell = null;
+
+        tr.classList.add('status-' + statusKey);
+
+        for (const column of columns)
+        {
+            const td = document.createElement('td');
+            if (compactColumnKeys.has(column.key))
+            {
+                td.classList.add('col-compact');
+            }
+
+            if (column.key === 'Cost_Center')
+            {
+                td.classList.add('col-compact-cost-center');
+            }
+
+            if (column.key === 'Notes')
+            {
+                td.classList.add('col-notes');
+            }
+
+            if (column.key === 'Status' || column.key === 'Document_Status')
+            {
+                td.classList.add('col-status');
+            }
+
+            if (column.key === 'No')
+            {
+                td.classList.add('col-workorder');
+            }
+
+            if (column.key === 'Order_Type')
+            {
+                td.classList.add('col-ordertype');
+            }
+
+            if (column.key === 'Job_No')
+            {
+                td.classList.add('col-project-no');
+            }
+
+            if (column.key === 'Customer_Id')
+            {
+                td.classList.add('col-customer-id');
+            }
+
+            if (column.key === 'Start_Date')
+            {
+                td.classList.add('col-start-date');
+            }
+
+            if (column.key === 'Equipment_Number')
+            {
+                td.classList.add('col-equipment-number');
+            }
+
+            if (column.key === 'Memo_KVT_Remarks_Invoicing')
+            {
+                td.classList.add('col-memo-remarks');
+            }
+
+            if (column.key === 'Invoice_Id')
+            {
+                invoiceIdCell = td;
+            }
+
+            if (column.key === 'Notes')
+            {
+                const groupedMemoFields = getGroupedMemoFields();
+                const groupedLabelSet = new Set(groupedMemoFields.map(function (field)
+                {
+                    return field.noteLabel;
+                }));
+
+                const groupedParts = (Array.isArray(row.Notes) ? row.Notes : []).filter(function (part)
+                {
+                    const label = String((part && part.label) || '').trim();
+                    if (!groupedLabelSet.has(label))
+                    {
+                        return false;
+                    }
+
+                    return String((part && part.value) || '').trim() !== '';
+                });
+
+                const hasNotes = groupedParts.some(function (part)
+                {
+                    return String((part && part.value) || '').trim() !== '';
+                });
+
+                if (hasNotes)
+                {
+                    const button = document.createElement('button');
+                    button.type = 'button';
+                    button.className = 'notes-btn';
+                    button.textContent = 'Bekijk';
+                    button.addEventListener('click', function ()
+                    {
+                        openNotesModal(groupedParts);
+                    });
+                    td.appendChild(button);
+                }
+                else
+                {
+                    td.textContent = '';
+                }
+            }
+            else if (isMemoFieldKey(column.key))
+            {
+                const memoValue = getMemoFieldValue(row, column.key);
+                td.textContent = memoValue;
+                td.classList.add('memo-cell-full');
+
+                if (memoValue.trim() !== '')
+                {
+                    const memoField = memoFieldByKey[column.key];
+                    td.classList.add('memo-cell-clickable');
+                    td.addEventListener('click', function ()
+                    {
+                        openNotesModal([
+                            {
+                                label: memoField ? memoField.noteLabel : column.key,
+                                value: memoValue,
+                            }
+                        ]);
+                    });
+                }
+            }
+            else
+            {
+                if (column.key === 'Actual_Total')
+                {
+                    const totalAmount = Number(row[column.key] || 0);
+                    if (totalAmount === 0)
+                    {
+                        td.textContent = '';
+                    }
+                    else
+                    {
+                        td.textContent = formatSignedCurrency(totalAmount);
+                        td.classList.add(totalAmount > 0 ? 'amount-positive' : 'amount-negative');
+                    }
+                }
+                else if (column.key === 'Actual_Costs' || column.key === 'Total_Revenue')
+                {
+                    td.textContent = formatCurrencyOrZero(row[column.key]);
+                }
+                else if (numericSortKeys.has(column.key))
+                {
+                    td.textContent = formatCurrencyOrEmpty(row[column.key]);
+                }
+                else
+                {
+                    if (column.key === 'Equipment_Number')
+                    {
+                        td.textContent = getEquipmentDisplayValue(row);
+                    }
+                    else
+                    {
+                        td.textContent = String(row[column.key] || '');
+                    }
+                }
+            }
+
+            if (amountColumnKeys.has(column.key))
+            {
+                const amountSourceInfo = getAmountSourceInfo(column.key, row);
+                if (amountSourceInfo.source === 'invoice')
+                {
+                    td.title = invoiceAmountTooltip;
+                }
+                else if (amountSourceInfo.source === 'mixed')
+                {
+                    td.title = 'Deze waarde is samengesteld uit meerdere bronnen (factuur en werkorder). Klik voor details.';
+                }
+                else
+                {
+                    td.title = workorderAmountTooltip;
+                }
+                td.classList.add('amount-info-clickable');
+                td.addEventListener('click', function ()
+                {
+                    openAmountSourceModal(column.key, row);
+                });
+
+                const matchPath = String(row.Invoice_Match_Path || '').trim();
+                if (amountSourceInfo.source === 'invoice' && matchPath === 'project_dimension_2')
+                {
+                    td.classList.add('amount-underline-project');
+                }
+                else if (amountSourceInfo.source !== 'invoice')
+                {
+                    td.classList.add('amount-underline-workorder');
+                    workorderAmountCells.push(td);
+                }
+            }
+
+            if (column.key === 'Invoice_Id')
+            {
+                const invoiceIdValue = String(row.Invoice_Id || '').trim();
+                if (invoiceIdValue !== '')
+                {
+                    const matchPath = String(row.Invoice_Match_Path || '').trim();
+                    const invoiceSuffix = matchPath === 'project_dimension_2' ? ' (PRJ)' : ' (WO)';
+                    td.textContent = invoiceIdValue + invoiceSuffix;
+                    td.classList.add('invoice-id-clickable');
+                    td.title = 'Klik voor factuurdetails';
+                    td.addEventListener('click', function ()
+                    {
+                        openInvoiceDetailsModal(invoiceIdValue);
+                    });
+                }
+            }
+
+            tr.appendChild(td);
+        }
+
+        if (workorderAmountCells.length > 0 && invoiceIdCell)
+        {
+            for (const amountCell of workorderAmountCells)
+            {
+                amountCell.addEventListener('mouseenter', function ()
+                {
+                    triggerInvoiceCellBlink(invoiceIdCell);
+                });
+
+                amountCell.addEventListener('mouseleave', function ()
+                {
+                    invoiceIdCell.classList.remove('invoice-cell-blink');
+                });
+            }
+        }
+
+        return tr;
     }
 
     function triggerInvoiceCellBlink (cell)
