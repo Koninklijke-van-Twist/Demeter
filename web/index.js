@@ -48,6 +48,8 @@
     const loadedMemoSettings = payload && typeof payload.memo_column_settings === 'object' && payload.memo_column_settings !== null
         ? payload.memo_column_settings
         : {};
+    const loadedLayoutStyle = normalizeLayoutStyle(payload.layout_style);
+    const loadedKeepProjectWorkordersTogether = payload.keep_project_workorders_together !== false;
     const saveUserSettingsUrl = typeof payload.save_user_settings_url === 'string' ? payload.save_user_settings_url : 'index.php?action=save_user_settings';
     const selectedMemoColumnKeys = new Set();
     for (const field of memoFields)
@@ -58,8 +60,10 @@
         }
     }
 
+    let layoutStyle = loadedLayoutStyle;
+    let keepProjectWorkordersTogether = loadedKeepProjectWorkordersTogether;
     let columns = buildTableColumns();
-    const exportColumns = buildExportColumns();
+    const exportColumns = buildExportColumns('table');
     const defaultSortState = {
         key: 'Job_No',
         direction: 'asc'
@@ -69,14 +73,15 @@
         direction: defaultSortState.direction
     };
     const amountColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
-    const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
-    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Cost_Center', 'Status', 'Document_Status']);
+    const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue']);
+    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Cost_Center', 'Status', 'Document_Status']);
     const workorderAmountTooltip = 'Geen factuur gevonden voor deze werkorder - kosten en opbrengst worden gehaald uit de werkordergegevens.';
     const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
     const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
     const invoiceAmountModalMessage = 'Deze bedragen komen direct uit de gekoppelde factuur en gelden als de meest betrouwbare bron.';
     const noneCostCenterValue = '__none__';
     const costCenterOptions = buildCostCenterOptions();
+    let activeProjectTotalsByProject = new Map();
     const currencyFormatter = new Intl.NumberFormat('nl-NL', {
         style: 'currency',
         currency: 'EUR',
@@ -105,6 +110,8 @@
     const memoMenuPanel = document.getElementById('memoMenuPanel');
     const memoMenuAll = document.getElementById('memoMenuAll');
     const memoMenuNone = document.getElementById('memoMenuNone');
+    const layoutStyleSelect = document.getElementById('layoutStyleSelect');
+    const keepProjectWorkordersTogetherInput = document.getElementById('keepProjectWorkordersTogether');
     const memoMenuInputs = memoMenuPanel
         ? Array.from(memoMenuPanel.querySelectorAll('input[data-memo-key]'))
         : [];
@@ -485,7 +492,7 @@
 
     function buildTableColumns ()
     {
-        const list = baseColumns.slice();
+        const list = buildBaseColumnsForLayout(layoutStyle);
         const hasGroupedMemoFields = getGroupedMemoFields().length > 0;
 
         for (const field of memoFields)
@@ -509,9 +516,10 @@
         return list;
     }
 
-    function buildExportColumns ()
+    function buildExportColumns (mode)
     {
-        const list = baseColumns.slice();
+        const layoutMode = normalizeLayoutStyle(mode);
+        const list = buildBaseColumnsForLayout(layoutMode);
 
         for (const field of memoFields)
         {
@@ -521,6 +529,35 @@
         if (showInvoiced)
         {
             list.push({ key: 'Invoice_Id', label: 'Factuur ID' });
+        }
+
+        return list;
+    }
+
+    function buildBaseColumnsForLayout (mode)
+    {
+        const layoutMode = normalizeLayoutStyle(mode);
+        const list = [];
+
+        for (const column of baseColumns)
+        {
+            list.push(column);
+
+            if (layoutMode !== 'table')
+            {
+                continue;
+            }
+
+            if (column.key === 'Contract_No')
+            {
+                list.push({ key: 'Job_No', label: 'Project Nr.' });
+            }
+
+            if (column.key === 'Total_Revenue')
+            {
+                list.push({ key: 'Project_Actual_Costs', label: 'Werkelijke kosten project' });
+                list.push({ key: 'Project_Total_Revenue', label: 'Totaalopbrengst project' });
+            }
         }
 
         return list;
@@ -537,6 +574,8 @@
     function initializeMemoMenu ()
     {
         syncMemoMenuInputs();
+        syncLayoutStyleInput();
+        syncKeepProjectWorkordersTogetherInput();
 
         if (memoMenuTrigger && memoMenuPanel)
         {
@@ -589,8 +628,8 @@
                     selectedMemoColumnKeys.delete(memoKey);
                 }
 
-                applyMemoColumnSelection();
-                saveMemoColumnSettings();
+                applyPreferencesSelection();
+                saveUserSettings();
             });
         }
 
@@ -609,6 +648,28 @@
                 setAllMemoColumnsSelected(false);
             });
         }
+
+        if (layoutStyleSelect)
+        {
+            layoutStyleSelect.value = layoutStyle;
+            layoutStyleSelect.addEventListener('change', function ()
+            {
+                layoutStyle = normalizeLayoutStyle(layoutStyleSelect.value);
+                applyPreferencesSelection();
+                saveUserSettings();
+            });
+        }
+
+        if (keepProjectWorkordersTogetherInput)
+        {
+            keepProjectWorkordersTogetherInput.checked = keepProjectWorkordersTogether;
+            keepProjectWorkordersTogetherInput.addEventListener('change', function ()
+            {
+                keepProjectWorkordersTogether = !!keepProjectWorkordersTogetherInput.checked;
+                applyPreferencesSelection();
+                saveUserSettings();
+            });
+        }
     }
 
     function setAllMemoColumnsSelected (selected)
@@ -625,8 +686,8 @@
             selectedMemoColumnKeys.clear();
         }
 
-        applyMemoColumnSelection();
-        saveMemoColumnSettings();
+        applyPreferencesSelection();
+        saveUserSettings();
     }
 
     function syncMemoMenuInputs ()
@@ -638,7 +699,7 @@
         }
     }
 
-    function applyMemoColumnSelection ()
+    function applyPreferencesSelection ()
     {
         columns = buildTableColumns();
 
@@ -648,12 +709,34 @@
         }
 
         syncMemoMenuInputs();
+        syncLayoutStyleInput();
+        syncKeepProjectWorkordersTogetherInput();
         renderTableHeader();
         renderHeader();
         renderRows();
     }
 
-    function saveMemoColumnSettings ()
+    function syncLayoutStyleInput ()
+    {
+        if (!layoutStyleSelect)
+        {
+            return;
+        }
+
+        layoutStyleSelect.value = layoutStyle;
+    }
+
+    function syncKeepProjectWorkordersTogetherInput ()
+    {
+        if (!keepProjectWorkordersTogetherInput)
+        {
+            return;
+        }
+
+        keepProjectWorkordersTogetherInput.checked = keepProjectWorkordersTogether;
+    }
+
+    function saveUserSettings ()
     {
         const memoColumns = {};
         for (const field of memoFields)
@@ -666,7 +749,11 @@
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ memo_columns: memoColumns })
+            body: JSON.stringify({
+                memo_columns: memoColumns,
+                layout_style: layoutStyle,
+                keep_project_workorders_together: keepProjectWorkordersTogether
+            })
         }).catch(function ()
         {
         });
@@ -867,16 +954,29 @@
     {
         updateSummaryCount();
         tbody.innerHTML = '';
-        const projectGroups = getVisibleProjectGroups();
-        let visibleRowCount = 0;
-
-        for (const group of projectGroups)
+        if (layoutStyle === 'projectgroups')
         {
-            visibleRowCount += group.rows.length;
-            appendProjectGroupRows(group.rows, group.projectKey);
+            const projectGroups = getVisibleProjectGroups();
+            let visibleRowCount = 0;
+
+            for (const group of projectGroups)
+            {
+                visibleRowCount += group.rows.length;
+                appendProjectGroupRows(group.rows, group.projectKey);
+            }
+
+            noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
+            return;
         }
 
-        noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
+        const visibleRows = getVisibleSortedRows();
+        for (const row of visibleRows)
+        {
+            const tr = renderWorkorderRow(row);
+            tbody.appendChild(tr);
+        }
+
+        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
     }
 
     function appendProjectGroupRows (projectRows, projectKey)
@@ -1140,9 +1240,9 @@
                         td.classList.add(totalAmount > 0 ? 'amount-positive' : 'amount-negative');
                     }
                 }
-                else if (column.key === 'Actual_Costs' || column.key === 'Total_Revenue')
+                else if (column.key === 'Actual_Costs' || column.key === 'Total_Revenue' || column.key === 'Project_Actual_Costs' || column.key === 'Project_Total_Revenue')
                 {
-                    td.textContent = formatCurrencyOrZero(row[column.key]);
+                    td.textContent = formatCurrencyOrZero(getColumnValueForSorting(row, column.key));
                 }
                 else if (numericSortKeys.has(column.key))
                 {
@@ -1552,17 +1652,9 @@
 
     function getVisibleSortedRows ()
     {
-        const flattenedRows = [];
-        const groups = getVisibleProjectGroups();
-        for (const group of groups)
-        {
-            for (const row of group.rows)
-            {
-                flattenedRows.push(row);
-            }
-        }
-
-        return flattenedRows;
+        const filteredRows = getVisibleFilteredRows();
+        activeProjectTotalsByProject = buildProjectTotalsByProject(filteredRows);
+        return filteredRows.slice().sort(compareRowsForGlobalOrder);
     }
 
     function getVisibleFilteredRows ()
@@ -1600,10 +1692,32 @@
         return rowCostCenter === selectedCostCenter;
     }
 
+    function buildProjectTotalsByProject (rowsInput)
+    {
+        const totalsByProject = new Map();
+
+        for (const row of rowsInput)
+        {
+            const projectKey = normalizeSortValue(row.Job_No || '');
+            if (!totalsByProject.has(projectKey))
+            {
+                totalsByProject.set(projectKey, {
+                    costs: 0,
+                    revenue: 0
+                });
+            }
+
+            const totals = totalsByProject.get(projectKey);
+            totals.costs += Number(row.Actual_Costs || 0);
+            totals.revenue += Number(row.Total_Revenue || 0);
+        }
+
+        return totalsByProject;
+    }
+
     function getVisibleProjectGroups ()
     {
-        const filteredRows = getVisibleFilteredRows();
-        const globalRows = filteredRows.slice().sort(compareRowsForGlobalOrder);
+        const globalRows = getVisibleSortedRows();
         const groupsByProject = new Map();
 
         for (let index = 0; index < globalRows.length; index += 1)
@@ -1660,7 +1774,7 @@
 
     function exportVisibleRowsToCsv ()
     {
-        const projectGroups = getVisibleProjectGroups();
+        const visibleRows = getVisibleSortedRows();
         const delimiter = ';';
         const headers = exportColumns.map(function (column)
         {
@@ -1668,21 +1782,13 @@
         });
 
         const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
-        for (const group of projectGroups)
+        for (const row of visibleRows)
         {
-            const summary = buildProjectGroupSummary(group.rows, group.projectKey);
-            const summaryValues = new Array(exportColumns.length).fill('');
-            summaryValues[0] = summary.text;
-            csvLines.push(summaryValues.map(escapeCsvValue).join(delimiter));
-
-            for (const row of group.rows)
+            const values = exportColumns.map(function (column)
             {
-                const values = exportColumns.map(function (column)
-                {
-                    return getExportValue(row, column.key);
-                });
-                csvLines.push(values.map(escapeCsvValue).join(delimiter));
-            }
+                return getExportValue(row, column.key);
+            });
+            csvLines.push(values.map(escapeCsvValue).join(delimiter));
         }
 
         const csvContent = '\uFEFF' + csvLines.join('\r\n');
@@ -1731,9 +1837,9 @@
             return formatSignedCurrency(row[key]);
         }
 
-        if (key === 'Actual_Costs' || key === 'Total_Revenue')
+        if (key === 'Actual_Costs' || key === 'Total_Revenue' || key === 'Project_Actual_Costs' || key === 'Project_Total_Revenue')
         {
-            return formatCurrencyOrZero(row[key]);
+            return formatCurrencyOrZero(getColumnValueForSorting(row, key));
         }
 
         return String(row[key] || '');
@@ -1747,6 +1853,17 @@
 
     function compareRowsForGlobalOrder (a, b)
     {
+        if (layoutStyle === 'table' && keepProjectWorkordersTogether)
+        {
+            const leftProjectNo = normalizeSortValue(getColumnValueForSorting(a, 'Job_No'));
+            const rightProjectNo = normalizeSortValue(getColumnValueForSorting(b, 'Job_No'));
+            const projectComparison = leftProjectNo.localeCompare(rightProjectNo, 'nl', { numeric: true, sensitivity: 'base' });
+            if (projectComparison !== 0)
+            {
+                return projectComparison;
+            }
+        }
+
         const activeSortComparison = compareRowsByActiveSort(a, b);
         if (activeSortComparison !== 0)
         {
@@ -1778,8 +1895,8 @@
 
         if (numericSortKeys.has(sortState.key))
         {
-            const leftNumber = Number(a[sortState.key] || 0);
-            const rightNumber = Number(b[sortState.key] || 0);
+            const leftNumber = Number(getColumnValueForSorting(a, sortState.key) || 0);
+            const rightNumber = Number(getColumnValueForSorting(b, sortState.key) || 0);
             const difference = leftNumber - rightNumber;
             return sortState.direction === 'asc' ? difference : -difference;
         }
@@ -1788,6 +1905,12 @@
         const right = normalizeSortValue(getColumnValueForSorting(b, sortState.key));
         const comparison = left.localeCompare(right, 'nl', { numeric: true, sensitivity: 'base' });
         return sortState.direction === 'asc' ? comparison : -comparison;
+    }
+
+    function normalizeLayoutStyle (value)
+    {
+        const normalized = String(value || '').trim().toLowerCase();
+        return normalized === 'projectgroups' ? 'projectgroups' : 'table';
     }
 
     function normalizeSortValue (value)
@@ -1842,6 +1965,18 @@
 
     function getColumnValueForSorting (row, key)
     {
+        if (key === 'Project_Actual_Costs' || key === 'Project_Total_Revenue')
+        {
+            const projectKey = normalizeSortValue(row.Job_No || '');
+            const totals = activeProjectTotalsByProject.get(projectKey);
+            if (!totals)
+            {
+                return 0;
+            }
+
+            return key === 'Project_Actual_Costs' ? Number(totals.costs || 0) : Number(totals.revenue || 0);
+        }
+
         if (key === 'Equipment_Number')
         {
             return getEquipmentDisplayValue(row);

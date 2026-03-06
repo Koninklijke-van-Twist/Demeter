@@ -73,6 +73,44 @@ function memo_setting_keys(): array
     ];
 }
 
+function normalize_layout_style(mixed $value): string
+{
+    $normalized = strtolower(trim((string) $value));
+    if ($normalized === 'projectgroups') {
+        return 'projectgroups';
+    }
+
+    return 'table';
+}
+
+function default_layout_style(): string
+{
+    return 'table';
+}
+
+function normalize_keep_project_workorders_together(mixed $value): bool
+{
+    if ($value === null) {
+        return true;
+    }
+
+    if (is_bool($value)) {
+        return $value;
+    }
+
+    $normalized = strtolower(trim((string) $value));
+    if (in_array($normalized, ['0', 'false', 'nee', 'no', 'off'], true)) {
+        return false;
+    }
+
+    return true;
+}
+
+function default_keep_project_workorders_together(): bool
+{
+    return true;
+}
+
 function usersettings_file_path_for_email(string $email): string
 {
     $safeEmail = preg_replace('/[^a-z0-9@._-]/i', '_', strtolower(trim($email)));
@@ -93,21 +131,31 @@ function default_memo_column_settings(): array
     return $settings;
 }
 
-function load_memo_column_settings(string $email): array
+function load_user_settings_payload(string $email): array
 {
-    $defaults = default_memo_column_settings();
     $path = usersettings_file_path_for_email($email);
     if (!is_file($path) || !is_readable($path)) {
-        return $defaults;
+        return [];
     }
 
     $raw = file_get_contents($path);
     if (!is_string($raw) || trim($raw) === '') {
-        return $defaults;
+        return [];
     }
 
     $parsed = json_decode($raw, true);
     if (!is_array($parsed)) {
+        return [];
+    }
+
+    return $parsed;
+}
+
+function load_memo_column_settings(string $email): array
+{
+    $defaults = default_memo_column_settings();
+    $parsed = load_user_settings_payload($email);
+    if ($parsed === []) {
         return $defaults;
     }
 
@@ -126,7 +174,27 @@ function load_memo_column_settings(string $email): array
     return $merged;
 }
 
-function save_memo_column_settings(string $email, array $input): bool
+function load_layout_style_setting(string $email): string
+{
+    $parsed = load_user_settings_payload($email);
+    if ($parsed === []) {
+        return default_layout_style();
+    }
+
+    return normalize_layout_style($parsed['layout_style'] ?? null);
+}
+
+function load_keep_project_workorders_together_setting(string $email): bool
+{
+    $parsed = load_user_settings_payload($email);
+    if ($parsed === []) {
+        return default_keep_project_workorders_together();
+    }
+
+    return normalize_keep_project_workorders_together($parsed['keep_project_workorders_together'] ?? null);
+}
+
+function normalize_memo_column_settings(array $input): array
 {
     $normalized = default_memo_column_settings();
     foreach ($normalized as $key => $value) {
@@ -135,14 +203,39 @@ function save_memo_column_settings(string $email, array $input): bool
         }
     }
 
+    return $normalized;
+}
+
+function save_user_settings(string $email, ?array $memoColumns, ?string $layoutStyle, mixed $keepProjectWorkordersTogether): bool
+{
     $directory = __DIR__ . '/cache/usersettings';
     if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
         return false;
     }
 
+    $existing = load_user_settings_payload($email);
+    $normalizedMemoColumns = normalize_memo_column_settings(is_array($existing['memo_columns'] ?? null) ? $existing['memo_columns'] : []);
+    if (is_array($memoColumns)) {
+        $normalizedMemoColumns = normalize_memo_column_settings($memoColumns);
+    }
+
+    $normalizedLayoutStyle = normalize_layout_style($existing['layout_style'] ?? default_layout_style());
+    if ($layoutStyle !== null) {
+        $normalizedLayoutStyle = normalize_layout_style($layoutStyle);
+    }
+
+    $normalizedKeepProjectWorkordersTogether = normalize_keep_project_workorders_together(
+        $existing['keep_project_workorders_together'] ?? default_keep_project_workorders_together()
+    );
+    if ($keepProjectWorkordersTogether !== null) {
+        $normalizedKeepProjectWorkordersTogether = normalize_keep_project_workorders_together($keepProjectWorkordersTogether);
+    }
+
     $path = usersettings_file_path_for_email($email);
     $payload = [
-        'memo_columns' => $normalized,
+        'memo_columns' => $normalizedMemoColumns,
+        'layout_style' => $normalizedLayoutStyle,
+        'keep_project_workorders_together' => $normalizedKeepProjectWorkordersTogether,
         'updated_at' => gmdate('c'),
     ];
 
@@ -162,13 +255,23 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
     $rawInput = file_get_contents('php://input');
     $decoded = json_decode(is_string($rawInput) ? $rawInput : '', true);
     $memoColumns = is_array($decoded) ? ($decoded['memo_columns'] ?? null) : null;
-    if (!is_array($memoColumns)) {
+    $layoutStyle = is_array($decoded) ? ($decoded['layout_style'] ?? null) : null;
+    $keepProjectWorkordersTogether = is_array($decoded)
+        ? ($decoded['keep_project_workorders_together'] ?? null)
+        : null;
+
+    if (!is_array($memoColumns) && $layoutStyle === null && $keepProjectWorkordersTogether === null) {
         http_response_code(400);
         echo json_encode(['ok' => false, 'error' => 'Ongeldige instellingen'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
     }
 
-    $saved = save_memo_column_settings($currentUserEmail, $memoColumns);
+    $saved = save_user_settings(
+        $currentUserEmail,
+        is_array($memoColumns) ? $memoColumns : null,
+        $layoutStyle === null ? null : normalize_layout_style($layoutStyle),
+        $keepProjectWorkordersTogether
+    );
     if (!$saved) {
         http_response_code(500);
         echo json_encode(['ok' => false, 'error' => 'Instellingen opslaan mislukt'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
@@ -180,6 +283,8 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
 }
 
 $memoColumnSettings = load_memo_column_settings($currentUserEmail);
+$layoutStyleSetting = load_layout_style_setting($currentUserEmail);
+$keepProjectWorkordersTogetherSetting = load_keep_project_workorders_together_setting($currentUserEmail);
 
 $companies = [
     "Koninklijke van Twist",
@@ -1250,6 +1355,8 @@ $initialData = [
     'to_month' => $toMonthValue,
     'invoice_filter' => $invoiceFilter,
     'memo_column_settings' => $memoColumnSettings,
+    'layout_style' => $layoutStyleSetting,
+    'keep_project_workorders_together' => $keepProjectWorkordersTogetherSetting,
     'save_user_settings_url' => 'index.php?action=save_user_settings',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
@@ -1406,6 +1513,16 @@ $initialData = [
             margin-bottom: 6px;
         }
 
+        .memo-menu-section {
+            padding: 8px 2px;
+        }
+
+        .memo-menu-section+.memo-menu-section {
+            border-top: 1px solid #e7edf5;
+            margin-top: 6px;
+            padding-top: 10px;
+        }
+
         .memo-menu-actions {
             display: flex;
             gap: 6px;
@@ -1437,6 +1554,21 @@ $initialData = [
 
         .memo-menu-option input {
             margin: 0;
+        }
+
+        .memo-menu-option-inline {
+            font-weight: 600;
+            color: #334155;
+            padding-bottom: 2px;
+        }
+
+        .memo-menu-select {
+            width: 100%;
+            font: inherit;
+            border: 1px solid #c8d3e1;
+            border-radius: 6px;
+            padding: 6px 8px;
+            background: #fff;
         }
 
         .summary {
@@ -2059,22 +2191,33 @@ $initialData = [
         </select>
         <button type="submit">Toon</button>
         <div class="memo-menu-wrap" id="memoMenuWrap">
-            <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Memo kolommen</button>
+            <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Voorkeuren</button>
             <div class="memo-menu-panel" id="memoMenuPanel">
-                <div class="memo-menu-title">Toon als eigen kolom</div>
-                <div class="memo-menu-actions">
-                    <button type="button" class="memo-menu-action-btn" id="memoMenuAll">Alles</button>
-                    <button type="button" class="memo-menu-action-btn" id="memoMenuNone">Niets</button>
+                <div class="memo-menu-section">
+                    <div class="memo-menu-title">Memovoorkeuren</div>
+                    <div class="memo-menu-actions">
+                        <button type="button" class="memo-menu-action-btn" id="memoMenuAll">Alles</button>
+                        <button type="button" class="memo-menu-action-btn" id="memoMenuNone">Niets</button>
+                    </div>
+                    <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo">Memo</label>
+                    <label class="memo-menu-option"><input type="checkbox"
+                            data-memo-key="Memo_KVT_Memo_Internal_Use_Only">Memo Intern Gebruik</label>
+                    <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">Memo
+                        Factuur</label>
+                    <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">
+                        Memo Bijzonderheden Facturatie</label>
+                    <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">
+                        Bijzonderheden Facturatie</label>
                 </div>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo">Memo</label>
-                <label class="memo-menu-option"><input type="checkbox"
-                        data-memo-key="Memo_KVT_Memo_Internal_Use_Only">Memo Intern Gebruik</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">Memo
-                    Factuur</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">
-                    Memo Bijzonderheden Facturatie</label>
-                <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">
-                    Bijzonderheden Facturatie</label>
+                <div class="memo-menu-section">
+                    <div class="memo-menu-title">Layout</div>
+                    <label class="memo-menu-option memo-menu-option-inline" for="layoutStyleSelect">Stijl</label>
+                    <select id="layoutStyleSelect" class="memo-menu-select">
+                        <option value="projectgroups">Projectgroepen</option>
+                        <option value="table">Tabel</option>
+                    </select>
+                    <label class="memo-menu-option"><input type="checkbox" id="keepProjectWorkordersTogether">Werkorders van project bij elkaar houden</label>
+                </div>
             </div>
         </div>
         <noscript><button type="submit">Toon</button></noscript>
