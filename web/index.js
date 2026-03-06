@@ -60,9 +60,13 @@
 
     let columns = buildTableColumns();
     const exportColumns = buildExportColumns();
-    const sortState = {
-        key: 'No',
+    const defaultSortState = {
+        key: 'Job_No',
         direction: 'asc'
+    };
+    const sortState = {
+        key: defaultSortState.key,
+        direction: defaultSortState.direction
     };
     const amountColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
     const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total']);
@@ -71,6 +75,7 @@
     const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
     const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
     const invoiceAmountModalMessage = 'Deze bedragen komen direct uit de gekoppelde factuur en gelden als de meest betrouwbare bron.';
+    const noneCostCenterValue = '__none__';
     const costCenterOptions = buildCostCenterOptions();
     const currencyFormatter = new Intl.NumberFormat('nl-NL', {
         style: 'currency',
@@ -393,6 +398,11 @@
             }
 
             const target = event.target;
+            if (target instanceof Element && target.closest('thead'))
+            {
+                return;
+            }
+
             if (target instanceof Element && target.closest(interactiveSelector))
             {
                 return;
@@ -632,13 +642,9 @@
     {
         columns = buildTableColumns();
 
-        if (!columns.some(function (column)
+        if (!isSortKeySupported(sortState.key))
         {
-            return column.key === sortState.key;
-        }))
-        {
-            sortState.key = 'No';
-            sortState.direction = 'asc';
+            resetSortState();
         }
 
         syncMemoMenuInputs();
@@ -737,6 +743,10 @@
             th.tabIndex = 0;
             th.dataset.sortKey = column.key;
             th.title = 'Klik om te sorteren';
+            th.addEventListener('mousedown', function (event)
+            {
+                event.stopPropagation();
+            });
             th.addEventListener('click', function ()
             {
                 updateSort(column.key);
@@ -769,6 +779,11 @@
                 allOption.value = 'all';
                 allOption.textContent = 'Alle';
                 filterSelect.appendChild(allOption);
+
+                const noneOption = document.createElement('option');
+                noneOption.value = noneCostCenterValue;
+                noneOption.textContent = 'Geen';
+                filterSelect.appendChild(noneOption);
 
                 for (const optionValue of costCenterOptions)
                 {
@@ -819,6 +834,7 @@
 
         renderHeader();
         renderRows();
+        renderStatusButtons();
     }
 
     function renderHeader ()
@@ -851,35 +867,16 @@
     {
         updateSummaryCount();
         tbody.innerHTML = '';
-        const visibleRows = getVisibleSortedRows();
+        const projectGroups = getVisibleProjectGroups();
+        let visibleRowCount = 0;
 
-        let groupRows = [];
-        let activeProjectKey = '';
-
-        for (const row of visibleRows)
+        for (const group of projectGroups)
         {
-            const projectKey = normalizeSortValue(row.Job_No || '');
-            if (groupRows.length === 0)
-            {
-                activeProjectKey = projectKey;
-            }
-
-            if (groupRows.length > 0 && projectKey !== activeProjectKey)
-            {
-                appendProjectGroupRows(groupRows, activeProjectKey);
-                groupRows = [];
-                activeProjectKey = projectKey;
-            }
-
-            groupRows.push(row);
+            visibleRowCount += group.rows.length;
+            appendProjectGroupRows(group.rows, group.projectKey);
         }
 
-        if (groupRows.length > 0)
-        {
-            appendProjectGroupRows(groupRows, activeProjectKey);
-        }
-
-        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+        noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
     }
 
     function appendProjectGroupRows (projectRows, projectKey)
@@ -1364,6 +1361,18 @@
         const searchForm = document.createElement('form');
         searchForm.className = 'status-search-form';
 
+        const resetSortButton = document.createElement('button');
+        resetSortButton.type = 'button';
+        resetSortButton.textContent = 'Reset sortering';
+        resetSortButton.disabled = sortState.key === defaultSortState.key && sortState.direction === defaultSortState.direction;
+        resetSortButton.addEventListener('click', function ()
+        {
+            resetSortState();
+            renderHeader();
+            renderRows();
+            renderStatusButtons();
+        });
+
         const searchInput = document.createElement('input');
         searchInput.type = 'text';
         searchInput.placeholder = 'Zoek in tabel';
@@ -1381,9 +1390,29 @@
             renderRows();
         });
 
+        searchForm.appendChild(resetSortButton);
         searchForm.appendChild(searchInput);
         searchForm.appendChild(searchButton);
         statusFilterBar.appendChild(searchForm);
+    }
+
+    function resetSortState ()
+    {
+        sortState.key = defaultSortState.key;
+        sortState.direction = defaultSortState.direction;
+    }
+
+    function isSortKeySupported (key)
+    {
+        if (key === defaultSortState.key)
+        {
+            return true;
+        }
+
+        return columns.some(function (column)
+        {
+            return column.key === key;
+        });
     }
 
     function rowMatchesSearch (row)
@@ -1489,13 +1518,9 @@
 
         for (const row of rows)
         {
-            if (selectedCostCenter !== 'all')
+            if (!matchesSelectedCostCenter(row))
             {
-                const rowCostCenter = String(row.Cost_Center || '').trim();
-                if (rowCostCenter !== selectedCostCenter)
-                {
-                    continue;
-                }
+                continue;
             }
 
             const statusKey = normalizeStatus(row.Status || '');
@@ -1518,8 +1543,7 @@
         {
             count = rows.filter(function (row)
             {
-                const rowCostCenter = String(row.Cost_Center || '').trim();
-                return rowCostCenter === selectedCostCenter;
+                return matchesSelectedCostCenter(row);
             }).length;
         }
 
@@ -1528,16 +1552,26 @@
 
     function getVisibleSortedRows ()
     {
-        const sorted = rows.slice().sort(compareRows);
-        return sorted.filter(function (row)
+        const flattenedRows = [];
+        const groups = getVisibleProjectGroups();
+        for (const group of groups)
         {
-            if (selectedCostCenter !== 'all')
+            for (const row of group.rows)
             {
-                const rowCostCenter = String(row.Cost_Center || '').trim();
-                if (rowCostCenter !== selectedCostCenter)
-                {
-                    return false;
-                }
+                flattenedRows.push(row);
+            }
+        }
+
+        return flattenedRows;
+    }
+
+    function getVisibleFilteredRows ()
+    {
+        return rows.filter(function (row)
+        {
+            if (!matchesSelectedCostCenter(row))
+            {
+                return false;
             }
 
             const statusKey = normalizeStatus(row.Status || '');
@@ -1550,9 +1584,83 @@
         });
     }
 
+    function matchesSelectedCostCenter (row)
+    {
+        if (selectedCostCenter === 'all')
+        {
+            return true;
+        }
+
+        const rowCostCenter = String(row.Cost_Center || '').trim();
+        if (selectedCostCenter === noneCostCenterValue)
+        {
+            return rowCostCenter === '';
+        }
+
+        return rowCostCenter === selectedCostCenter;
+    }
+
+    function getVisibleProjectGroups ()
+    {
+        const filteredRows = getVisibleFilteredRows();
+        const globalRows = filteredRows.slice().sort(compareRowsForGlobalOrder);
+        const groupsByProject = new Map();
+
+        for (let index = 0; index < globalRows.length; index += 1)
+        {
+            const row = globalRows[index];
+            const projectKey = normalizeSortValue(row.Job_No || '');
+            const rank = index + 1;
+
+            if (!groupsByProject.has(projectKey))
+            {
+                groupsByProject.set(projectKey, {
+                    projectKey: projectKey,
+                    rows: [],
+                    sortScoreSum: 0,
+                    sortScoreAverage: 0,
+                    bestRank: rank
+                });
+            }
+
+            const group = groupsByProject.get(projectKey);
+            group.rows.push(row);
+            group.sortScoreSum += rank;
+            if (rank < group.bestRank)
+            {
+                group.bestRank = rank;
+            }
+        }
+
+        const groups = Array.from(groupsByProject.values());
+        for (const group of groups)
+        {
+            group.sortScoreAverage = group.rows.length > 0 ? (group.sortScoreSum / group.rows.length) : Number.POSITIVE_INFINITY;
+        }
+
+        groups.sort(function (leftGroup, rightGroup)
+        {
+            const scoreDifference = leftGroup.sortScoreAverage - rightGroup.sortScoreAverage;
+            if (scoreDifference !== 0)
+            {
+                return scoreDifference;
+            }
+
+            const rankDifference = leftGroup.bestRank - rightGroup.bestRank;
+            if (rankDifference !== 0)
+            {
+                return rankDifference;
+            }
+
+            return leftGroup.projectKey.localeCompare(rightGroup.projectKey, 'nl', { numeric: true, sensitivity: 'base' });
+        });
+
+        return groups;
+    }
+
     function exportVisibleRowsToCsv ()
     {
-        const visibleRows = getVisibleSortedRows();
+        const projectGroups = getVisibleProjectGroups();
         const delimiter = ';';
         const headers = exportColumns.map(function (column)
         {
@@ -1560,22 +1668,14 @@
         });
 
         const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
-        let groupRows = [];
-        let activeProjectKey = '';
-
-        const flushGroup = function ()
+        for (const group of projectGroups)
         {
-            if (groupRows.length === 0)
-            {
-                return;
-            }
-
-            const summary = buildProjectGroupSummary(groupRows, activeProjectKey);
+            const summary = buildProjectGroupSummary(group.rows, group.projectKey);
             const summaryValues = new Array(exportColumns.length).fill('');
             summaryValues[0] = summary.text;
             csvLines.push(summaryValues.map(escapeCsvValue).join(delimiter));
 
-            for (const row of groupRows)
+            for (const row of group.rows)
             {
                 const values = exportColumns.map(function (column)
                 {
@@ -1583,27 +1683,7 @@
                 });
                 csvLines.push(values.map(escapeCsvValue).join(delimiter));
             }
-        };
-
-        for (const row of visibleRows)
-        {
-            const projectKey = normalizeSortValue(row.Job_No || '');
-            if (groupRows.length === 0)
-            {
-                activeProjectKey = projectKey;
-            }
-
-            if (groupRows.length > 0 && projectKey !== activeProjectKey)
-            {
-                flushGroup();
-                groupRows = [];
-                activeProjectKey = projectKey;
-            }
-
-            groupRows.push(row);
         }
-
-        flushGroup();
 
         const csvContent = '\uFEFF' + csvLines.join('\r\n');
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -1665,16 +1745,8 @@
         return '"' + text.replace(/"/g, '""') + '"';
     }
 
-    function compareRows (a, b)
+    function compareRowsForGlobalOrder (a, b)
     {
-        const leftProjectNo = normalizeSortValue(getColumnValueForSorting(a, 'Job_No'));
-        const rightProjectNo = normalizeSortValue(getColumnValueForSorting(b, 'Job_No'));
-        const projectComparison = leftProjectNo.localeCompare(rightProjectNo, 'nl', { numeric: true, sensitivity: 'base' });
-        if (projectComparison !== 0)
-        {
-            return projectComparison;
-        }
-
         const activeSortComparison = compareRowsByActiveSort(a, b);
         if (activeSortComparison !== 0)
         {
@@ -1683,7 +1755,15 @@
 
         const leftNo = normalizeSortValue(getColumnValueForSorting(a, 'No'));
         const rightNo = normalizeSortValue(getColumnValueForSorting(b, 'No'));
-        return leftNo.localeCompare(rightNo, 'nl', { numeric: true, sensitivity: 'base' });
+        const workorderComparison = leftNo.localeCompare(rightNo, 'nl', { numeric: true, sensitivity: 'base' });
+        if (workorderComparison !== 0)
+        {
+            return workorderComparison;
+        }
+
+        const leftProjectNo = normalizeSortValue(getColumnValueForSorting(a, 'Job_No'));
+        const rightProjectNo = normalizeSortValue(getColumnValueForSorting(b, 'Job_No'));
+        return leftProjectNo.localeCompare(rightProjectNo, 'nl', { numeric: true, sensitivity: 'base' });
     }
 
     function compareRowsByActiveSort (a, b)
