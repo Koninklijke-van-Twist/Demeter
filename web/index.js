@@ -112,6 +112,9 @@
     const memoMenuNone = document.getElementById('memoMenuNone');
     const layoutStyleSelect = document.getElementById('layoutStyleSelect');
     const keepProjectWorkordersTogetherInput = document.getElementById('keepProjectWorkordersTogether');
+    const keepProjectWorkordersTogetherOption = keepProjectWorkordersTogetherInput
+        ? keepProjectWorkordersTogetherInput.closest('.memo-menu-option')
+        : null;
     const memoMenuInputs = memoMenuPanel
         ? Array.from(memoMenuPanel.querySelectorAll('input[data-memo-key]'))
         : [];
@@ -734,6 +737,14 @@
         }
 
         keepProjectWorkordersTogetherInput.checked = keepProjectWorkordersTogether;
+
+        const shouldShow = layoutStyle !== 'projectgroups';
+        if (keepProjectWorkordersTogetherOption)
+        {
+            keepProjectWorkordersTogetherOption.style.display = shouldShow ? '' : 'none';
+        }
+
+        keepProjectWorkordersTogetherInput.disabled = !shouldShow;
     }
 
     function saveUserSettings ()
@@ -1662,6 +1673,17 @@
 
     function getVisibleSortedRows ()
     {
+        const globalRows = getVisibleGlobalRows();
+        if (layoutStyle === 'table' && keepProjectWorkordersTogether)
+        {
+            return flattenProjectGroups(buildProjectGroupsFromGlobalRows(globalRows));
+        }
+
+        return globalRows;
+    }
+
+    function getVisibleGlobalRows ()
+    {
         const filteredRows = getVisibleFilteredRows();
         activeProjectTotalsByProject = buildProjectTotalsByProject(filteredRows);
         return filteredRows.slice().sort(compareRowsForGlobalOrder);
@@ -1727,7 +1749,12 @@
 
     function getVisibleProjectGroups ()
     {
-        const globalRows = getVisibleSortedRows();
+        const globalRows = getVisibleGlobalRows();
+        return buildProjectGroupsFromGlobalRows(globalRows);
+    }
+
+    function buildProjectGroupsFromGlobalRows (globalRows)
+    {
         const groupsByProject = new Map();
 
         for (let index = 0; index < globalRows.length; index += 1)
@@ -1780,6 +1807,20 @@
         });
 
         return groups;
+    }
+
+    function flattenProjectGroups (groups)
+    {
+        const flattenedRows = [];
+        for (const group of groups)
+        {
+            for (const row of group.rows)
+            {
+                flattenedRows.push(row);
+            }
+        }
+
+        return flattenedRows;
     }
 
     function exportVisibleRowsToCsv ()
@@ -1863,17 +1904,6 @@
 
     function compareRowsForGlobalOrder (a, b)
     {
-        if (layoutStyle === 'table' && keepProjectWorkordersTogether)
-        {
-            const leftProjectNo = normalizeSortValue(getColumnValueForSorting(a, 'Job_No'));
-            const rightProjectNo = normalizeSortValue(getColumnValueForSorting(b, 'Job_No'));
-            const projectComparison = leftProjectNo.localeCompare(rightProjectNo, 'nl', { numeric: true, sensitivity: 'base' });
-            if (projectComparison !== 0)
-            {
-                return projectComparison;
-            }
-        }
-
         const activeSortComparison = compareRowsByActiveSort(a, b);
         if (activeSortComparison !== 0)
         {
