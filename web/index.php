@@ -335,11 +335,6 @@ function company_entity_url_with_query(string $baseUrl, string $environment, str
     return $url;
 }
 
-function workorder_invoice_key(string $jobNo, string $jobTaskNo): string
-{
-    return strtolower(trim($jobNo)) . '|' . strtolower(trim($jobTaskNo));
-}
-
 function escape_odata_string(string $value): string
 {
     return str_replace("'", "''", $value);
@@ -350,39 +345,7 @@ function normalize_match_value(string $value): string
     return strtolower(trim($value));
 }
 
-function invoice_detail_has_value(mixed $value): bool
-{
-    if ($value === null) {
-        return false;
-    }
-
-    if (is_string($value)) {
-        return trim($value) !== '';
-    }
-
-    if (is_array($value)) {
-        return $value !== [];
-    }
-
-    return true;
-}
-
-function merge_non_empty_invoice_fields(array &$target, array $source): void
-{
-    foreach ($source as $field => $value) {
-        if (!is_string($field) || trim($field) === '') {
-            continue;
-        }
-
-        if (!invoice_detail_has_value($value)) {
-            continue;
-        }
-
-        $target[$field] = $value;
-    }
-}
-
-function first_numeric_invoice_field(array $details, array $fields): ?array
+function first_numeric_value(array $details, array $fields): float
 {
     foreach ($fields as $field) {
         if (!is_string($field) || $field === '' || !array_key_exists($field, $details)) {
@@ -394,31 +357,10 @@ function first_numeric_invoice_field(array $details, array $fields): ?array
             continue;
         }
 
-        return [
-            'field' => $field,
-            'value' => abs((float) $raw),
-        ];
+        return abs((float) $raw);
     }
 
-    return null;
-}
-
-function normalize_invoice_source(string $source): string
-{
-    $normalized = strtolower(trim($source));
-    if ($normalized === 'appprojectinvoices' || $normalized === 'projectinvoices') {
-        return 'app_project';
-    }
-
-    if ($normalized === 'salesinvoice' || $normalized === 'salesinvoices') {
-        return 'sales';
-    }
-
-    if ($normalized === 'serviceinvoice' || $normalized === 'serviceinvoices') {
-        return 'service';
-    }
-
-    return 'unknown';
+    return 0.0;
 }
 
 function chunk_values(array $values, int $size): array
@@ -527,505 +469,245 @@ try {
         }
     }
 
-    $invoices = [];
-    $seenInvoices = [];
-    $invoiceDetailsById = [];
-    $invoiceCursor = $fromMonth;
-    $invoiceEndExclusive = (new DateTimeImmutable('today'))->modify('+1 day');
-
-    while ($invoiceCursor < $invoiceEndExclusive) {
-        $invoiceRangeTo = $invoiceCursor->modify('+1 month');
-        if ($invoiceRangeTo > $invoiceEndExclusive) {
-            $invoiceRangeTo = $invoiceEndExclusive;
+    $projectTotalsByJob = [];
+    $projectNumbers = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
         }
 
-        foreach (['Invoiced_Date', 'Transferred_Date'] as $dateField) {
-            $periodFilter = $dateField . ' ge ' . $invoiceCursor->format('Y-m-d') . ' and ' . $dateField . ' lt ' . $invoiceRangeTo->format('Y-m-d');
+        $projectNo = trim((string) ($workorder['Job_No'] ?? ''));
+        if ($projectNo === '') {
+            continue;
+        }
 
-            $invoiceUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'AppProjectInvoices', [
-                '$select' => 'Job_No,Job_Task_No,Document_No,Line_No,Invoiced_Date,Transferred_Date,Invoiced_Amount_LCY,Invoiced_Cost_Amount_LCY',
-                '$filter' => $periodFilter,
+        $projectNumbers[] = $projectNo;
+    }
+
+    $projectNumberChunks = chunk_values($projectNumbers, 25);
+    foreach ($projectNumberChunks as $projectChunk) {
+        if (!is_array($projectChunk) || $projectChunk === []) {
+            continue;
+        }
+
+        $filterParts = [];
+        foreach ($projectChunk as $projectNo) {
+            $filterParts[] = "No eq '" . escape_odata_string($projectNo) . "'";
+        }
+
+        if ($filterParts === []) {
+            continue;
+        }
+
+        $filter = implode(' or ', $filterParts);
+        try {
+            $projectUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'Projecten', [
+                '$select' => 'No,External_Document_No,Your_Reference,Total_WIP_Cost_Amount,Total_WIP_Sales_Amount,Recog_Costs_Amount,Recog_Sales_Amount,Calc_Recog_Costs_Amount,Calc_Recog_Sales_Amount,Acc_WIP_Costs_Amount,Acc_WIP_Sales_Amount',
+                '$filter' => $filter,
             ]);
 
-            $batchInvoices = odata_get_all($invoiceUrl, $auth, $ttl);
-            foreach ($batchInvoices as $invoice) {
-                if (!is_array($invoice)) {
+            $batchProjects = odata_get_all($projectUrl, $auth, $ttl);
+        } catch (Throwable $ignoredProjectLoadError) {
+            continue;
+        }
+
+        foreach ($batchProjects as $projectRow) {
+            if (!is_array($projectRow)) {
+                continue;
+            }
+
+            $projectNo = trim((string) ($projectRow['No'] ?? ''));
+            if ($projectNo === '') {
+                continue;
+            }
+
+            $normalizedProjectNo = normalize_match_value($projectNo);
+            $projectCosts = first_numeric_value($projectRow, [
+                'Total_WIP_Cost_Amount',
+                'Recog_Costs_Amount',
+                'Calc_Recog_Costs_Amount',
+                'Acc_WIP_Costs_Amount',
+            ]);
+            $projectRevenue = first_numeric_value($projectRow, [
+                'Total_WIP_Sales_Amount',
+                'Recog_Sales_Amount',
+                'Calc_Recog_Sales_Amount',
+                'Acc_WIP_Sales_Amount',
+            ]);
+            $projectTotalsByJob[$normalizedProjectNo] = [
+                'costs' => $projectCosts,
+                'revenue' => $projectRevenue,
+            ];
+        }
+    }
+
+    $invoiceDetailsById = [];
+    $projectInvoiceIdsByJob = [];
+    $projectInvoicedTotalByJob = [];
+
+    $invoiceSources = [
+        [
+            'entity' => 'SalesInvoiceLines',
+            'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No,Type',
+            'amount_field' => 'Amount',
+            'amount_incl_field' => 'Amount_Including_VAT',
+        ],
+        [
+            'entity' => 'SalesLines',
+            'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No,Type',
+            'amount_field' => 'Line_Amount',
+            'amount_incl_field' => 'Line_Amount',
+        ],
+    ];
+
+    foreach ($invoiceSources as $invoiceSource) {
+        $entity = trim((string) ($invoiceSource['entity'] ?? ''));
+        $selectFields = trim((string) ($invoiceSource['select'] ?? ''));
+        $amountField = trim((string) ($invoiceSource['amount_field'] ?? ''));
+        $amountInclField = trim((string) ($invoiceSource['amount_incl_field'] ?? ''));
+
+        if ($entity === '' || $selectFields === '' || $amountField === '') {
+            continue;
+        }
+
+        foreach ($projectNumberChunks as $projectChunk) {
+            if (!is_array($projectChunk) || $projectChunk === []) {
+                continue;
+            }
+
+            $jobFilters = [];
+            foreach ($projectChunk as $projectNo) {
+                $projectNoText = trim((string) $projectNo);
+                if ($projectNoText === '') {
                     continue;
                 }
 
-                $invoiceDocumentNo = trim((string) ($invoice['Document_No'] ?? ''));
-                $invoiceJobNo = trim((string) ($invoice['Job_No'] ?? ''));
-                $invoiceJobTaskNo = trim((string) ($invoice['Job_Task_No'] ?? ''));
-                $invoiceInvoicedDate = trim((string) ($invoice['Invoiced_Date'] ?? ''));
-                $invoiceTransferredDate = trim((string) ($invoice['Transferred_Date'] ?? ''));
-                $invoiceLineNo = (string) ($invoice['Line_No'] ?? '');
-                $invoiceAmountLcy = abs((float) ($invoice['Invoiced_Amount_LCY'] ?? 0));
-                $invoiceCostAmountLcy = abs((float) ($invoice['Invoiced_Cost_Amount_LCY'] ?? 0));
+                $jobFilters[] = "Job_No eq '" . escape_odata_string($projectNoText) . "'";
+            }
 
-                if ($invoiceDocumentNo !== '') {
-                    if (!isset($invoiceDetailsById[$invoiceDocumentNo])) {
-                        $invoiceDetailsById[$invoiceDocumentNo] = [
-                            'Source' => 'AppProjectInvoices',
-                            'Invoice_Id' => $invoiceDocumentNo,
-                            'Job_Nos' => [],
-                            'Job_Task_Nos' => [],
-                            'Line_Count' => 0,
-                            'Invoiced_Amount_LCY_Total' => 0.0,
-                            'Invoiced_Cost_Amount_LCY_Total' => 0.0,
-                            'Invoiced_Date_First' => '',
-                            'Invoiced_Date_Last' => '',
-                            'Transferred_Date_First' => '',
-                            'Transferred_Date_Last' => '',
-                        ];
-                    }
+            if ($jobFilters === []) {
+                continue;
+            }
 
-                    merge_non_empty_invoice_fields($invoiceDetailsById[$invoiceDocumentNo], $invoice);
+            try {
+                $invoiceUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, $entity, [
+                    '$select' => $selectFields,
+                    '$filter' => implode(' or ', $jobFilters),
+                ]);
+                $invoiceRows = odata_get_all($invoiceUrl, $auth, $ttl);
+            } catch (Throwable $ignoredSalesInvoiceSourceError) {
+                continue;
+            }
 
-                    $invoiceDetailsById[$invoiceDocumentNo]['Line_Count']++;
-                    $invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Amount_LCY_Total'] += $invoiceAmountLcy;
-                    $invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Cost_Amount_LCY_Total'] += $invoiceCostAmountLcy;
-
-                    if ($invoiceJobNo !== '' && !in_array($invoiceJobNo, $invoiceDetailsById[$invoiceDocumentNo]['Job_Nos'], true)) {
-                        $invoiceDetailsById[$invoiceDocumentNo]['Job_Nos'][] = $invoiceJobNo;
-                    }
-
-                    if ($invoiceJobTaskNo !== '' && !in_array($invoiceJobTaskNo, $invoiceDetailsById[$invoiceDocumentNo]['Job_Task_Nos'], true)) {
-                        $invoiceDetailsById[$invoiceDocumentNo]['Job_Task_Nos'][] = $invoiceJobTaskNo;
-                    }
-
-                    if ($invoiceInvoicedDate !== '') {
-                        $firstInvoicedDate = (string) ($invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Date_First'] ?? '');
-                        $lastInvoicedDate = (string) ($invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Date_Last'] ?? '');
-                        if ($firstInvoicedDate === '' || $invoiceInvoicedDate < $firstInvoicedDate) {
-                            $invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Date_First'] = $invoiceInvoicedDate;
-                        }
-                        if ($lastInvoicedDate === '' || $invoiceInvoicedDate > $lastInvoicedDate) {
-                            $invoiceDetailsById[$invoiceDocumentNo]['Invoiced_Date_Last'] = $invoiceInvoicedDate;
-                        }
-                    }
-
-                    if ($invoiceTransferredDate !== '') {
-                        $firstTransferredDate = (string) ($invoiceDetailsById[$invoiceDocumentNo]['Transferred_Date_First'] ?? '');
-                        $lastTransferredDate = (string) ($invoiceDetailsById[$invoiceDocumentNo]['Transferred_Date_Last'] ?? '');
-                        if ($firstTransferredDate === '' || $invoiceTransferredDate < $firstTransferredDate) {
-                            $invoiceDetailsById[$invoiceDocumentNo]['Transferred_Date_First'] = $invoiceTransferredDate;
-                        }
-                        if ($lastTransferredDate === '' || $invoiceTransferredDate > $lastTransferredDate) {
-                            $invoiceDetailsById[$invoiceDocumentNo]['Transferred_Date_Last'] = $invoiceTransferredDate;
-                        }
-                    }
-
-                    if ($invoiceLineNo !== '') {
-                        $invoiceDetailsById[$invoiceDocumentNo]['Laatste_Line_No'] = $invoiceLineNo;
-                    }
+            foreach ($invoiceRows as $invoiceRow) {
+                if (!is_array($invoiceRow)) {
+                    continue;
                 }
 
-                $invoiceKey = implode('|', [
-                    $invoiceDocumentNo,
-                    $invoiceLineNo,
-                    $invoiceJobNo,
-                    $invoiceJobTaskNo,
-                    $invoiceInvoicedDate,
-                    $invoiceTransferredDate,
+                $jobNo = trim((string) ($invoiceRow['Job_No'] ?? ''));
+                $invoiceId = trim((string) ($invoiceRow['Document_No'] ?? ''));
+                if ($jobNo === '' || $invoiceId === '') {
+                    continue;
+                }
+
+                $normalizedJobNo = normalize_match_value($jobNo);
+                $amountRaw = $invoiceRow[$amountField] ?? null;
+                $amount = is_numeric($amountRaw) ? abs((float) $amountRaw) : 0.0;
+
+                $amountInclRaw = $amountInclField !== '' ? ($invoiceRow[$amountInclField] ?? null) : null;
+                $amountIncludingVat = is_numeric($amountInclRaw) ? abs((float) $amountInclRaw) : $amount;
+
+                $lineDiscountPercentRaw = $invoiceRow['Line_Discount_Percent'] ?? null;
+                $lineDiscountPercent = is_numeric($lineDiscountPercentRaw) ? (float) $lineDiscountPercentRaw : 0.0;
+
+                $lineDiscountAmountRaw = $invoiceRow['Line_Discount_Amount'] ?? null;
+                $lineDiscountAmount = is_numeric($lineDiscountAmountRaw) ? abs((float) $lineDiscountAmountRaw) : 0.0;
+
+                $customerNo = trim((string) ($invoiceRow['Sell_to_Customer_No'] ?? ''));
+                $variantCode = trim((string) ($invoiceRow['Variant_Code'] ?? ''));
+                $description = trim((string) ($invoiceRow['Description'] ?? ''));
+
+                if (!isset($invoiceDetailsById[$invoiceId])) {
+                    $invoiceDetailsById[$invoiceId] = [
+                        'Invoice_Id' => $invoiceId,
+                        'Source_Entity' => $entity,
+                        'Source_Entities' => [],
+                        'Lines' => [],
+                        '_seen_lines' => [],
+                    ];
+                }
+
+                $invoiceDetailsById[$invoiceId]['Source_Entities'][$entity] = true;
+
+                $linePayload = [
+                    'Source_Entity' => $entity,
+                    'Customer_No' => $customerNo,
+                    'Variant_Code' => $variantCode,
+                    'Description' => $description,
+                    'Amount' => $amount,
+                    'Amount_Including_Vat' => $amountIncludingVat,
+                    'Line_Discount_Percent' => $lineDiscountPercent,
+                    'Line_Discount_Amount' => $lineDiscountAmount,
+                ];
+                $lineDedupKey = implode('|', [
+                    $customerNo,
+                    $variantCode,
+                    $description,
+                    (string) $amount,
+                    (string) $amountIncludingVat,
+                    (string) $lineDiscountPercent,
+                    (string) $lineDiscountAmount,
                 ]);
 
-                if ($invoiceKey !== '' && isset($seenInvoices[$invoiceKey])) {
-                    continue;
+                if (!isset($invoiceDetailsById[$invoiceId]['_seen_lines'][$lineDedupKey])) {
+                    $invoiceDetailsById[$invoiceId]['_seen_lines'][$lineDedupKey] = true;
+                    $invoiceDetailsById[$invoiceId]['Lines'][] = $linePayload;
                 }
 
-                if ($invoiceKey !== '') {
-                    $seenInvoices[$invoiceKey] = true;
+                if (!isset($projectInvoiceIdsByJob[$normalizedJobNo])) {
+                    $projectInvoiceIdsByJob[$normalizedJobNo] = [];
                 }
+                $projectInvoiceIdsByJob[$normalizedJobNo][$invoiceId] = true;
 
-                $invoices[] = $invoice;
-            }
-        }
-
-        $invoiceCursor = $invoiceRangeTo;
-    }
-
-    $invoiceKeys = [];
-    $invoiceJobOnly = [];
-    $invoiceReferences = [];
-    $invoiceProjectDimension2 = [];
-    $invoiceFinancialByJobTask = [];
-    $invoiceFinancialByDocument = [];
-    foreach ($invoices as $invoice) {
-        if (!is_array($invoice)) {
-            continue;
-        }
-
-        $invoiceJobNo = trim((string) ($invoice['Job_No'] ?? ''));
-        $invoiceJobTaskNo = trim((string) ($invoice['Job_Task_No'] ?? ''));
-        $invoiceDocumentNo = trim((string) ($invoice['Document_No'] ?? ''));
-        $invoiceRevenue = abs((float) ($invoice['Invoiced_Amount_LCY'] ?? 0));
-        $invoiceCosts = abs((float) ($invoice['Invoiced_Cost_Amount_LCY'] ?? 0));
-        if ($invoiceDocumentNo !== '') {
-            if (!isset($invoiceFinancialByDocument[$invoiceDocumentNo])) {
-                $invoiceFinancialByDocument[$invoiceDocumentNo] = [
-                    'costs' => 0.0,
-                    'revenue' => 0.0,
-                ];
-            }
-
-            $invoiceFinancialByDocument[$invoiceDocumentNo]['costs'] += $invoiceCosts;
-            $invoiceFinancialByDocument[$invoiceDocumentNo]['revenue'] += $invoiceRevenue;
-        }
-
-        if ($invoiceJobNo === '') {
-            continue;
-        }
-
-        $invoiceJobOnly[normalize_match_value($invoiceJobNo)] = [
-            'id' => $invoiceDocumentNo,
-            'source' => 'AppProjectInvoices',
-        ];
-
-        if ($invoiceJobTaskNo !== '') {
-            $invoiceKeys[workorder_invoice_key($invoiceJobNo, $invoiceJobTaskNo)] = [
-                'id' => $invoiceDocumentNo,
-                'source' => 'AppProjectInvoices',
-            ];
-
-            $invoiceJobTaskKey = workorder_invoice_key($invoiceJobNo, $invoiceJobTaskNo);
-            if (!isset($invoiceFinancialByJobTask[$invoiceJobTaskKey])) {
-                $invoiceFinancialByJobTask[$invoiceJobTaskKey] = [
-                    'costs' => 0.0,
-                    'revenue' => 0.0,
-                    'id' => '',
-                ];
-            }
-
-            $invoiceFinancialByJobTask[$invoiceJobTaskKey]['costs'] += $invoiceCosts;
-            $invoiceFinancialByJobTask[$invoiceJobTaskKey]['revenue'] += $invoiceRevenue;
-            if ($invoiceDocumentNo !== '') {
-                $invoiceFinancialByJobTask[$invoiceJobTaskKey]['id'] = $invoiceDocumentNo;
-            }
-        }
-
-        if ($invoiceDocumentNo !== '') {
-            $invoiceReferences[normalize_match_value($invoiceDocumentNo)] = [
-                'id' => $invoiceDocumentNo,
-                'source' => 'AppProjectInvoices',
-            ];
-        }
-    }
-
-    $additionalInvoiceSources = [
-        [
-            'entity' => 'SalesInvoices',
-            'date_fields' => ['Posting_Date', 'Document_Date'],
-            'select_candidates' => [
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Amount,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Amount',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date',
-            ],
-        ],
-        [
-            'entity' => 'ServiceInvoices',
-            'date_fields' => ['Document_Date', 'Order_Date'],
-            'select_candidates' => [
-                'No,External_Document_No,Your_Reference,Document_Date,Order_Date,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Document_Date,Order_Date',
-            ],
-        ],
-        [
-            'entity' => 'SalesInvoice',
-            'date_fields' => ['Posting_Date', 'Document_Date'],
-            'select_candidates' => [
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Amount,Total_Amount_Excl_VAT,Total_VAT_Amount,Total_Amount_Incl_VAT,Invoice_Discount_Amount,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Amount,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Amount',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date',
-            ],
-        ],
-        [
-            'entity' => 'ServiceInvoice',
-            'date_fields' => ['Posting_Date', 'Document_Date'],
-            'select_candidates' => [
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Total_Amount_Excl_VAT,Total_VAT_Amount,Total_Amount_Incl_VAT,Invoice_Discount_Amount,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date,Shortcut_Dimension_2_Code',
-                'No,External_Document_No,Your_Reference,Posting_Date,Document_Date',
-            ],
-        ],
-    ];
-
-    foreach ($additionalInvoiceSources as $source) {
-        $entity = (string) ($source['entity'] ?? '');
-        $dateFields = $source['date_fields'] ?? [];
-        $selectCandidates = $source['select_candidates'] ?? [];
-
-        if ($entity === '' || !is_array($dateFields) || !is_array($selectCandidates) || $selectCandidates === []) {
-            continue;
-        }
-
-        $sourceSeen = [];
-        foreach ($dateFields as $dateField) {
-            if (!is_string($dateField) || trim($dateField) === '') {
-                continue;
-            }
-
-            $invoiceCursor = $fromMonth;
-            $invoiceEndExclusive = (new DateTimeImmutable('today'))->modify('+1 day');
-
-            while ($invoiceCursor < $invoiceEndExclusive) {
-                $invoiceRangeTo = $invoiceCursor->modify('+1 month');
-                if ($invoiceRangeTo > $invoiceEndExclusive) {
-                    $invoiceRangeTo = $invoiceEndExclusive;
+                if (!isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
+                    $projectInvoicedTotalByJob[$normalizedJobNo] = 0.0;
                 }
-
-                $periodFilter = $dateField . ' ge ' . $invoiceCursor->format('Y-m-d') . ' and ' . $dateField . ' lt ' . $invoiceRangeTo->format('Y-m-d');
-
-                $batchInvoices = [];
-                $loaded = false;
-                foreach ($selectCandidates as $selectCandidate) {
-                    if (!is_string($selectCandidate) || trim($selectCandidate) === '') {
-                        continue;
-                    }
-
-                    try {
-                        $invoiceUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, $entity, [
-                            '$select' => $selectCandidate,
-                            '$filter' => $periodFilter,
-                        ]);
-
-                        $batchInvoices = odata_get_all($invoiceUrl, $auth, $ttl);
-                        $loaded = true;
-                        break;
-                    } catch (Throwable $ignoredSelectError) {
-                        continue;
-                    }
-                }
-
-                if (!$loaded) {
-                    $invoiceCursor = $invoiceRangeTo;
-                    continue;
-                }
-
-                foreach ($batchInvoices as $invoice) {
-                    if (!is_array($invoice)) {
-                        continue;
-                    }
-
-                    $sourceKey = implode('|', [
-                        trim((string) ($invoice['No'] ?? '')),
-                        trim((string) ($invoice['External_Document_No'] ?? '')),
-                        trim((string) ($invoice['Your_Reference'] ?? '')),
-                        trim((string) ($invoice['Posting_Date'] ?? '')),
-                        trim((string) ($invoice['Document_Date'] ?? '')),
-                        trim((string) ($invoice['Order_Date'] ?? '')),
-                    ]);
-
-                    if ($sourceKey !== '' && isset($sourceSeen[$sourceKey])) {
-                        continue;
-                    }
-
-                    if ($sourceKey !== '') {
-                        $sourceSeen[$sourceKey] = true;
-                    }
-
-                    $sourceInvoiceNo = trim((string) ($invoice['No'] ?? ''));
-                    if ($sourceInvoiceNo !== '') {
-                        if (!isset($invoiceDetailsById[$sourceInvoiceNo])) {
-                            $invoiceDetailsById[$sourceInvoiceNo] = [
-                                'Source' => $entity,
-                                'Invoice_Id' => $sourceInvoiceNo,
-                            ];
-                        }
-
-                        merge_non_empty_invoice_fields($invoiceDetailsById[$sourceInvoiceNo], $invoice);
-                        $invoiceDetailsById[$sourceInvoiceNo]['Source'] = $entity;
-                        $invoiceDetailsById[$sourceInvoiceNo]['Invoice_Id'] = $sourceInvoiceNo;
-                    }
-
-                    $referenceCandidates = [
-                        trim((string) ($invoice['External_Document_No'] ?? '')),
-                        trim((string) ($invoice['Your_Reference'] ?? '')),
-                    ];
-
-                    foreach ($referenceCandidates as $referenceValue) {
-                        if ($referenceValue === '') {
-                            continue;
-                        }
-
-                        $normalizedReferenceValue = normalize_match_value($referenceValue);
-                        if (!isset($invoiceReferences[$normalizedReferenceValue])) {
-                            $invoiceReferences[$normalizedReferenceValue] = [
-                                'id' => $sourceInvoiceNo,
-                                'source' => $entity,
-                            ];
-                        }
-                    }
-
-                    $projectNumberRaw = trim((string) ($invoice['Shortcut_Dimension_2_Code'] ?? ''));
-                    if ($projectNumberRaw !== '' && $sourceInvoiceNo !== '') {
-                        $normalizedProjectNumber = normalize_match_value($projectNumberRaw);
-                        if (!isset($invoiceProjectDimension2[$normalizedProjectNumber])) {
-                            $invoiceProjectDimension2[$normalizedProjectNumber] = [
-                                'id' => $sourceInvoiceNo,
-                                'source' => $entity,
-                            ];
-                        }
-                    }
-                }
-
-                $invoiceCursor = $invoiceRangeTo;
+                $projectInvoicedTotalByJob[$normalizedJobNo] += $amountIncludingVat;
             }
         }
     }
 
-    $invoiceIdsByType = [
-        'sales' => [],
-        'service' => [],
-    ];
-
-    foreach ($invoiceDetailsById as $invoiceId => $invoiceDetails) {
-        if (!is_string($invoiceId) || trim($invoiceId) === '') {
+    foreach ($invoiceDetailsById as $invoiceId => $details) {
+        if (!is_array($details)) {
             continue;
         }
 
-        if (!is_array($invoiceDetails)) {
-            continue;
+        $sourceEntitiesMap = is_array($details['Source_Entities'] ?? null)
+            ? $details['Source_Entities']
+            : [];
+        $sourceEntities = array_keys($sourceEntitiesMap);
+        usort($sourceEntities, static function (string $left, string $right): int {
+            return strnatcasecmp($left, $right);
+        });
+
+        $invoiceDetailsById[$invoiceId]['Source_Entities'] = $sourceEntities;
+        if ($sourceEntities !== []) {
+            $invoiceDetailsById[$invoiceId]['Source_Entity'] = $sourceEntities[0];
         }
 
-        $detailsSource = normalize_invoice_source((string) ($invoiceDetails['Source'] ?? ''));
-        if ($detailsSource === 'sales' || $detailsSource === 'service') {
-            $invoiceIdsByType[$detailsSource][] = trim($invoiceId);
-        }
+        unset($invoiceDetailsById[$invoiceId]['_seen_lines']);
     }
 
-    $lineSources = [
-        'sales' => [
-            'entity' => 'SalesInvoiceSalesLines',
-            'select_candidates' => [
-                'Document_No,Line_Amount,KVT_Total_Costs_Line_LCY,Unit_Cost_LCY,Quantity',
-                'Document_No,Line_Amount,Unit_Cost_LCY,Quantity',
-                'Document_No,Line_Amount',
-            ],
-        ],
-        'service' => [
-            'entity' => 'ServiceInvoiceServLines',
-            'select_candidates' => [
-                'Document_No,Line_Amount,Unit_Cost_LCY,Quantity',
-                'Document_No,Line_Amount,Unit_Cost_LCY',
-                'Document_No,Line_Amount',
-            ],
-        ],
-    ];
-
-    $invoiceLineFinancialByType = [
-        'sales' => [],
-        'service' => [],
-    ];
-
-    foreach ($lineSources as $typeKey => $lineSourceConfig) {
-        $typeInvoiceIds = $invoiceIdsByType[$typeKey] ?? [];
-        if (!is_array($typeInvoiceIds) || $typeInvoiceIds === []) {
+    foreach ($projectInvoiceIdsByJob as $normalizedJobNo => $invoiceIdMap) {
+        if (!is_array($invoiceIdMap)) {
             continue;
         }
 
-        $entity = (string) ($lineSourceConfig['entity'] ?? '');
-        $selectCandidates = $lineSourceConfig['select_candidates'] ?? [];
-        if ($entity === '' || !is_array($selectCandidates) || $selectCandidates === []) {
-            continue;
-        }
-
-        $chunks = chunk_values($typeInvoiceIds, 25);
-        foreach ($chunks as $chunkIds) {
-            if (!is_array($chunkIds) || $chunkIds === []) {
-                continue;
-            }
-
-            $filterParts = [];
-            foreach ($chunkIds as $chunkId) {
-                $filterParts[] = "Document_No eq '" . escape_odata_string($chunkId) . "'";
-            }
-
-            if ($filterParts === []) {
-                continue;
-            }
-
-            $filter = implode(' or ', $filterParts);
-            $batchLines = [];
-            $loaded = false;
-
-            foreach ($selectCandidates as $selectCandidate) {
-                if (!is_string($selectCandidate) || trim($selectCandidate) === '') {
-                    continue;
-                }
-
-                try {
-                    $lineUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, $entity, [
-                        '$select' => $selectCandidate,
-                        '$filter' => $filter,
-                    ]);
-
-                    $batchLines = odata_get_all($lineUrl, auth: $auth, ttlSeconds: $ttl);
-                    $loaded = true;
-                    break;
-                } catch (Throwable $ignoredLineSelectError) {
-                    continue;
-                }
-            }
-
-            if (!$loaded) {
-                continue;
-            }
-
-            foreach ($batchLines as $line) {
-                if (!is_array($line)) {
-                    continue;
-                }
-
-                $documentNo = trim((string) ($line['Document_No'] ?? ''));
-                if ($documentNo === '') {
-                    continue;
-                }
-
-                if (!isset($invoiceLineFinancialByType[$typeKey][$documentNo])) {
-                    $invoiceLineFinancialByType[$typeKey][$documentNo] = [
-                        'revenue' => 0.0,
-                        'costs' => 0.0,
-                        'line_count' => 0,
-                    ];
-                }
-
-                $invoiceLineFinancialByType[$typeKey][$documentNo]['line_count']++;
-                $lineRevenue = abs((float) ($line['Line_Amount'] ?? 0));
-                $invoiceLineFinancialByType[$typeKey][$documentNo]['revenue'] += $lineRevenue;
-
-                if ($typeKey === 'sales') {
-                    $lineCosts = abs((float) ($line['KVT_Total_Costs_Line_LCY'] ?? 0));
-                    if ($lineCosts <= 0 && isset($line['Unit_Cost_LCY'], $line['Quantity']) && is_numeric($line['Unit_Cost_LCY']) && is_numeric($line['Quantity'])) {
-                        $lineCosts = abs((float) $line['Unit_Cost_LCY'] * (float) $line['Quantity']);
-                    }
-
-                    $invoiceLineFinancialByType[$typeKey][$documentNo]['costs'] += $lineCosts;
-                } else {
-                    $lineCosts = 0.0;
-                    if (isset($line['Unit_Cost_LCY'], $line['Quantity']) && is_numeric($line['Unit_Cost_LCY']) && is_numeric($line['Quantity'])) {
-                        $lineCosts = abs((float) $line['Unit_Cost_LCY'] * (float) $line['Quantity']);
-                    }
-
-                    $invoiceLineFinancialByType[$typeKey][$documentNo]['costs'] += $lineCosts;
-                }
-            }
-        }
-    }
-
-    foreach ($invoiceLineFinancialByType as $typeKey => $typeFinancials) {
-        foreach ($typeFinancials as $invoiceId => $financials) {
-            if (!isset($invoiceDetailsById[$invoiceId]) || !is_array($invoiceDetailsById[$invoiceId])) {
-                $invoiceDetailsById[$invoiceId] = [];
-            }
-
-            $invoiceDetailsById[$invoiceId]['Line_Source_Entity'] = $typeKey === 'sales' ? 'SalesInvoiceSalesLines' : 'ServiceInvoiceServLines';
-            $invoiceDetailsById[$invoiceId]['Line_Revenue_Total'] = (float) ($financials['revenue'] ?? 0);
-            $invoiceDetailsById[$invoiceId]['Line_Cost_Total'] = (float) ($financials['costs'] ?? 0);
-            $invoiceDetailsById[$invoiceId]['Line_Count'] = (int) ($financials['line_count'] ?? 0);
-        }
+        $invoiceIds = array_keys($invoiceIdMap);
+        usort($invoiceIds, static function (string $left, string $right): int {
+            return strnatcasecmp($left, $right);
+        });
+        $projectInvoiceIdsByJob[$normalizedJobNo] = $invoiceIds;
     }
 
     foreach ($workorders as $workorder) {
@@ -1035,69 +717,14 @@ try {
 
         $jobNo = trim((string) ($workorder['Job_No'] ?? ''));
         $jobTaskNo = trim((string) ($workorder['Job_Task_No'] ?? ''));
-        $workorderNo = trim((string) ($workorder['No'] ?? ''));
-        $workorderExternalDocumentNo = trim((string) ($workorder['External_Document_No'] ?? ''));
         $normalizedJobNo = normalize_match_value($jobNo);
 
-        $isInvoiced = false;
-        $matchedInvoiceId = '';
-        $matchedInvoiceSource = '';
-        $invoiceMatchPath = 'none';
-        if ($jobNo !== '') {
-            $candidateKeys = [];
-            if ($jobTaskNo !== '') {
-                $candidateKeys[] = workorder_invoice_key($jobNo, $jobTaskNo);
-            }
-            if ($workorderNo !== '') {
-                $candidateKeys[] = workorder_invoice_key($jobNo, $workorderNo);
-            }
-
-            foreach ($candidateKeys as $candidateKey) {
-                if (isset($invoiceKeys[$candidateKey])) {
-                    $isInvoiced = true;
-                    $matchedInvoiceId = (string) (($invoiceKeys[$candidateKey]['id'] ?? '') ?: '');
-                    $matchedInvoiceSource = (string) (($invoiceKeys[$candidateKey]['source'] ?? '') ?: '');
-                    $invoiceMatchPath = 'job_task';
-                    break;
-                }
-            }
-
-            if (!$isInvoiced && isset($invoiceJobOnly[$normalizedJobNo])) {
-                $isInvoiced = true;
-                $matchedInvoiceId = (string) (($invoiceJobOnly[$normalizedJobNo]['id'] ?? '') ?: '');
-                $matchedInvoiceSource = (string) (($invoiceJobOnly[$normalizedJobNo]['source'] ?? '') ?: '');
-                $invoiceMatchPath = 'job';
-            }
-
-            if (!$isInvoiced) {
-                $referenceCandidates = [
-                    normalize_match_value($workorderNo),
-                    normalize_match_value($workorderExternalDocumentNo),
-                ];
-
-                foreach ($referenceCandidates as $referenceCandidate) {
-                    if ($referenceCandidate === '') {
-                        continue;
-                    }
-
-                    if (isset($invoiceReferences[$referenceCandidate])) {
-                        $isInvoiced = true;
-                        $matchedInvoiceId = (string) (($invoiceReferences[$referenceCandidate]['id'] ?? '') ?: '');
-                        $matchedInvoiceSource = (string) (($invoiceReferences[$referenceCandidate]['source'] ?? '') ?: '');
-                        $invoiceMatchPath = 'reference';
-                        break;
-                    }
-                }
-            }
-
-            if (!$isInvoiced && $normalizedJobNo !== '' && isset($invoiceProjectDimension2[$normalizedJobNo])) {
-                $isInvoiced = true;
-                $matchedInvoiceId = (string) (($invoiceProjectDimension2[$normalizedJobNo]['id'] ?? '') ?: '');
-                $matchedInvoiceSource = (string) (($invoiceProjectDimension2[$normalizedJobNo]['source'] ?? '') ?: '');
-                $invoiceMatchPath = 'project_dimension_2';
-            }
+        $invoiceIdsForProject = [];
+        if ($normalizedJobNo !== '' && isset($projectInvoiceIdsByJob[$normalizedJobNo]) && is_array($projectInvoiceIdsByJob[$normalizedJobNo])) {
+            $invoiceIdsForProject = $projectInvoiceIdsByJob[$normalizedJobNo];
         }
 
+        $isInvoiced = $invoiceIdsForProject !== [];
         if ($invoiceFilter === 'invoiced' && !$isInvoiced) {
             continue;
         }
@@ -1108,181 +735,16 @@ try {
 
         $costItems = (float) ($workorder['KVT_Sum_Work_Order_Cost_Items'] ?? 0);
         $costOther = (float) ($workorder['KVT_Sum_Work_Order_Cost_Other'] ?? 0);
-        $workorderActualCosts = $costItems + $costOther;
-        $workorderTotalRevenue = abs((float) ($workorder['KVT_Sum_Work_Order_Revenue'] ?? 0));
-        $actualCosts = $workorderActualCosts;
-        $totalRevenue = $workorderTotalRevenue;
-        $amountSource = 'workorder';
-        $amountSourceReason = 'Geen factuurmatch gevonden; bedragen uit werkorder gebruikt.';
-        $actualCostsSource = 'workorder';
-        $actualCostsSourceReason = 'Kosten uit werkordervelden gelezen.';
-        $totalRevenueSource = 'workorder';
-        $totalRevenueSourceReason = 'Opbrengst uit werkorderveld gelezen.';
-
-        $resolvedInvoiceSource = normalize_invoice_source($matchedInvoiceSource);
-        if ($resolvedInvoiceSource === 'unknown' && $matchedInvoiceId !== '' && isset($invoiceDetailsById[$matchedInvoiceId]) && is_array($invoiceDetailsById[$matchedInvoiceId])) {
-            $resolvedInvoiceSource = normalize_invoice_source((string) ($invoiceDetailsById[$matchedInvoiceId]['Source'] ?? ''));
-        }
-
-        if ($resolvedInvoiceSource === 'app_project') {
-            $financialCandidates = [];
-            if ($jobNo !== '' && $jobTaskNo !== '') {
-                $financialCandidates[] = workorder_invoice_key($jobNo, $jobTaskNo);
-            }
-            if ($jobNo !== '' && $workorderNo !== '') {
-                $financialCandidates[] = workorder_invoice_key($jobNo, $workorderNo);
-            }
-
-            foreach ($financialCandidates as $financialCandidateKey) {
-                if (!isset($invoiceFinancialByJobTask[$financialCandidateKey])) {
-                    continue;
-                }
-
-                $financials = $invoiceFinancialByJobTask[$financialCandidateKey];
-                $actualCosts = (float) ($financials['costs'] ?? 0);
-                $totalRevenue = (float) ($financials['revenue'] ?? 0);
-                $amountSource = 'invoice';
-                $amountSourceReason = 'Factuurbedragen gevonden via AppProjectInvoices job+taak-koppeling.';
-                $matchedInvoiceSource = 'AppProjectInvoices';
-                $actualCostsSource = 'invoice';
-                $actualCostsSourceReason = 'Kosten uit AppProjectInvoices via job+taak-koppeling.';
-                $totalRevenueSource = 'invoice';
-                $totalRevenueSourceReason = 'Opbrengst uit AppProjectInvoices via job+taak-koppeling.';
-
-                $financialInvoiceId = trim((string) ($financials['id'] ?? ''));
-                if ($financialInvoiceId !== '') {
-                    $matchedInvoiceId = $financialInvoiceId;
-                }
-                break;
-            }
-
-            if (($invoiceMatchPath === 'job_task' || $invoiceMatchPath === 'reference') && $matchedInvoiceId !== '' && isset($invoiceFinancialByDocument[$matchedInvoiceId])) {
-                $financialsByDocument = $invoiceFinancialByDocument[$matchedInvoiceId];
-                $actualCosts = (float) ($financialsByDocument['costs'] ?? 0);
-                $totalRevenue = (float) ($financialsByDocument['revenue'] ?? 0);
-                $amountSource = 'invoice';
-                $amountSourceReason = 'Factuurbedragen gevonden via AppProjectInvoices documentnummer.';
-                $actualCostsSource = 'invoice';
-                $actualCostsSourceReason = 'Kosten uit AppProjectInvoices via documentnummer van Factuur ID.';
-                $totalRevenueSource = 'invoice';
-                $totalRevenueSourceReason = 'Opbrengst uit AppProjectInvoices via documentnummer van Factuur ID.';
-            }
-        }
-
-        if (($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') && $matchedInvoiceId !== '' && $invoiceMatchPath !== 'project_dimension_2') {
-            $lineFinancials = $invoiceLineFinancialByType[$resolvedInvoiceSource][$matchedInvoiceId] ?? null;
-            if (is_array($lineFinancials)) {
-                $lineRevenue = (float) ($lineFinancials['revenue'] ?? 0);
-                $lineCosts = (float) ($lineFinancials['costs'] ?? 0);
-                $lineEntity = $resolvedInvoiceSource === 'sales' ? 'SalesInvoiceSalesLines' : 'ServiceInvoiceServLines';
-
-                if ($lineCosts > 0) {
-                    $actualCosts = $lineCosts;
-                    $actualCostsSource = 'invoice';
-                    $actualCostsSourceReason = 'Kosten uit ' . $lineEntity . '.';
-                }
-
-                if ($lineRevenue > 0) {
-                    $totalRevenue = $lineRevenue;
-                    $totalRevenueSource = 'invoice';
-                    $totalRevenueSourceReason = 'Opbrengst uit ' . $lineEntity . '.';
-                    $amountSource = 'invoice';
-                    $amountSourceReason = 'Opbrengst uit hetzelfde factuurtype (' . $lineEntity . ') gelezen.';
-                }
-            }
-
-            if (isset($invoiceDetailsById[$matchedInvoiceId]) && is_array($invoiceDetailsById[$matchedInvoiceId])) {
-                $invoiceDetails = $invoiceDetailsById[$matchedInvoiceId];
-                $revenueField = first_numeric_invoice_field($invoiceDetails, [
-                    'Total_Amount_Excl_VAT',
-                    'Subtotal_Excl_VAT',
-                    'Amount',
-                    'Total_Amount_Incl_VAT',
-                ]);
-
-                if ($totalRevenueSource !== 'invoice' && $revenueField !== null) {
-                    $totalRevenue = (float) ($revenueField['value'] ?? 0);
-                    $totalRevenueSource = 'invoice';
-                    $totalRevenueSourceReason = 'Opbrengst uit ' . ($matchedInvoiceSource !== '' ? $matchedInvoiceSource : 'factuurheader') . ' (' . (string) ($revenueField['field'] ?? 'onbekend') . ').';
-                    $amountSource = 'invoice';
-                    $amountSourceReason = 'Opbrengst uit hetzelfde factuurtype (header) gelezen.';
-                }
-            }
-
-            if ($totalRevenueSource !== 'invoice') {
-                $amountSourceReason = 'Factuur ID gevonden voor type ' . ($matchedInvoiceSource !== '' ? $matchedInvoiceSource : 'onbekend') . ', maar geen bruikbare opbrengst; fallback naar werkorder.';
-                $totalRevenueSourceReason = 'Geen bruikbare opbrengst gevonden in hetzelfde factuurtype; opbrengst uit werkorder.';
-            }
-        }
-
-        if ($matchedInvoiceId !== '' && $invoiceMatchPath !== 'project_dimension_2') {
-            $preferredTypes = [];
-            if ($resolvedInvoiceSource === 'sales' || $resolvedInvoiceSource === 'service') {
-                $preferredTypes[] = $resolvedInvoiceSource;
-            }
-
-            foreach (['sales', 'service'] as $candidateType) {
-                if (!in_array($candidateType, $preferredTypes, true)) {
-                    $preferredTypes[] = $candidateType;
-                }
-            }
-
-            foreach ($preferredTypes as $candidateType) {
-                $candidateFinancials = $invoiceLineFinancialByType[$candidateType][$matchedInvoiceId] ?? null;
-                if (!is_array($candidateFinancials)) {
-                    continue;
-                }
-
-                $candidateRevenue = (float) ($candidateFinancials['revenue'] ?? 0);
-                $candidateCosts = (float) ($candidateFinancials['costs'] ?? 0);
-                $candidateEntity = $candidateType === 'sales' ? 'SalesInvoiceSalesLines' : 'ServiceInvoiceServLines';
-
-                if ($candidateCosts > 0 && $actualCostsSource !== 'invoice') {
-                    $actualCosts = $candidateCosts;
-                    $actualCostsSource = 'invoice';
-                    $actualCostsSourceReason = 'Kosten uit ' . $candidateEntity . ' (afgeleid op Factuur ID).';
-                }
-
-                if ($candidateRevenue > 0 && $totalRevenueSource !== 'invoice') {
-                    $totalRevenue = $candidateRevenue;
-                    $totalRevenueSource = 'invoice';
-                    $totalRevenueSourceReason = 'Opbrengst uit ' . $candidateEntity . ' (afgeleid op Factuur ID).';
-                    $amountSource = 'invoice';
-                    $amountSourceReason = 'Opbrengst uit ' . $candidateEntity . ' gevonden op basis van Factuur ID.';
-                    $resolvedInvoiceSource = $candidateType;
-                }
-
-                if ($actualCostsSource === 'invoice' && $totalRevenueSource === 'invoice') {
-                    break;
-                }
-            }
-        }
-
-        if ($resolvedInvoiceSource === 'unknown' && $matchedInvoiceId !== '' && $totalRevenueSource !== 'invoice') {
-            $amountSourceReason = 'Factuur ID gevonden, maar factuurtype onbekend; fallback naar werkorder.';
-            $totalRevenueSourceReason = 'Factuurtype onbekend; opbrengst uit werkorder.';
-        }
-
-        if ($totalRevenueSource === 'invoice') {
-            $amountSource = 'invoice';
-            $amountSourceReason = 'Opbrengst komt uit hetzelfde factuurtype als de gevonden Factuur ID; rij behandeld als factuurgestuurd.';
-        }
-
-        $actualTotalSource = 'mixed';
-        $actualTotalSourceReason = 'Totaal bestaat uit combinatie van kosten en opbrengstbronnen.';
-        if ($actualCostsSource === 'invoice' && $totalRevenueSource === 'invoice') {
-            $actualTotalSource = 'invoice';
-            $actualTotalSourceReason = 'Totaal berekend op basis van factuurkosten en factuuropbrengst.';
-        } elseif ($actualCostsSource === 'workorder' && $totalRevenueSource === 'workorder') {
-            $actualTotalSource = 'workorder';
-            $actualTotalSourceReason = 'Totaal berekend op basis van werkorderkosten en werkorderopbrengst.';
-        } elseif ($totalRevenueSource === 'invoice' && $actualCostsSource === 'workorder') {
-            $actualTotalSourceReason = 'Totaal berekend met factuuropbrengst en werkorderkosten.';
-        } elseif ($totalRevenueSource === 'workorder' && $actualCostsSource === 'invoice') {
-            $actualTotalSourceReason = 'Totaal berekend met werkorderopbrengst en factuurkosten.';
-        }
-
+        $actualCosts = $costItems + $costOther;
+        $totalRevenue = abs((float) ($workorder['KVT_Sum_Work_Order_Revenue'] ?? 0));
         $actualTotal = $totalRevenue - $actualCosts;
+
+        $projectInvoicedTotal = 0.0;
+        if ($normalizedJobNo !== '' && isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
+            $projectInvoicedTotal = (float) $projectInvoicedTotalByJob[$normalizedJobNo];
+        }
+
+        $invoiceIdText = implode(', ', $invoiceIdsForProject);
 
         $equipmentNumber = trim((string) ($workorder['Component_No'] ?? ''));
 
@@ -1302,6 +764,10 @@ try {
             }
         }
 
+        $projectTotals = $projectTotalsByJob[$normalizedJobNo] ?? null;
+        $projectActualCosts = is_array($projectTotals) ? (float) ($projectTotals['costs'] ?? 0) : 0.0;
+        $projectTotalRevenue = is_array($projectTotals) ? (float) ($projectTotals['revenue'] ?? 0) : 0.0;
+
         $rows[] = [
             'No' => (string) ($workorder['No'] ?? ''),
             'Order_Type' => (string) ($workorder['Task_Code'] ?? ''),
@@ -1314,23 +780,19 @@ try {
             'Customer_Name' => (string) ($workorder['Bill_to_Name'] ?? ''),
             'Actual_Costs' => $actualCosts,
             'Total_Revenue' => $totalRevenue,
+            'Invoice_Costs' => null,
+            'Invoice_Revenue' => null,
+            'Project_Actual_Costs' => $projectActualCosts,
+            'Project_Total_Revenue' => $projectTotalRevenue,
+            'Invoiced_Total' => $projectInvoicedTotal,
             'Actual_Total' => $actualTotal,
             'Cost_Center' => (string) ($workorder['Job_Dimension_1_Value'] ?? ''),
             'Status' => (string) ($workorder['Status'] ?? ''),
             'Document_Status' => (string) ($workorder['KVT_Document_Status'] ?? ''),
             'Notes' => $notesParts,
             'Notes_Search' => implode("\n", $notesSearchParts),
-            'Invoice_Id' => $matchedInvoiceId,
-            'Amount_Source' => $amountSource,
-            'Amount_Source_Reason' => $amountSourceReason,
-            'Actual_Costs_Source' => $actualCostsSource,
-            'Actual_Costs_Source_Reason' => $actualCostsSourceReason,
-            'Total_Revenue_Source' => $totalRevenueSource,
-            'Total_Revenue_Source_Reason' => $totalRevenueSourceReason,
-            'Actual_Total_Source' => $actualTotalSource,
-            'Actual_Total_Source_Reason' => $actualTotalSourceReason,
-            'Invoice_Match_Path' => $invoiceMatchPath,
-            'Invoice_Match_Source' => $matchedInvoiceSource,
+            'Invoice_Id' => $invoiceIdText,
+            'Invoice_Ids' => $invoiceIdsForProject,
             'Job_No' => $jobNo,
             'Job_Task_No' => $jobTaskNo,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
@@ -2208,7 +1670,8 @@ $initialData = [
                             data-memo-key="Memo_KVT_Memo_Internal_Use_Only">Memo Intern Gebruik</label>
                     <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Invoice">Memo
                         Factuur</label>
-                    <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Memo_Billing_Details">
+                    <label class="memo-menu-option"><input type="checkbox"
+                            data-memo-key="Memo_KVT_Memo_Billing_Details">
                         Memo Bijzonderheden Facturatie</label>
                     <label class="memo-menu-option"><input type="checkbox" data-memo-key="Memo_KVT_Remarks_Invoicing">
                         Bijzonderheden Facturatie</label>
@@ -2220,7 +1683,8 @@ $initialData = [
                         <option value="projectgroups">Projectgroepen</option>
                         <option value="table">Tabel</option>
                     </select>
-                    <label class="memo-menu-option"><input type="checkbox" id="keepProjectWorkordersTogether">Werkorders van project bij elkaar houden</label>
+                    <label class="memo-menu-option"><input type="checkbox" id="keepProjectWorkordersTogether">Werkorders
+                        van project bij elkaar houden</label>
                 </div>
             </div>
         </div>
