@@ -672,7 +672,7 @@ try {
                 if (!isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
                     $projectInvoicedTotalByJob[$normalizedJobNo] = 0.0;
                 }
-                $projectInvoicedTotalByJob[$normalizedJobNo] += $amountIncludingVat;
+                $projectInvoicedTotalByJob[$normalizedJobNo] += $amount;
             }
         }
     }
