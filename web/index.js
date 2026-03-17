@@ -25,9 +25,9 @@
         { key: 'Start_Date', label: 'Startdatum' },
         { key: 'Equipment_Number', label: 'Equipment Nr.' },
         { key: 'Description', label: 'Omschrijving' },
-        { key: 'Actual_Costs', label: 'Kosten Werkorder' },
-        { key: 'Total_Revenue', label: 'Opbrengst Werkorder' },
-        { key: 'Actual_Total', label: 'Totaal werkorder' },
+        { key: 'Actual_Costs', label: 'Kosten werkorder' },
+        { key: 'Total_Revenue', label: 'Opbrengst werkorder' },
+        { key: 'Actual_Total', label: 'Resultaat werkorder' },
         { key: 'Cost_Center', label: 'Kostenplaats' },
         { key: 'Status', label: 'Status' },
         { key: 'Document_Status', label: 'Documentstatus' }
@@ -73,8 +73,8 @@
         direction: defaultSortState.direction
     };
     const amountColumnKeys = new Set([]);
-    const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total', 'Invoice_Total']);
-    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total', 'Invoice_Total', 'Cost_Center', 'Status', 'Document_Status']);
+    const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total']);
+    const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total', 'Cost_Center', 'Status', 'Document_Status']);
     const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
     const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
     const invoiceAmountModalMessage = 'Deze bedragen komen direct uit de gekoppelde factuur en gelden als de meest betrouwbare bron.';
@@ -554,12 +554,11 @@
                 list.push({ key: 'Job_No', label: 'Project Nr.' });
             }
 
-            if (column.key === 'Total_Revenue')
+            if (column.key === 'Actual_Total')
             {
-                list.push({ key: 'Project_Actual_Costs', label: 'Werkelijke kosten project' });
-                list.push({ key: 'Project_Total_Revenue', label: 'Totaalopbrengst project' });
-                list.push({ key: 'Project_Total', label: 'Totaal project' });
-                list.push({ key: 'Invoice_Total', label: 'Totaal factuur' });
+                list.push({ key: 'Project_Actual_Costs', label: 'Kosten project' });
+                list.push({ key: 'Project_Total_Revenue', label: 'Opbrengst project' });
+                list.push({ key: 'Project_Total', label: 'Resultaat project' });
             }
         }
 
@@ -1034,6 +1033,8 @@
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalRevenue)),
                 '<span class="project-group-summary-sep">|</span>',
+                '<strong>Resultaat: </strong>' + escapeHtml(formatSignedCurrency(summary.totalRevenue - summary.totalCosts)),
+                '<span class="project-group-summary-sep">|</span>',
                 '<strong>Project taakregels: </strong>' + escapeHtml(String(summary.taskLineCount)),
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Werkorders: </strong>' + escapeHtml(String(summary.workorderCount))
@@ -1041,8 +1042,6 @@
 
             if (summary.hasInvoiceLink)
             {
-                summaryParts.push('<span class="project-group-summary-sep">|</span>');
-                summaryParts.push('<strong>Totaal gefactureerd: </strong>' + escapeHtml(formatCurrencyOrZero(summary.invoicedTotal)));
                 summaryParts.push('<span class="project-group-summary-sep">|</span>');
                 summaryParts.push('<strong>Facturen: </strong><a href="#" class="project-invoice-details-link invoice-id-clickable">' + escapeHtml(formatInvoiceIdPreview(summary.invoiceIds, 5)) + '</a>');
             }
@@ -1167,7 +1166,7 @@
                 'Project: ' + projectLabel,
                 'Kosten: ' + formatCurrencyOrZero(totalCosts),
                 'Opbrengst: ' + formatCurrencyOrZero(totalRevenue),
-                'Totaal gefactureerd: ' + formatCurrencyOrZero(invoicedTotal),
+                'Resultaat: ' + formatSignedCurrency(totalRevenue - totalCosts),
                 'Project taakregels: ' + String(taskLineCount),
                 'Werkorders: ' + String(workorderCount)
             ].join(' | ')
@@ -1303,7 +1302,7 @@
             }
             else
             {
-                if (column.key === 'Actual_Total' || column.key === 'Project_Total' || column.key === 'Invoice_Total')
+                if (column.key === 'Actual_Total' || column.key === 'Project_Total')
                 {
                     const totalAmount = Number(getColumnValueForSorting(row, column.key) || 0);
                     if (totalAmount === 0)
@@ -1888,7 +1887,7 @@
             return getEquipmentDisplayValue(row);
         }
 
-        if (key === 'Actual_Total' || key === 'Project_Total' || key === 'Invoice_Total')
+        if (key === 'Actual_Total' || key === 'Project_Total')
         {
             return formatSignedCurrency(getColumnValueForSorting(row, key));
         }
@@ -2020,11 +2019,6 @@
             const projectCosts = Number(row.Project_Actual_Costs || 0);
             const projectRevenue = Number(row.Project_Total_Revenue || 0);
             return projectRevenue - projectCosts;
-        }
-
-        if (key === 'Invoice_Total')
-        {
-            return Number(row.Invoiced_Total || 0);
         }
 
         if (key === 'Equipment_Number')
@@ -2450,7 +2444,7 @@
             return {
                 source: safeRow.Actual_Costs_Source === 'invoice' ? 'invoice' : 'workorder',
                 reason: String(safeRow.Actual_Costs_Source_Reason || '').trim(),
-                label: 'Kosten Werkorder'
+                label: 'Kosten werkorder'
             };
         }
 
@@ -2459,14 +2453,14 @@
             return {
                 source: safeRow.Total_Revenue_Source === 'invoice' ? 'invoice' : 'workorder',
                 reason: String(safeRow.Total_Revenue_Source_Reason || '').trim(),
-                label: 'Opbrengst Werkorder'
+                label: 'Opbrengst werkorder'
             };
         }
 
         return {
             source: safeRow.Actual_Total_Source === 'invoice' ? 'invoice' : (safeRow.Actual_Total_Source === 'workorder' ? 'workorder' : 'mixed'),
             reason: String(safeRow.Actual_Total_Source_Reason || '').trim(),
-            label: 'Werkelijk totaal'
+            label: 'Resultaat werkorder'
         };
     }
 

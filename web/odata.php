@@ -18,6 +18,7 @@ function consolelog($text)
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 {
     consolelog("Fetching $url\n");
+    $startedAt = microtime(true);
     $ttlSeconds = max(1, (int) $ttlSeconds);
     maybe_cleanup_expired_cache_files();
 
@@ -55,7 +56,8 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
     }
 
     consolelog("Fetched. Now caching...\n");
-    write_cache_json($cachePath, $all, $ttlSeconds, $url);
+    $queryDurationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
+    write_cache_json($cachePath, $all, $ttlSeconds, $url, $queryDurationMs);
     consolelog("Done, returning data.\n");
     return $all;
 }
@@ -206,7 +208,7 @@ function cache_path_for_key(string $cacheKey): string
     return cache_base_dir() . "/" . $hash . ".json";
 }
 
-function write_cache_json(string $path, array $data, int $ttlSeconds, string $sourceUrl = ''): void
+function write_cache_json(string $path, array $data, int $ttlSeconds, string $sourceUrl = '', int $queryDurationMs = 0): void
 {
     $tmp = $path . ".tmp";
     $now = time();
@@ -215,6 +217,7 @@ function write_cache_json(string $path, array $data, int $ttlSeconds, string $so
             'cached_at' => $now,
             'expires_at' => $now + max(1, $ttlSeconds),
             'source_url' => $sourceUrl,
+            'query_duration_ms' => max(0, $queryDurationMs),
         ],
         'data' => $data,
     ];
@@ -250,6 +253,7 @@ function odata_cache_read_payload_meta(string $path): ?array
         'cached_at' => (int) ($meta['cached_at'] ?? 0),
         'expires_at' => (int) ($meta['expires_at'] ?? 0),
         'source_url' => (string) ($meta['source_url'] ?? ''),
+        'query_duration_ms' => (int) ($meta['query_duration_ms'] ?? 0),
         'attributes' => odata_cache_extract_attributes_from_payload($payload),
     ];
 }
