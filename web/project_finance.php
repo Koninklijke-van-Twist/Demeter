@@ -1,7 +1,5 @@
 <?php
 
-declare(strict_types=1);
-
 /**
  * Usage summary:
  * - Laad eerst auth.php en odata.php.
@@ -22,11 +20,14 @@ class ProjectFinanceService
 {
     public const ROW_MODE_FIRST_NUMERIC = 'first_numeric';
     public const ROW_MODE_SUM = 'sum';
+    public const ROW_MODE_SUM_INVERT = 'sum_invert';
     public const REVENUE_ROW_MODE_FIRST_NUMERIC = self::ROW_MODE_FIRST_NUMERIC;
     public const REVENUE_ROW_MODE_SUM = self::ROW_MODE_SUM;
+    public const REVENUE_ROW_MODE_SUM_INVERT = self::ROW_MODE_SUM_INVERT;
     public const REVENUE_ROW_MODE_OPTIONS = [
         self::REVENUE_ROW_MODE_FIRST_NUMERIC,
         self::REVENUE_ROW_MODE_SUM,
+        self::REVENUE_ROW_MODE_SUM_INVERT,
     ];
 
     private string $company;
@@ -78,9 +79,9 @@ class ProjectFinanceService
                     'entity_set' => 'ProjectPosten',
                     'key_field' => 'Job_No',
                     'fields' => [
-                        'Total_Price',
+                        'Line_Amount',
                     ],
-                    'row_mode' => self::ROW_MODE_SUM,
+                    'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
             'workorder' => [
@@ -98,9 +99,9 @@ class ProjectFinanceService
                     'key_field' => 'Job_Task_No',
                     'project_field' => 'Job_No',
                     'fields' => [
-                        'Total_Price',
+                        'Line_Amount',
                     ],
-                    'row_mode' => self::ROW_MODE_SUM,
+                    'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
         ];
@@ -415,6 +416,22 @@ class ProjectFinanceService
             'costs' => $costs,
             'revenue' => $revenue,
             'resultaat' => $revenue - $costs,
+        ];
+    }
+
+    /**
+     * Haalt kosten, opbrengst en resultaat op voor meerdere werkordernummers.
+     */
+    public function collectWorkorderFinanceForWorkorders(array $workorderNumbers, int $ttl = 3600): array
+    {
+        $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
+        $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
+
+        return [
+            'workorder_totals_by_number' => self::combineTotalsByKey(
+                $this->fetchTotalsForKeys($workorderCostSource, $workorderNumbers, $ttl),
+                $this->fetchTotalsForKeys($workorderRevenueSource, $workorderNumbers, $ttl)
+            ),
         ];
     }
 
@@ -799,6 +816,9 @@ class ProjectFinanceService
         if ($normalized === self::ROW_MODE_SUM) {
             return self::ROW_MODE_SUM;
         }
+        if ($normalized === self::ROW_MODE_SUM_INVERT) {
+            return self::ROW_MODE_SUM_INVERT;
+        }
 
         return self::ROW_MODE_FIRST_NUMERIC;
     }
@@ -808,6 +828,30 @@ class ProjectFinanceService
      */
     private static function extractRowAmount(array $row, array $fields, string $mode): float
     {
+        if (self::normalizeRowMode($mode) === self::ROW_MODE_SUM_INVERT) {
+            $sum = 0.0;
+            $hasNegativeValue = false;
+            foreach ($fields as $field) {
+                if (!is_string($field) || $field === '' || !array_key_exists($field, $row)) {
+                    continue;
+                }
+
+                $raw = $row[$field];
+                if (!is_numeric($raw)) {
+                    continue;
+                }
+
+                $numeric = (float) $raw;
+                if ($numeric < 0.0) {
+                    $hasNegativeValue = true;
+                }
+
+                $sum += $numeric;
+            }
+
+            return $hasNegativeValue ? -$sum : $sum;
+        }
+
         if (self::normalizeRowMode($mode) === self::ROW_MODE_SUM) {
             $sum = 0.0;
             foreach ($fields as $field) {
