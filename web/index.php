@@ -8,7 +8,7 @@ $minute = $second * 60;
 $hour = $minute * 60;
 $day = $hour * 24;
 
-$ttl = $hour;
+$ttl = $hour * 12;
 
 ob_start();
 register_shutdown_function(function () {
@@ -374,6 +374,35 @@ $errorMessage = null;
 try {
     $workorders = [];
     $seenWorkorders = [];
+    $projectFinanceService = new ProjectFinanceService($selectedCompany);
+    $workorderSelectFields = array_values(array_unique(array_merge([
+        'No',
+        'Task_Code',
+        'Task_Description',
+        'Status',
+        'KVT_Document_Status',
+        'Job_No',
+        'Job_Task_No',
+        'Contract_No',
+        'External_Document_No',
+        'Start_Date',
+        'End_Date',
+        'Sub_Entity',
+        'Sub_Entity_Description',
+        'Component_No',
+        'Serial_No',
+        'Bill_to_Customer_No',
+        'Bill_to_Name',
+        'KVT_Sum_Work_Order_Cost_Items',
+        'KVT_Sum_Work_Order_Cost_Other',
+        'KVT_Sum_Work_Order_Revenue',
+        'Job_Dimension_1_Value',
+        'Memo',
+        'Memo_Internal_Use_Only',
+        'Memo_Invoice',
+        'KVT_Memo_Invoice_Details',
+        'KVT_Remarks_Invoicing',
+    ], $projectFinanceService->getWorkorderFinanceRowFields())));
     $ranges = month_ranges($fromMonth, $toMonth);
 
     foreach ($ranges as $range) {
@@ -384,7 +413,7 @@ try {
         }
 
         $workorderUrl = index_company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'Werkorders', [
-            '$select' => 'No,Task_Code,Task_Description,Status,KVT_Document_Status,Job_No,Job_Task_No,Contract_No,External_Document_No,Start_Date,End_Date,Sub_Entity,Sub_Entity_Description,Component_No,Serial_No,Bill_to_Customer_No,Bill_to_Name,KVT_Sum_Work_Order_Cost_Items,KVT_Sum_Work_Order_Cost_Other,KVT_Sum_Work_Order_Revenue,Job_Dimension_1_Value,Memo,Memo_Internal_Use_Only,Memo_Invoice,KVT_Memo_Invoice_Details,KVT_Remarks_Invoicing',
+            '$select' => implode(',', $workorderSelectFields),
             '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
         ]);
 
@@ -424,12 +453,16 @@ try {
         $projectNumbers[] = $projectNo;
     }
 
-    $projectFinanceService = new ProjectFinanceService($selectedCompany);
     $financeData = $projectFinanceService->collectProjectFinanceForProjects($projectNumbers, $ttl);
     $projectTotalsByJob = is_array($financeData['project_totals_by_job'] ?? null) ? $financeData['project_totals_by_job'] : [];
     $invoiceDetailsById = is_array($financeData['invoice_details_by_id'] ?? null) ? $financeData['invoice_details_by_id'] : [];
     $projectInvoiceIdsByJob = is_array($financeData['project_invoice_ids_by_job'] ?? null) ? $financeData['project_invoice_ids_by_job'] : [];
     $projectInvoicedTotalByJob = is_array($financeData['project_invoiced_total_by_job'] ?? null) ? $financeData['project_invoiced_total_by_job'] : [];
+    $workorderFinanceData = $projectFinanceService->collectWorkorderFinanceForRows($workorders, $ttl);
+    $workorderCostKeyField = trim((string) ($workorderFinanceData['cost_key_field'] ?? ''));
+    $workorderRevenueKeyField = trim((string) ($workorderFinanceData['revenue_key_field'] ?? ''));
+    $workorderCostTotalsByKey = is_array($workorderFinanceData['cost_totals_by_key'] ?? null) ? $workorderFinanceData['cost_totals_by_key'] : [];
+    $workorderRevenueTotalsByKey = is_array($workorderFinanceData['revenue_totals_by_key'] ?? null) ? $workorderFinanceData['revenue_totals_by_key'] : [];
 
     foreach ($workorders as $workorder) {
         if (!is_array($workorder)) {
@@ -454,10 +487,10 @@ try {
             continue;
         }
 
-        $costItems = (float) ($workorder['KVT_Sum_Work_Order_Cost_Items'] ?? 0);
-        $costOther = (float) ($workorder['KVT_Sum_Work_Order_Cost_Other'] ?? 0);
-        $actualCosts = finance_workorder_actual_costs($workorder);
-        $totalRevenue = finance_workorder_total_revenue($workorder);
+        $normalizedWorkorderCostKey = strtolower(trim((string) ($workorder[$workorderCostKeyField] ?? '')));
+        $normalizedWorkorderRevenueKey = strtolower(trim((string) ($workorder[$workorderRevenueKeyField] ?? '')));
+        $actualCosts = $normalizedWorkorderCostKey !== '' ? (float) ($workorderCostTotalsByKey[$normalizedWorkorderCostKey] ?? 0.0) : 0.0;
+        $totalRevenue = $normalizedWorkorderRevenueKey !== '' ? (float) ($workorderRevenueTotalsByKey[$normalizedWorkorderRevenueKey] ?? 0.0) : 0.0;
         $actualTotal = finance_calculate_result($totalRevenue, $actualCosts);
 
         $projectInvoicedTotal = 0.0;

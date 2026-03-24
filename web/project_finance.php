@@ -75,6 +75,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Total_Cost',
                     ],
+                    'filter' => '',
                     'row_mode' => self::ROW_MODE_SUM,
                 ],
                 'revenue_source' => [
@@ -83,6 +84,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Line_Amount',
                     ],
+                    'filter' => "Entry_Type eq 'Verkoop'",
                     'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
@@ -94,6 +96,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Total_Cost',
                     ],
+                    'filter' => '',
                     'row_mode' => self::ROW_MODE_SUM,
                 ],
                 'revenue_source' => [
@@ -103,6 +106,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Line_Amount',
                     ],
+                    'filter' => "Entry_Type eq 'Verkoop'",
                     'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
@@ -137,6 +141,7 @@ class ProjectFinanceService
         $selected['entity_set'] = $entitySet;
         $selected['key_field'] = $keyField;
         $selected['fields'] = is_array($selected['fields'] ?? null) ? $selected['fields'] : [];
+        $selected['filter'] = trim((string) ($selected['filter'] ?? ''));
         $modeValue = $selected['row_mode'] ?? null;
         if ($modeValue === null && $sourceName === 'cost_source') {
             $modeValue = $selected['cost_row_mode'] ?? null;
@@ -160,7 +165,7 @@ class ProjectFinanceService
     /**
      * Haalt projecttotalen, factuurdetails en factuursommen op voor meerdere projecten.
      */
-    public function collectProjectFinanceForProjects(array $projectNumbers, int $ttl = 3600): array
+    public function collectProjectFinanceForProjects(array $projectNumbers, int $ttl = 43200): array
     {
         $projectCostSource = $this->getAmountSourceConfig('project', 'cost_source');
         $projectRevenueSource = $this->getAmountSourceConfig('project', 'revenue_source');
@@ -347,7 +352,7 @@ class ProjectFinanceService
     /**
      * Geeft kosten, opbrengst en resultaat terug voor een projectnummer.
      */
-    public function getProjectCostsAndRevenue(string $projectNumber, int $ttl = 3600): array
+    public function getProjectCostsAndRevenue(string $projectNumber, int $ttl = 43200): array
     {
         $projectNumber = trim($projectNumber);
         if ($projectNumber === '') {
@@ -380,7 +385,7 @@ class ProjectFinanceService
     /**
      * Geeft kosten, opbrengst en resultaat terug voor een werkordernummer.
      */
-    public function getWorkorderCostsAndRevenue(string $workorderNumber, int $ttl = 3600): array
+    public function getWorkorderCostsAndRevenue(string $workorderNumber, int $ttl = 43200): array
     {
         $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
         $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
@@ -424,7 +429,7 @@ class ProjectFinanceService
     /**
      * Haalt kosten, opbrengst en resultaat op voor meerdere werkordernummers.
      */
-    public function collectWorkorderFinanceForWorkorders(array $workorderNumbers, int $ttl = 3600): array
+    public function collectWorkorderFinanceForWorkorders(array $workorderNumbers, int $ttl = 43200): array
     {
         $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
         $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
@@ -438,9 +443,47 @@ class ProjectFinanceService
     }
 
     /**
+     * Geeft de werkorder-rijvelden terug die nodig zijn om finance configuratie toe te passen.
+     */
+    public function getWorkorderFinanceRowFields(): array
+    {
+        $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
+        $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
+
+        return array_values(array_unique(array_filter([
+            (string) ($workorderCostSource['key_field'] ?? ''),
+            (string) ($workorderRevenueSource['key_field'] ?? ''),
+        ], static function ($field): bool {
+            return is_string($field) && trim($field) !== '';
+        })));
+    }
+
+    /**
+     * Haalt kosten en opbrengst op voor werkorder-rijen op basis van de geconfigureerde sleutelvelden.
+     */
+    public function collectWorkorderFinanceForRows(array $workorders, int $ttl = 43200): array
+    {
+        $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
+        $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
+
+        $costKeyField = (string) ($workorderCostSource['key_field'] ?? '');
+        $revenueKeyField = (string) ($workorderRevenueSource['key_field'] ?? '');
+
+        $costKeys = self::collectRowFieldValues($workorders, $costKeyField);
+        $revenueKeys = self::collectRowFieldValues($workorders, $revenueKeyField);
+
+        return [
+            'cost_key_field' => $costKeyField,
+            'revenue_key_field' => $revenueKeyField,
+            'cost_totals_by_key' => $this->fetchTotalsForKeys($workorderCostSource, $costKeys, $ttl),
+            'revenue_totals_by_key' => $this->fetchTotalsForKeys($workorderRevenueSource, $revenueKeys, $ttl),
+        ];
+    }
+
+    /**
      * Geeft alle gevonden factuurdetails terug die aan een project gekoppeld zijn.
      */
-    public function getProjectInvoices(string $projectNumber, int $ttl = 3600): array
+    public function getProjectInvoices(string $projectNumber, int $ttl = 43200): array
     {
         $projectNumber = trim($projectNumber);
         if ($projectNumber === '') {
@@ -465,7 +508,7 @@ class ProjectFinanceService
     /**
      * Geeft projectkosten/opbrengst/resultaat terug plus werkorders met kosten/opbrengst/resultaat.
      */
-    public function getProjectFinanceWithWorkorders(string $projectNumber, int $ttl = 3600): array
+    public function getProjectFinanceWithWorkorders(string $projectNumber, int $ttl = 43200): array
     {
         $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
         $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
@@ -590,6 +633,7 @@ class ProjectFinanceService
     {
         $entitySet = (string) ($sourceConfig['entity_set'] ?? '');
         $keyField = (string) ($sourceConfig['key_field'] ?? '');
+        $sourceFilter = trim((string) ($sourceConfig['filter'] ?? ''));
         $fields = is_array($sourceConfig['fields'] ?? null) ? $sourceConfig['fields'] : [];
         $rowMode = (string) ($sourceConfig['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
 
@@ -609,10 +653,15 @@ class ProjectFinanceService
                 continue;
             }
 
+            $queryFilter = '(' . implode(' or ', $filterParts) . ')';
+            if ($sourceFilter !== '') {
+                $queryFilter .= ' and (' . $sourceFilter . ')';
+            }
+
             try {
                 $url = $this->companyEntityUrlWithQuery($entitySet, [
                     '$select' => implode(',', $selectFields),
-                    '$filter' => implode(' or ', $filterParts),
+                    '$filter' => $queryFilter,
                 ]);
                 $rows = odata_get_all($url, $this->auth, $ttl);
             } catch (Throwable $ignoredLoadError) {
@@ -639,6 +688,7 @@ class ProjectFinanceService
         $entitySet = (string) ($sourceConfig['entity_set'] ?? '');
         $keyField = (string) ($sourceConfig['key_field'] ?? '');
         $projectField = trim((string) ($sourceConfig['project_field'] ?? ''));
+        $sourceFilter = trim((string) ($sourceConfig['filter'] ?? ''));
         $fields = is_array($sourceConfig['fields'] ?? null) ? $sourceConfig['fields'] : [];
         $rowMode = (string) ($sourceConfig['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
 
@@ -651,9 +701,14 @@ class ProjectFinanceService
         })));
 
         try {
+            $queryFilter = $projectField . " eq '" . self::escapeOdataString($projectNumber) . "'";
+            if ($sourceFilter !== '') {
+                $queryFilter = '(' . $queryFilter . ') and (' . $sourceFilter . ')';
+            }
+
             $url = $this->companyEntityUrlWithQuery($entitySet, [
                 '$select' => implode(',', $selectFields),
-                '$filter' => $projectField . " eq '" . self::escapeOdataString($projectNumber) . "'",
+                '$filter' => $queryFilter,
             ]);
             $rows = odata_get_all($url, $this->auth, $ttl);
         } catch (Throwable $ignoredLoadError) {
@@ -794,6 +849,32 @@ class ProjectFinanceService
         }
 
         return array_chunk(array_values(array_unique($clean)), max(1, $size));
+    }
+
+    /**
+     * Leest unieke, niet-lege waarden uit een opgegeven veld van een lijst rijen.
+     */
+    private static function collectRowFieldValues(array $rows, string $field): array
+    {
+        if ($field === '') {
+            return [];
+        }
+
+        $values = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $text = trim((string) ($row[$field] ?? ''));
+            if ($text === '') {
+                continue;
+            }
+
+            $values[] = $text;
+        }
+
+        return array_values(array_unique($values));
     }
 
     /**
