@@ -356,7 +356,7 @@ function month_ranges(DateTimeImmutable $fromMonth, DateTimeImmutable $toMonth):
 }
 
 $defaultToMonth = new DateTimeImmutable('first day of this month');
-$defaultFromMonth = $defaultToMonth->modify('-11 months');
+$defaultFromMonth = $defaultToMonth->modify('-3 years');
 
 $fromMonth = parse_month_or_default($_GET['from_month'] ?? null, $defaultFromMonth);
 $toMonth = parse_month_or_default($_GET['to_month'] ?? null, $defaultToMonth);
@@ -456,9 +456,9 @@ try {
 
         $costItems = (float) ($workorder['KVT_Sum_Work_Order_Cost_Items'] ?? 0);
         $costOther = (float) ($workorder['KVT_Sum_Work_Order_Cost_Other'] ?? 0);
-        $actualCosts = $costItems + $costOther;
-        $totalRevenue = abs((float) ($workorder['KVT_Sum_Work_Order_Revenue'] ?? 0));
-        $actualTotal = $totalRevenue - $actualCosts;
+        $actualCosts = finance_workorder_actual_costs($workorder);
+        $totalRevenue = finance_workorder_total_revenue($workorder);
+        $actualTotal = finance_calculate_result($totalRevenue, $actualCosts);
 
         $projectInvoicedTotal = 0.0;
         if ($normalizedJobNo !== '' && isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
