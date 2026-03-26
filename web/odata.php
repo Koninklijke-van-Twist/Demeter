@@ -1,5 +1,17 @@
 <?php
 
+if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
+    define('DEMETER_ODATA_MAX_EXECUTION_SECONDS', 600);
+}
+if (!defined('DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS')) {
+    define('DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS', 30);
+}
+
+@ini_set('max_execution_time', (string) DEMETER_ODATA_MAX_EXECUTION_SECONDS);
+if (function_exists('set_time_limit')) {
+    @set_time_limit(DEMETER_ODATA_MAX_EXECUTION_SECONDS);
+}
+
 function consolelog($text)
 {
     static $enabled = null;
@@ -77,6 +89,7 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 
     consolelog("Fetched. Now caching...\n");
     $queryDurationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
+    odata_stats_record_duration($url, $queryDurationMs);
     write_cache_json($cachePath, $all, $ttlSeconds, $url, $queryDurationMs);
     consolelog("Done, returning data.\n");
     return $all;
@@ -89,6 +102,8 @@ function odata_get_json(string $url, array $auth): array
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS,
+        CURLOPT_TIMEOUT => DEMETER_ODATA_MAX_EXECUTION_SECONDS,
         CURLOPT_USERAGENT => $userAgent,
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
@@ -144,6 +159,83 @@ function cache_base_dir(): string
         @mkdir($dir, 0777, true);
     }
     return $dir;
+}
+
+function odata_stats_path(): string
+{
+    return __DIR__ . DIRECTORY_SEPARATOR . 'cache' . DIRECTORY_SEPARATOR . 'odata_stats.json';
+}
+
+function odata_stats_read_map(): array
+{
+    $path = odata_stats_path();
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+
+    $raw = @file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return [];
+    }
+
+    $decoded = json_decode($raw, true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+
+    $result = [];
+    foreach ($decoded as $callKey => $durationMs) {
+        $call = trim((string) $callKey);
+        if ($call === '') {
+            continue;
+        }
+
+        $result[$call] = max(0, (int) $durationMs);
+    }
+
+    return $result;
+}
+
+function odata_stats_write_sorted_map(array $statsMap): void
+{
+    $normalized = [];
+    foreach ($statsMap as $callKey => $durationMs) {
+        $call = trim((string) $callKey);
+        if ($call === '') {
+            continue;
+        }
+
+        $normalized[$call] = max(0, (int) $durationMs);
+    }
+
+    if ($normalized !== []) {
+        arsort($normalized, SORT_NUMERIC);
+    }
+
+    $path = odata_stats_path();
+    $dir = dirname($path);
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+
+    $json = json_encode($normalized, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if (!is_string($json)) {
+        return;
+    }
+
+    @file_put_contents($path, $json, LOCK_EX);
+}
+
+function odata_stats_record_duration(string $callKey, int $durationMs): void
+{
+    $key = trim($callKey);
+    if ($key === '') {
+        return;
+    }
+
+    $statsMap = odata_stats_read_map();
+    $statsMap[$key] = max(0, (int) $durationMs);
+    odata_stats_write_sorted_map($statsMap);
 }
 
 function load_progress_base_dir(): string
@@ -605,6 +697,7 @@ function odata_cache_status_payload(): array
     $totalBytes = 0;
     $entriesPayload = [];
     $now = time();
+    $statsMap = odata_stats_read_map();
 
     if (is_dir($cacheDir)) {
         $iterator = new FilesystemIterator($cacheDir, FilesystemIterator::SKIP_DOTS);
@@ -635,6 +728,7 @@ function odata_cache_status_payload(): array
 
             $url = (string) ($meta['source_url'] ?? '');
             $nameFallback = pathinfo($filename, PATHINFO_FILENAME);
+            $statsDurationMs = max(0, (int) ($statsMap[$url] ?? 0));
             $entriesPayload[] = [
                 'id' => $filename,
                 'name' => odata_cache_title_from_url($url, $nameFallback),
@@ -643,6 +737,8 @@ function odata_cache_status_payload(): array
                 'size_bytes' => $sizeBytes,
                 'cached_at' => (int) ($meta['cached_at'] ?? 0),
                 'expires_at' => $expiresAt,
+                'query_duration_ms' => max(0, (int) ($meta['query_duration_ms'] ?? 0)),
+                'stats_duration_ms' => $statsDurationMs,
             ];
         }
     }
@@ -1325,6 +1421,12 @@ function injectTimerHtml(array $options = []): string
                     const url = String(entry.url || '');
                     const sizeBytes = Number(entry.size_bytes || 0);
                     const sizeLabel = Math.max(0, Math.round(sizeBytes)).toLocaleString('nl-NL') + ' bytes';
+                    const statsDurationMs = Number(entry.stats_duration_ms || 0);
+                    const queryDurationMs = Number(entry.query_duration_ms || 0);
+                    const effectiveDurationMs = statsDurationMs > 0 ? statsDurationMs : queryDurationMs;
+                    const durationText = effectiveDurationMs > 0
+                        ? ('BC laadtijd: ' + Math.max(0, Math.round(effectiveDurationMs)).toLocaleString('nl-NL') + ' ms')
+                        : 'BC laadtijd: onbekend';
 
                     const progress = normalizeProgress(entry.cached_at, entry.expires_at, nowSeconds);
                     const progressPct = Math.max(0, Math.min(100, progress * 100));
@@ -1347,6 +1449,7 @@ function injectTimerHtml(array $options = []): string
                         + '</div>'
                         + '</div>'
                         + '<div class="odata-cache-item-url" title="' + escapeHtml(url !== '' ? url : '(url onbekend)') + '">' + (url !== '' ? escapeHtml(url) : '(url onbekend)') + '</div>'
+                        + '<div class="odata-cache-item-url" title="' + escapeHtml(durationText) + '">' + escapeHtml(durationText) + '</div>'
                         + '<div class="odata-cache-item-timer">'
                         + '<span>🕒</span>'
                         + '<div class="odata-cache-item-bar"><div class="odata-cache-item-bar-fill" style="width:' + progressPct.toFixed(2) + '%"></div></div>'

@@ -7,6 +7,7 @@
     const pageLoaderPercent = document.getElementById('pageLoaderPercent');
     const pageLoaderBarFill = document.getElementById('pageLoaderBarFill');
     const pageLoaderCall = document.getElementById('pageLoaderCall');
+    const pageLoaderSpinner = pageLoader ? pageLoader.querySelector('.page-loader-spinner') : null;
     const pageLoaderWobbleTargets = [pageLoaderPercent, pageLoaderText, pageLoaderBarFill, pageLoaderCall].filter(Boolean);
     const controlsForm = document.querySelector('form.controls');
     const companySelect = document.getElementById('companySelect');
@@ -333,7 +334,15 @@
             return 0;
         }
 
-        return (safePercent - 95) / 5;
+        return (safePercent - 95) / 3;
+    }
+
+    function loaderSpinnerDurationSeconds (percent)
+    {
+        const intensity = loaderElementShakeIntensity(percent);
+        const baseSeconds = 0.8;
+        const speedFactor = 1 + (intensity * 9);
+        return baseSeconds / speedFactor;
     }
 
     function resetPageLoaderElementShake ()
@@ -461,6 +470,11 @@
         {
             const callText = String(callLabel || '').trim();
             pageLoaderCall.textContent = callText === '' ? '' : ('Huidige OData-call: ' + callText);
+        }
+
+        if (pageLoaderSpinner)
+        {
+            pageLoaderSpinner.style.animationDuration = loaderSpinnerDurationSeconds(safePercent).toFixed(3) + 's';
         }
 
         pageLoaderShakePercent = safePercent;
