@@ -2,12 +2,18 @@
 {
     const app = document.getElementById('app');
     const pageLoader = document.getElementById('pageLoader');
+    const pageLoaderContent = pageLoader ? pageLoader.querySelector('.page-loader-content') : null;
     const pageLoaderText = document.getElementById('pageLoaderText');
+    const pageLoaderPercent = document.getElementById('pageLoaderPercent');
+    const pageLoaderBarFill = document.getElementById('pageLoaderBarFill');
+    const pageLoaderCall = document.getElementById('pageLoaderCall');
+    const pageLoaderWobbleTargets = [pageLoaderPercent, pageLoaderText, pageLoaderBarFill, pageLoaderCall].filter(Boolean);
     const controlsForm = document.querySelector('form.controls');
     const companySelect = document.getElementById('companySelect');
     const fromMonthInput = document.getElementById('fromMonth');
     const toMonthInput = document.getElementById('toMonth');
     const invoiceFilterSelect = document.getElementById('invoiceFilter');
+    const loadProgressTokenInput = document.getElementById('loadProgressToken');
     const payload = window.workorderOverviewData || {};
     const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
     const invoiceDetailsById = payload && typeof payload.invoice_details_by_id === 'object' && payload.invoice_details_by_id !== null
@@ -51,6 +57,7 @@
     const loadedLayoutStyle = normalizeLayoutStyle(payload.layout_style);
     const loadedKeepProjectWorkordersTogether = payload.keep_project_workorders_together !== false;
     const saveUserSettingsUrl = typeof payload.save_user_settings_url === 'string' ? payload.save_user_settings_url : 'index.php?action=save_user_settings';
+    const loadProgressStatusUrl = typeof payload.load_progress_status_url === 'string' ? payload.load_progress_status_url : 'odata.php?action=load_progress';
     const selectedMemoColumnKeys = new Set();
     for (const field of memoFields)
     {
@@ -89,6 +96,12 @@
     const hiddenStatuses = new Set();
     const manuallyHiddenStatuses = new Set();
     let statusHintTimeoutId = null;
+    let pageLoaderProgressTimerId = 0;
+    let pageLoaderProgressRequestToken = '';
+    let pageLoaderProgressFetchToken = 0;
+    let pageLoaderShakeTimerId = 0;
+    let pageLoaderShakePercent = 0;
+    let pageLoaderElementShakeTimerId = 0;
     let appliedSearchText = '';
     let selectedCostCenter = 'all';
     const statusOrder = ['open', 'signed', 'completed', 'checked', 'in-progress', 'planned', 'closed', 'cancelled'];
@@ -234,7 +247,7 @@
         {
             controlsForm.addEventListener('submit', function ()
             {
-                showPageLoader('Gegevens laden...');
+                startPageLoaderProgress('Gegevens laden...');
             });
         }
 
@@ -255,8 +268,309 @@
 
         window.addEventListener('beforeunload', function ()
         {
-            showPageLoader('Gegevens laden...');
+            startPageLoaderProgress('Gegevens laden...');
         });
+    }
+
+    function getPendingLoadProgressToken ()
+    {
+        if (!loadProgressTokenInput)
+        {
+            return '';
+        }
+
+        return String(loadProgressTokenInput.value || '').trim();
+    }
+
+    function stopPageLoaderProgress ()
+    {
+        if (pageLoaderProgressTimerId !== 0)
+        {
+            window.clearInterval(pageLoaderProgressTimerId);
+            pageLoaderProgressTimerId = 0;
+        }
+
+        pageLoaderProgressRequestToken = '';
+        pageLoaderShakePercent = 0;
+        stopPageLoaderShake();
+        stopPageLoaderElementShake();
+    }
+
+    function clampLoaderValue (value, min, max)
+    {
+        return Math.max(min, Math.min(max, value));
+    }
+
+    function loaderColorByPercent (percent)
+    {
+        const safePercent = clampLoaderValue(Number(percent || 0), 0, 100);
+        if (safePercent < 80)
+        {
+            return 'hsl(215, 78%, 42%)';
+        }
+
+        const ratio = (safePercent - 80) / 20;
+        const hue = 215 * (1 - ratio);
+        return 'hsl(' + hue + ', 78%, 46%)';
+    }
+
+    function loaderShakeIntensity (percent)
+    {
+        const safePercent = clampLoaderValue(Number(percent || 0), 0, 100);
+        if (safePercent < 80)
+        {
+            return 0;
+        }
+
+        return (safePercent - 80) / 20;
+    }
+
+    function loaderElementShakeIntensity (percent)
+    {
+        const safePercent = clampLoaderValue(Number(percent || 0), 0, 100);
+        if (safePercent < 95)
+        {
+            return 0;
+        }
+
+        return (safePercent - 95) / 5;
+    }
+
+    function resetPageLoaderElementShake ()
+    {
+        for (const element of pageLoaderWobbleTargets)
+        {
+            if (!element)
+            {
+                continue;
+            }
+
+            element.style.transform = 'translate3d(0, 0, 0) rotate(0deg)';
+        }
+    }
+
+    function stopPageLoaderShake ()
+    {
+        if (pageLoaderShakeTimerId !== 0)
+        {
+            window.clearInterval(pageLoaderShakeTimerId);
+            pageLoaderShakeTimerId = 0;
+        }
+
+        if (pageLoaderContent)
+        {
+            pageLoaderContent.style.transform = 'translate3d(0, 0, 0) rotate(0deg)';
+        }
+    }
+
+    function stopPageLoaderElementShake ()
+    {
+        if (pageLoaderElementShakeTimerId !== 0)
+        {
+            window.clearInterval(pageLoaderElementShakeTimerId);
+            pageLoaderElementShakeTimerId = 0;
+        }
+
+        resetPageLoaderElementShake();
+    }
+
+    function startPageLoaderShake ()
+    {
+        if (!pageLoaderContent)
+        {
+            return;
+        }
+
+        if (pageLoaderShakeTimerId !== 0)
+        {
+            return;
+        }
+
+        pageLoaderShakeTimerId = window.setInterval(function ()
+        {
+            const intensity = loaderShakeIntensity(pageLoaderShakePercent);
+            if (intensity <= 0)
+            {
+                pageLoaderContent.style.transform = 'translate3d(0, 0, 0) rotate(0deg)';
+                return;
+            }
+
+            const amplitude = 0.35 + (intensity * 8);
+            const rotation = (Math.random() * 2 - 1) * (0.2 + intensity * 1.8);
+            const x = (Math.random() * 2 - 1) * amplitude;
+            const y = (Math.random() * 2 - 1) * (amplitude * 0.6);
+            pageLoaderContent.style.transform = 'translate3d(' + x.toFixed(2) + 'px, ' + y.toFixed(2) + 'px, 0) rotate(' + rotation.toFixed(3) + 'deg)';
+        }, 45);
+    }
+
+    function startPageLoaderElementShake ()
+    {
+        if (pageLoaderWobbleTargets.length === 0)
+        {
+            return;
+        }
+
+        if (pageLoaderElementShakeTimerId !== 0)
+        {
+            return;
+        }
+
+        pageLoaderElementShakeTimerId = window.setInterval(function ()
+        {
+            const intensity = loaderElementShakeIntensity(pageLoaderShakePercent);
+            if (intensity <= 0)
+            {
+                resetPageLoaderElementShake();
+                return;
+            }
+
+            for (const element of pageLoaderWobbleTargets)
+            {
+                if (!element)
+                {
+                    continue;
+                }
+
+                const amplitude = 0.2 + (intensity * 3.8);
+                const rotation = (Math.random() * 2 - 1) * (0.15 + intensity * 2.2);
+                const x = (Math.random() * 2 - 1) * amplitude;
+                const y = (Math.random() * 2 - 1) * (amplitude * 0.7);
+                element.style.transform = 'translate3d(' + x.toFixed(2) + 'px, ' + y.toFixed(2) + 'px, 0) rotate(' + rotation.toFixed(3) + 'deg)';
+            }
+        }, 38);
+    }
+
+    function applyPageLoaderProgressVisuals (percent, callLabel)
+    {
+        const safePercent = clampLoaderValue(Number(percent || 0), 0, 100);
+        const color = loaderColorByPercent(safePercent);
+
+        if (pageLoaderPercent)
+        {
+            pageLoaderPercent.textContent = Math.round(safePercent) + '%';
+            pageLoaderPercent.style.color = color;
+        }
+
+        if (pageLoaderBarFill)
+        {
+            pageLoaderBarFill.style.width = safePercent + '%';
+            pageLoaderBarFill.style.backgroundColor = color;
+        }
+
+        if (pageLoaderCall)
+        {
+            const callText = String(callLabel || '').trim();
+            pageLoaderCall.textContent = callText === '' ? '' : ('Huidige OData-call: ' + callText);
+        }
+
+        pageLoaderShakePercent = safePercent;
+        if (loaderShakeIntensity(safePercent) > 0)
+        {
+            startPageLoaderShake();
+        }
+        else
+        {
+            stopPageLoaderShake();
+        }
+
+        if (loaderElementShakeIntensity(safePercent) > 0)
+        {
+            startPageLoaderElementShake();
+        }
+        else
+        {
+            stopPageLoaderElementShake();
+        }
+    }
+
+    async function updatePageLoaderProgress ()
+    {
+        const token = pageLoaderProgressRequestToken;
+        if (token === '')
+        {
+            return;
+        }
+
+        const fetchToken = ++pageLoaderProgressFetchToken;
+
+        try
+        {
+            const requestUrl = new URL(loadProgressStatusUrl, window.location.href);
+            requestUrl.searchParams.set('token', token);
+            requestUrl.searchParams.set('_t', String(Date.now()));
+
+            const response = await fetch(requestUrl.toString(), {
+                headers: { Accept: 'application/json' },
+                credentials: 'same-origin',
+                cache: 'no-store'
+            });
+
+            if (!response.ok || fetchToken !== pageLoaderProgressFetchToken)
+            {
+                return;
+            }
+
+            const progress = await response.json();
+            if (!progress || typeof progress !== 'object')
+            {
+                return;
+            }
+
+            const totalMonths = Number(progress.total_months || 0);
+            const currentMonthIndex = Number(progress.current_month_index || 0);
+            const status = String(progress.status || 'idle');
+            const currentCallLabel = String(progress.current_call_label || '').trim();
+            let text = String(progress.message || '').trim();
+            let percent = 0;
+
+            if (totalMonths > 0)
+            {
+                percent = Math.max(0, Math.min(100, Math.round((currentMonthIndex / totalMonths) * 100)));
+                if (text === '')
+                {
+                    text = 'Stap ' + currentMonthIndex + ' van ' + totalMonths;
+                }
+                text += ' (' + percent + '%)';
+            }
+            else if (text === '')
+            {
+                text = 'Gegevens laden...';
+            }
+
+            if (status === 'error' && String(progress.error || '').trim() !== '')
+            {
+                text = String(progress.error || '').trim();
+            }
+
+            showPageLoader(text);
+            applyPageLoaderProgressVisuals(percent, currentCallLabel);
+        }
+        catch (error)
+        {
+            console.warn('Laadprogress ophalen mislukt', error);
+        }
+    }
+
+    function startPageLoaderProgress (defaultText)
+    {
+        showPageLoader(defaultText);
+        applyPageLoaderProgressVisuals(0, '');
+
+        const token = getPendingLoadProgressToken();
+        if (token === '')
+        {
+            return;
+        }
+
+        if (pageLoaderProgressRequestToken === token && pageLoaderProgressTimerId !== 0)
+        {
+            return;
+        }
+
+        stopPageLoaderProgress();
+        pageLoaderProgressRequestToken = token;
+        updatePageLoaderProgress();
+        pageLoaderProgressTimerId = window.setInterval(updatePageLoaderProgress, 700);
     }
 
     function initializeTableScrollWrapAutoHeight ()
@@ -488,6 +802,8 @@
             return;
         }
 
+        stopPageLoaderProgress();
+        applyPageLoaderProgressVisuals(0, '');
         pageLoader.classList.remove('is-visible');
     }
 

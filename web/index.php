@@ -10,6 +10,69 @@ $day = $hour * 24;
 
 $ttl = $hour * 12;
 
+function demeter_render_progress_screen_html(string $title, string $statusUrl, string $message, string $callPrefix, ?string $redirectUrl = null, int $redirectDelayMs = 0, string $note = ''): string
+{
+    $safeTitle = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
+    $safeNote = htmlspecialchars($note, ENT_QUOTES, 'UTF-8');
+
+    $statusUrlJson = json_encode($statusUrl, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $messageJson = json_encode($message, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $callPrefixJson = json_encode($callPrefix, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $redirectUrlJson = json_encode($redirectUrl, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $redirectDelayJson = json_encode(max(0, $redirectDelayMs), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    return '<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>' . $safeTitle . '</title>'
+        . '<style>'
+        . 'body{font-family:Verdana,Geneva,Tahoma,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f4f7fb;color:#1f2937}'
+        . '.card{background:#fff;border:1px solid #dbe3ee;border-radius:12px;padding:24px;box-shadow:0 2px 10px rgba(15,23,42,.06);max-width:560px;width:calc(100% - 32px)}'
+        . '.spinner{width:38px;height:38px;border:4px solid #c8d3e1;border-top-color:#1f4ea6;border-radius:50%;animation:spin .8s linear infinite;margin:0 auto 14px}'
+        . '.pct{font-size:34px;font-weight:700;color:#1f4ea6;margin:0 0 6px;transition:color .25s ease}'
+        . '.txt{font-size:15px;color:#334155;margin:0 0 8px}'
+        . '.bar{height:12px;background:#dbe3ee;border-radius:999px;overflow:hidden;margin:8px 0 10px}'
+        . '.barFill{height:100%;width:0;background:#1f4ea6;border-radius:999px;transition:width .5s ease,background-color .35s ease}'
+        . '.call{font-size:13px;color:#64748b;min-height:18px;margin:0}'
+        . 'small{display:block;color:#64748b;margin-top:10px}'
+        . '@keyframes spin{to{transform:rotate(360deg)}}'
+        . '</style></head><body>'
+        . '<div class="card" id="progressCard">'
+        . '<div class="spinner" aria-hidden="true"></div>'
+        . '<div class="pct" id="progressPct">0%</div>'
+        . '<p class="txt" id="progressText"></p>'
+        . '<div class="bar"><div class="barFill" id="progressBarFill"></div></div>'
+        . '<p class="call" id="progressCall"></p>'
+        . ($safeNote !== '' ? '<small>' . $safeNote . '</small>' : '')
+        . '</div>'
+        . '<script>(function(){'
+        . 'var statusUrl=' . $statusUrlJson . ';'
+        . 'var defaultMessage=' . $messageJson . ';'
+        . 'var callPrefix=' . $callPrefixJson . ';'
+        . 'var redirectUrl=' . $redirectUrlJson . ';'
+        . 'var redirectDelay=' . $redirectDelayJson . ';'
+        . 'var pctEl=document.getElementById("progressPct");'
+        . 'var textEl=document.getElementById("progressText");'
+        . 'var callEl=document.getElementById("progressCall");'
+        . 'var barFillEl=document.getElementById("progressBarFill");'
+        . 'var cardEl=document.getElementById("progressCard");'
+        . 'var noteEl=cardEl?cardEl.querySelector("small"):null;'
+        . 'var wobbleTargets=[pctEl,textEl,barFillEl,callEl,noteEl].filter(function(el){return !!el;});'
+        . 'var shakeTimer=0;'
+        . 'var wobbleTimer=0;'
+        . 'function clamp(v,min,max){return Math.max(min,Math.min(max,v));}'
+        . 'function colorForPercent(percent){var p=clamp(percent,0,100);if(p<80){return "hsl(215, 78%, 42%)";}var t=(p-80)/20;var hue=215*(1-t);return "hsl("+hue+", 78%, 46%)";}'
+        . 'function shakeIntensity(percent){var p=clamp(percent,0,100);if(p<80){return 0;}return (p-80)/20;}'
+        . 'function elementShakeIntensity(percent){var p=clamp(percent,0,100);if(p<95){return 0;}return (p-95)/5;}'
+        . 'function resetElementWobble(){wobbleTargets.forEach(function(el){el.style.transform="translate3d(0,0,0) rotate(0deg)";});}'
+        . 'function startShake(intensity){if(!cardEl){return;}if(intensity<=0){if(shakeTimer){window.clearInterval(shakeTimer);shakeTimer=0;}cardEl.style.transform="translate3d(0,0,0) rotate(0deg)";return;}if(shakeTimer){return;}shakeTimer=window.setInterval(function(){var ix=shakeIntensity(window.__demeterProgressPercent||0);if(ix<=0){cardEl.style.transform="translate3d(0,0,0) rotate(0deg)";return;}var amp=0.35+(ix*8);var rot=(Math.random()*2-1)*(0.2+ix*1.8);var x=(Math.random()*2-1)*amp;var y=(Math.random()*2-1)*(amp*0.6);cardEl.style.transform="translate3d("+x+"px,"+y+"px,0) rotate("+rot.toFixed(3)+"deg)";},45);}'
+        . 'function startElementWobble(){if(wobbleTargets.length===0){return;}if(wobbleTimer){return;}wobbleTimer=window.setInterval(function(){var ix=elementShakeIntensity(window.__demeterProgressPercent||0);if(ix<=0){resetElementWobble();return;}wobbleTargets.forEach(function(el){var amp=0.2+(ix*3.8);var rot=(Math.random()*2-1)*(0.15+ix*2.2);var x=(Math.random()*2-1)*amp;var y=(Math.random()*2-1)*(amp*0.7);el.style.transform="translate3d("+x.toFixed(2)+"px,"+y.toFixed(2)+"px,0) rotate("+rot.toFixed(3)+"deg)";});},38);}'
+        . 'function stopElementWobble(){if(wobbleTimer){window.clearInterval(wobbleTimer);wobbleTimer=0;}resetElementWobble();}'
+        . 'function render(p){if(!p||typeof p!=="object"){return;}var total=Number(p.total_months||0);var current=Number(p.current_month_index||0);var percent=total>0?Math.round((current/total)*100):0;percent=clamp(percent,0,100);window.__demeterProgressPercent=percent;var color=colorForPercent(percent);if(pctEl){pctEl.textContent=percent+"%";pctEl.style.color=color;}if(barFillEl){barFillEl.style.width=percent+"%";barFillEl.style.backgroundColor=color;}var msg=String(p.message||"").trim();if(msg===""){msg=defaultMessage;}if(textEl){textEl.textContent=msg;}if(callEl){var call=String(p.current_call_label||"").trim();callEl.textContent=call!==""?callPrefix+call:"";}startShake(shakeIntensity(percent));if(elementShakeIntensity(percent)>0){startElementWobble();}else{stopElementWobble();}}'
+        . 'async function poll(){try{var separator=statusUrl.indexOf("?")===-1?"?":"&";var r=await fetch(statusUrl+separator+"_t="+Date.now(),{headers:{Accept:"application/json"},credentials:"same-origin",cache:"no-store"});if(!r.ok){return;}var p=await r.json();render(p);}catch(e){}}'
+        . 'if(textEl){textEl.textContent=defaultMessage;}'
+        . 'poll();window.setInterval(poll,700);'
+        . 'if(redirectUrl&&typeof redirectUrl==="string"&&redirectUrl!==""&&redirectDelay>0){window.setTimeout(function(){window.location.replace(redirectUrl);},redirectDelay);}'
+        . '})();</script></body></html>';
+}
+
 ob_start();
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -26,27 +89,51 @@ register_shutdown_function(function () {
         return;
     }
 
+    $timedOutToken = trim((string) ($GLOBALS['demeter_active_load_progress_token'] ?? ''));
+    $timeoutReloadUri = trim((string) ($_SERVER['REQUEST_URI'] ?? ''));
+    $timeoutBasePath = $timeoutReloadUri !== '' ? $timeoutReloadUri : 'index.php';
+    $timeoutQuery = [];
+    parse_str((string) parse_url($timeoutBasePath, PHP_URL_QUERY), $timeoutQuery);
+    if (!is_array($timeoutQuery)) {
+        $timeoutQuery = [];
+    }
+
+    if ($timedOutToken !== '') {
+        $timeoutQuery['load_token'] = $timedOutToken;
+    }
+    $timeoutQuery['boot'] = '1';
+    $timeoutReloadPath = (string) parse_url($timeoutBasePath, PHP_URL_PATH);
+    if ($timeoutReloadPath === '') {
+        $timeoutReloadPath = 'index.php';
+    }
+    $timeoutReloadPath .= '?' . http_build_query($timeoutQuery, '', '&', PHP_QUERY_RFC3986);
+    $timeoutStatusUrl = 'odata.php?action=load_progress&token=' . rawurlencode($timedOutToken);
+
     while (ob_get_level() > 0) {
         ob_end_clean();
     }
 
-    $refreshUrl = htmlspecialchars((string) ($_SERVER['REQUEST_URI'] ?? 'overzicht.php'), ENT_QUOTES, 'UTF-8');
+    $refreshUrl = htmlspecialchars($timeoutReloadPath, ENT_QUOTES, 'UTF-8');
     http_response_code(503);
     header('Content-Type: text/html; charset=utf-8');
     header('Retry-After: 5');
 
-    echo '<!doctype html><html lang="nl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">';
-    echo '<meta http-equiv="refresh" content="5;url=' . $refreshUrl . '">';
-    echo '<title>Even geduld</title></head><body style="font-family:Verdana,Geneva,Tahoma,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0">';
-    echo '<div style="text-align:center;padding:24px">Er is meer tijd nodig om gegevens te laden.<br>De pagina wordt automatisch vernieuwd...</div>';
-    echo '<script>setTimeout(function(){location.reload();},5000);</script>';
-    echo '</body></html>';
+    echo demeter_render_progress_screen_html(
+        'Even geduld',
+        $timeoutStatusUrl,
+        'Gegevens laden...',
+        'Huidige OData-call: ',
+        $timeoutReloadPath,
+        5000,
+        'Er is meer tijd nodig om gegevens te laden. De pagina wordt automatisch vernieuwd...'
+    );
 });
 
 require __DIR__ . "/auth.php";
 require_once __DIR__ . "/logincheck.php";
 require_once __DIR__ . "/odata.php";
 require_once __DIR__ . "/project_finance.php";
+require_once __DIR__ . "/bc_fetch/month_loader.php";
 
 function current_user_email_or_fallback(): string
 {
@@ -310,18 +397,12 @@ if (!in_array($invoiceFilter, ['both', 'uninvoiced', 'invoiced'], true)) {
 
 $showInvoiced = $invoiceFilter === 'both' || $invoiceFilter === 'invoiced';
 
-function index_company_entity_url_with_query(string $baseUrl, string $environment, string $company, string $entitySet, array $query): string
-{
-    $safeCompany = str_replace("'", "''", trim($company));
-    $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
-    $url = rtrim($baseUrl, '/') . '/' . rawurlencode($environment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entitySet);
-
-    if ($query !== []) {
-        $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
-    }
-
-    return $url;
-}
+$activeLoadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
+$activeLoadProgressToken = odata_load_progress_is_valid_token($activeLoadProgressTokenRaw)
+    ? $activeLoadProgressTokenRaw
+    : odata_load_progress_create_token();
+$nextLoadProgressToken = odata_load_progress_create_token();
+odata_set_active_load_progress_token($activeLoadProgressToken);
 
 function parse_month_or_default(?string $value, DateTimeImmutable $fallback): DateTimeImmutable
 {
@@ -367,102 +448,47 @@ if ($fromMonth > $toMonth) {
 
 $fromMonthValue = $fromMonth->format('Y-m');
 $toMonthValue = $toMonth->format('Y-m');
+$ranges = month_ranges($fromMonth, $toMonth);
+$totalMonths = count($ranges);
+$totalProgressSteps = $totalMonths;
+
+$isBootRequest = trim((string) ($_GET['boot'] ?? '')) === '1';
+if (!$isBootRequest) {
+    odata_load_progress_begin($activeLoadProgressToken, $totalProgressSteps);
+
+    $bootQuery = $_GET;
+    if (!is_array($bootQuery)) {
+        $bootQuery = [];
+    }
+    $bootQuery['boot'] = '1';
+    $bootQuery['load_token'] = $activeLoadProgressToken;
+    $bootUrl = 'index.php?' . http_build_query($bootQuery, '', '&', PHP_QUERY_RFC3986);
+    $bootStatusUrl = 'odata.php?action=load_progress&token=' . rawurlencode($activeLoadProgressToken);
+
+    header('Content-Type: text/html; charset=utf-8');
+    echo demeter_render_progress_screen_html(
+        'Gegevens laden',
+        $bootStatusUrl,
+        'Gegevens laden...',
+        'Huidige OData-call: ',
+        $bootUrl,
+        10,
+        ''
+    );
+    exit;
+}
 
 $rows = [];
 $errorMessage = null;
 
 try {
-    $workorders = [];
-    $seenWorkorders = [];
-    $projectFinanceService = new ProjectFinanceService($selectedCompany);
-    $workorderSelectFields = array_values(array_unique(array_merge([
-        'No',
-        'Task_Code',
-        'Task_Description',
-        'Status',
-        'KVT_Document_Status',
-        'Job_No',
-        'Job_Task_No',
-        'Contract_No',
-        'External_Document_No',
-        'Start_Date',
-        'End_Date',
-        'Sub_Entity',
-        'Sub_Entity_Description',
-        'Component_No',
-        'Serial_No',
-        'Bill_to_Customer_No',
-        'Bill_to_Name',
-        'KVT_Sum_Work_Order_Cost_Items',
-        'KVT_Sum_Work_Order_Cost_Other',
-        'KVT_Sum_Work_Order_Revenue',
-        'Job_Dimension_1_Value',
-        'Memo',
-        'Memo_Internal_Use_Only',
-        'Memo_Invoice',
-        'KVT_Memo_Invoice_Details',
-        'KVT_Remarks_Invoicing',
-    ], $projectFinanceService->getWorkorderFinanceRowFields())));
-    $ranges = month_ranges($fromMonth, $toMonth);
-
-    foreach ($ranges as $range) {
-        $rangeFrom = $range['from'];
-        $rangeTo = $range['to'];
-        if (!$rangeFrom instanceof DateTimeImmutable || !$rangeTo instanceof DateTimeImmutable) {
-            continue;
-        }
-
-        $workorderUrl = index_company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'Werkorders', [
-            '$select' => implode(',', $workorderSelectFields),
-            '$filter' => 'Start_Date ge ' . $rangeFrom->format('Y-m-d') . ' and Start_Date lt ' . $rangeTo->format('Y-m-d'),
-        ]);
-
-        $batchWorkorders = odata_get_all($workorderUrl, $auth, $ttl);
-        foreach ($batchWorkorders as $workorder) {
-            if (!is_array($workorder)) {
-                continue;
-            }
-
-            $rowKey = implode('|', [
-                (string) ($workorder['No'] ?? ''),
-                (string) ($workorder['Job_No'] ?? ''),
-                (string) ($workorder['Job_Task_No'] ?? ''),
-                (string) ($workorder['Start_Date'] ?? ''),
-            ]);
-
-            if (isset($seenWorkorders[$rowKey])) {
-                continue;
-            }
-
-            $seenWorkorders[$rowKey] = true;
-            $workorders[] = $workorder;
-        }
-    }
-
-    $projectNumbers = [];
-    foreach ($workorders as $workorder) {
-        if (!is_array($workorder)) {
-            continue;
-        }
-
-        $projectNo = trim((string) ($workorder['Job_No'] ?? ''));
-        if ($projectNo === '') {
-            continue;
-        }
-
-        $projectNumbers[] = $projectNo;
-    }
-
-    $financeData = $projectFinanceService->collectProjectFinanceForProjects($projectNumbers, $ttl);
-    $projectTotalsByJob = is_array($financeData['project_totals_by_job'] ?? null) ? $financeData['project_totals_by_job'] : [];
-    $invoiceDetailsById = is_array($financeData['invoice_details_by_id'] ?? null) ? $financeData['invoice_details_by_id'] : [];
-    $projectInvoiceIdsByJob = is_array($financeData['project_invoice_ids_by_job'] ?? null) ? $financeData['project_invoice_ids_by_job'] : [];
-    $projectInvoicedTotalByJob = is_array($financeData['project_invoiced_total_by_job'] ?? null) ? $financeData['project_invoiced_total_by_job'] : [];
-    $workorderFinanceData = $projectFinanceService->collectWorkorderFinanceForRows($workorders, $ttl);
-    $workorderCostKeyField = trim((string) ($workorderFinanceData['cost_key_field'] ?? ''));
-    $workorderRevenueKeyField = trim((string) ($workorderFinanceData['revenue_key_field'] ?? ''));
-    $workorderCostTotalsByKey = is_array($workorderFinanceData['cost_totals_by_key'] ?? null) ? $workorderFinanceData['cost_totals_by_key'] : [];
-    $workorderRevenueTotalsByKey = is_array($workorderFinanceData['revenue_totals_by_key'] ?? null) ? $workorderFinanceData['revenue_totals_by_key'] : [];
+    $overviewData = bc_fetch_load_workorder_overview_data($selectedCompany, $ranges, $auth, $ttl, $activeLoadProgressToken);
+    $workorders = is_array($overviewData['workorders'] ?? null) ? $overviewData['workorders'] : [];
+    $projectTotalsByJob = is_array($overviewData['project_totals_by_job'] ?? null) ? $overviewData['project_totals_by_job'] : [];
+    $invoiceDetailsById = is_array($overviewData['invoice_details_by_id'] ?? null) ? $overviewData['invoice_details_by_id'] : [];
+    $projectInvoiceIdsByJob = is_array($overviewData['project_invoice_ids_by_job'] ?? null) ? $overviewData['project_invoice_ids_by_job'] : [];
+    $projectInvoicedTotalByJob = is_array($overviewData['project_invoiced_total_by_job'] ?? null) ? $overviewData['project_invoiced_total_by_job'] : [];
+    $workorderTotalsByNumber = is_array($overviewData['workorder_totals_by_number'] ?? null) ? $overviewData['workorder_totals_by_number'] : [];
 
     foreach ($workorders as $workorder) {
         if (!is_array($workorder)) {
@@ -487,10 +513,12 @@ try {
             continue;
         }
 
-        $normalizedWorkorderCostKey = strtolower(trim((string) ($workorder[$workorderCostKeyField] ?? '')));
-        $normalizedWorkorderRevenueKey = strtolower(trim((string) ($workorder[$workorderRevenueKeyField] ?? '')));
-        $actualCosts = $normalizedWorkorderCostKey !== '' ? (float) ($workorderCostTotalsByKey[$normalizedWorkorderCostKey] ?? 0.0) : 0.0;
-        $totalRevenue = $normalizedWorkorderRevenueKey !== '' ? (float) ($workorderRevenueTotalsByKey[$normalizedWorkorderRevenueKey] ?? 0.0) : 0.0;
+        $normalizedWorkorderNo = strtolower(trim((string) ($workorder['Job_Task_No'] ?? '')));
+        $workorderTotals = $normalizedWorkorderNo !== '' && isset($workorderTotalsByNumber[$normalizedWorkorderNo])
+            ? $workorderTotalsByNumber[$normalizedWorkorderNo]
+            : null;
+        $actualCosts = is_array($workorderTotals) ? (float) ($workorderTotals['costs'] ?? 0.0) : 0.0;
+        $totalRevenue = is_array($workorderTotals) ? (float) ($workorderTotals['revenue'] ?? 0.0) : 0.0;
         $actualTotal = finance_calculate_result($totalRevenue, $actualCosts);
 
         $projectInvoicedTotal = 0.0;
@@ -561,8 +589,16 @@ try {
 
         return strnatcasecmp((string) ($a['No'] ?? ''), (string) ($b['No'] ?? ''));
     });
+    odata_load_progress_complete($activeLoadProgressToken, $totalProgressSteps);
 } catch (Throwable $error) {
     $errorMessage = $error->getMessage();
+    $progressPayload = odata_load_progress_payload($activeLoadProgressToken);
+    odata_load_progress_error(
+        $activeLoadProgressToken,
+        $totalProgressSteps,
+        (int) ($progressPayload['current_month_index'] ?? 0),
+        $errorMessage
+    );
 }
 
 $initialData = [
@@ -574,6 +610,7 @@ $initialData = [
     'layout_style' => $layoutStyleSetting,
     'keep_project_workorders_together' => $keepProjectWorkordersTogetherSetting,
     'save_user_settings_url' => 'index.php?action=save_user_settings',
+    'load_progress_status_url' => 'odata.php?action=load_progress',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
     'invoice_details_by_id' => $invoiceDetailsById,
@@ -626,6 +663,8 @@ $initialData = [
             gap: 10px;
             color: #203a63;
             font-weight: 600;
+            width: min(520px, calc(100% - 40px));
+            transition: transform 120ms linear;
         }
 
         .page-loader-spinner {
@@ -641,6 +680,36 @@ $initialData = [
             to {
                 transform: rotate(360deg);
             }
+        }
+
+        .page-loader-percent {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1f4ea6;
+            transition: color .25s ease;
+        }
+
+        .page-loader-bar {
+            width: 100%;
+            height: 12px;
+            border-radius: 999px;
+            background: #dbe3ee;
+            overflow: hidden;
+        }
+
+        .page-loader-bar-fill {
+            width: 0;
+            height: 100%;
+            border-radius: 999px;
+            background: #1f4ea6;
+            transition: width .5s ease, background-color .35s ease;
+        }
+
+        .page-loader-call {
+            min-height: 18px;
+            font-size: 13px;
+            color: #64748b;
+            text-align: center;
         }
 
         .controls {
@@ -1379,7 +1448,12 @@ $initialData = [
     <div id="pageLoader" class="page-loader is-visible" aria-live="polite" aria-label="Laden">
         <div class="page-loader-content">
             <div class="page-loader-spinner" aria-hidden="true"></div>
+            <div id="pageLoaderPercent" class="page-loader-percent">0%</div>
             <div id="pageLoaderText">Gegevens laden...</div>
+            <div class="page-loader-bar" aria-hidden="true">
+                <div id="pageLoaderBarFill" class="page-loader-bar-fill"></div>
+            </div>
+            <div id="pageLoaderCall" class="page-loader-call"></div>
         </div>
     </div>
 
@@ -1409,6 +1483,8 @@ $initialData = [
             <option value="uninvoiced" <?= $invoiceFilter === 'uninvoiced' ? 'selected' : '' ?>>Ongefactureerd</option>
             <option value="invoiced" <?= $invoiceFilter === 'invoiced' ? 'selected' : '' ?>>Gefactureerd</option>
         </select>
+        <input type="hidden" name="load_token" id="loadProgressToken"
+            value="<?= htmlspecialchars($nextLoadProgressToken) ?>">
         <button type="submit">Toon</button>
         <div class="memo-menu-wrap" id="memoMenuWrap">
             <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Voorkeuren</button>

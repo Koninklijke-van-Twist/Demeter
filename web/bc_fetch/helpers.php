@@ -33,6 +33,22 @@ function bc_fetch_add(float $left, float $right): float
 }
 
 /**
+ * Bouwt een OData entity URL met query parameters voor het opgegeven bedrijf.
+ */
+function company_entity_url_with_query(string $baseUrl, string $environment, string $company, string $entitySet, array $query): string
+{
+    $safeCompany = str_replace("'", "''", trim($company));
+    $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
+    $url = rtrim($baseUrl, '/') . '/' . rawurlencode($environment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entitySet);
+
+    if ($query !== []) {
+        $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    return $url;
+}
+
+/**
  * Bouwt een dictionary met lege projectkeys voor alle aangeleverde projectnummers.
  */
 function bc_fetch_seed_project_dictionary(array $projectNumbers): array
@@ -48,4 +64,12 @@ function bc_fetch_seed_project_dictionary(array $projectNumbers): array
     }
 
     return $result;
+}
+
+/**
+ * Normaliseert een werkordernummer voor dictionary-keys.
+ */
+function bc_fetch_normalize_workorder_no(string $workorderNo): string
+{
+    return strtolower(trim($workorderNo));
 }

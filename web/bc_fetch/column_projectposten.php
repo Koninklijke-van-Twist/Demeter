@@ -34,6 +34,7 @@ function bc_fetch_column_projectposten(string $company, string $yearMonth, array
     $workorderTotals = [];
 
     $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'ProjectPosten', [
+        '$select' => 'Job_No,Job_Task_No,Total_Cost,Line_Amount,Posting_Date',
         '$filter' => 'Posting_Date ge ' . $fromStr . ' and Posting_Date lt ' . $toStr,
     ]);
     $rows = odata_get_all($url, $auth, $ttl);
@@ -71,7 +72,7 @@ function bc_fetch_column_projectposten(string $company, string $yearMonth, array
             continue;
         }
 
-        $normWorkorderNo = strtolower($workorderNo);
+        $normWorkorderNo = bc_fetch_normalize_workorder_no($workorderNo);
         if (!isset($workorderTotals[$normWorkorderNo])) {
             $workorderTotals[$normWorkorderNo] = [
                 'costs' => 0.0,

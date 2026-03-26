@@ -15,12 +15,32 @@ function consolelog($text)
     file_put_contents('php://stdout', $text);
 }
 
+function odata_set_active_load_progress_token(?string $token): void
+{
+    $tokenText = trim((string) $token);
+    if ($tokenText === '' || !function_exists('odata_load_progress_is_valid_token') || !odata_load_progress_is_valid_token($tokenText)) {
+        $GLOBALS['demeter_active_load_progress_token'] = '';
+        return;
+    }
+
+    $GLOBALS['demeter_active_load_progress_token'] = $tokenText;
+}
+
+function odata_get_active_load_progress_token(): string
+{
+    return trim((string) ($GLOBALS['demeter_active_load_progress_token'] ?? ''));
+}
+
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 {
     consolelog("Fetching $url\n");
     $startedAt = microtime(true);
     $ttlSeconds = max(1, (int) $ttlSeconds);
     maybe_cleanup_expired_cache_files();
+    $activeProgressToken = odata_get_active_load_progress_token();
+    if ($activeProgressToken !== '' && function_exists('odata_load_progress_set_current_call')) {
+        odata_load_progress_set_current_call($activeProgressToken, $url);
+    }
 
     $cacheKey = build_cache_key($url, $auth);
     $cachePath = cache_path_for_key($cacheKey);
@@ -124,6 +144,263 @@ function cache_base_dir(): string
         @mkdir($dir, 0777, true);
     }
     return $dir;
+}
+
+function load_progress_base_dir(): string
+{
+    $dir = __DIR__ . DIRECTORY_SEPARATOR . 'cache' . DIRECTORY_SEPARATOR . 'load_progress';
+    if (!is_dir($dir)) {
+        @mkdir($dir, 0777, true);
+    }
+
+    return $dir;
+}
+
+function odata_load_progress_cleanup(): void
+{
+    $dir = load_progress_base_dir();
+    if (!is_dir($dir)) {
+        return;
+    }
+
+    $maxAgeSeconds = 86400;
+    $now = time();
+    $iterator = new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS);
+    foreach ($iterator as $fileInfo) {
+        if (!$fileInfo->isFile()) {
+            continue;
+        }
+
+        if (pathinfo($fileInfo->getFilename(), PATHINFO_EXTENSION) !== 'json') {
+            continue;
+        }
+
+        $age = $now - (int) $fileInfo->getMTime();
+        if ($age > $maxAgeSeconds) {
+            @unlink($fileInfo->getPathname());
+        }
+    }
+}
+
+function odata_load_progress_create_token(): string
+{
+    return bin2hex(random_bytes(16));
+}
+
+function odata_load_progress_is_valid_token(string $token): bool
+{
+    return preg_match('/^[a-f0-9]{32}$/', $token) === 1;
+}
+
+function odata_load_progress_path_for_token(string $token): string
+{
+    return load_progress_base_dir() . DIRECTORY_SEPARATOR . $token . '.json';
+}
+
+function odata_load_progress_write(string $token, array $payload): void
+{
+    if (!odata_load_progress_is_valid_token($token)) {
+        return;
+    }
+
+    odata_load_progress_cleanup();
+
+    $existingPayload = odata_load_progress_payload($token);
+    $now = time();
+    $normalizedPayload = [
+        'token' => $token,
+        'status' => (string) ($payload['status'] ?? ($existingPayload['status'] ?? 'idle')),
+        'total_months' => max(0, (int) ($payload['total_months'] ?? ($existingPayload['total_months'] ?? 0))),
+        'current_month_index' => max(0, (int) ($payload['current_month_index'] ?? ($existingPayload['current_month_index'] ?? 0))),
+        'current_month_label' => trim((string) ($payload['current_month_label'] ?? ($existingPayload['current_month_label'] ?? ''))),
+        'current_call_label' => trim((string) ($payload['current_call_label'] ?? ($existingPayload['current_call_label'] ?? ''))),
+        'message' => trim((string) ($payload['message'] ?? ($existingPayload['message'] ?? ''))),
+        'updated_at' => $now,
+        'started_at' => max(0, (int) ($payload['started_at'] ?? ($existingPayload['started_at'] ?? $now))),
+        'completed_at' => max(0, (int) ($payload['completed_at'] ?? ($existingPayload['completed_at'] ?? 0))),
+        'error' => trim((string) ($payload['error'] ?? ($existingPayload['error'] ?? ''))),
+    ];
+
+    $json = json_encode($normalizedPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    if (!is_string($json)) {
+        return;
+    }
+
+    @file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX);
+}
+
+function odata_load_progress_begin(string $token, int $totalMonths): void
+{
+    odata_load_progress_write($token, [
+        'status' => 'running',
+        'total_months' => max(0, $totalMonths),
+        'current_month_index' => 0,
+        'current_month_label' => '',
+        'message' => 'Voorbereiden...',
+        'started_at' => time(),
+        'completed_at' => 0,
+        'error' => '',
+    ]);
+}
+
+function odata_load_progress_advance_month(string $token, int $currentMonthIndex, int $totalMonths, string $yearMonth): void
+{
+    $safeMonthLabel = trim($yearMonth);
+    $message = 'Stap ' . max(0, $currentMonthIndex) . ' van ' . max(0, $totalMonths);
+    if ($safeMonthLabel !== '') {
+        $message .= ': maand ' . $safeMonthLabel . ' laden';
+    }
+
+    odata_load_progress_write($token, [
+        'status' => 'running',
+        'total_months' => max(0, $totalMonths),
+        'current_month_index' => max(0, $currentMonthIndex),
+        'current_month_label' => $safeMonthLabel,
+        'message' => $message,
+        'started_at' => time(),
+        'completed_at' => 0,
+        'error' => '',
+    ]);
+}
+
+function odata_load_progress_set_current_call(string $token, string $url): void
+{
+    $label = odata_cache_title_from_url($url, 'OData call');
+    $path = (string) parse_url($url, PHP_URL_PATH);
+    $entityName = rawurldecode(basename($path));
+    if ($entityName !== '') {
+        $label = $entityName;
+    }
+
+    $filter = (string) parse_url($url, PHP_URL_QUERY);
+    if ($filter !== '') {
+        parse_str($filter, $query);
+        $filterValue = trim((string) ($query['$filter'] ?? ''));
+        if ($filterValue !== '') {
+            $normalizedFilter = preg_replace('/\s+/', ' ', $filterValue);
+            if (is_string($normalizedFilter) && $normalizedFilter !== '') {
+                $label .= ' | ' . mb_substr($normalizedFilter, 0, 90);
+            }
+        }
+    }
+
+    odata_load_progress_write($token, [
+        'current_call_label' => $label,
+    ]);
+}
+
+function odata_load_progress_complete(string $token, int $totalMonths): void
+{
+    odata_load_progress_write($token, [
+        'status' => 'completed',
+        'total_months' => max(0, $totalMonths),
+        'current_month_index' => max(0, $totalMonths),
+        'current_month_label' => '',
+        'current_call_label' => '',
+        'message' => 'Laden afgerond',
+        'started_at' => time(),
+        'completed_at' => time(),
+        'error' => '',
+    ]);
+}
+
+function odata_load_progress_error(string $token, int $totalMonths, int $currentMonthIndex, string $message): void
+{
+    odata_load_progress_write($token, [
+        'status' => 'error',
+        'total_months' => max(0, $totalMonths),
+        'current_month_index' => max(0, $currentMonthIndex),
+        'current_month_label' => '',
+        'current_call_label' => '',
+        'message' => trim($message) !== '' ? trim($message) : 'Laden mislukt',
+        'started_at' => time(),
+        'completed_at' => time(),
+        'error' => trim($message),
+    ]);
+}
+
+function odata_load_progress_payload(string $token): array
+{
+    if (!odata_load_progress_is_valid_token($token)) {
+        return [
+            'token' => '',
+            'status' => 'unknown',
+            'total_months' => 0,
+            'current_month_index' => 0,
+            'current_month_label' => '',
+            'current_call_label' => '',
+            'message' => 'Ongeldige token',
+            'updated_at' => 0,
+            'started_at' => 0,
+            'completed_at' => 0,
+            'error' => 'Ongeldige token',
+        ];
+    }
+
+    $path = odata_load_progress_path_for_token($token);
+    if (!is_file($path) || !is_readable($path)) {
+        return [
+            'token' => $token,
+            'status' => 'idle',
+            'total_months' => 0,
+            'current_month_index' => 0,
+            'current_month_label' => '',
+            'current_call_label' => '',
+            'message' => 'Wachten op start',
+            'updated_at' => 0,
+            'started_at' => 0,
+            'completed_at' => 0,
+            'error' => '',
+        ];
+    }
+
+    $raw = @file_get_contents($path);
+    if (!is_string($raw) || trim($raw) === '') {
+        return [
+            'token' => $token,
+            'status' => 'idle',
+            'total_months' => 0,
+            'current_month_index' => 0,
+            'current_month_label' => '',
+            'current_call_label' => '',
+            'message' => 'Wachten op start',
+            'updated_at' => 0,
+            'started_at' => 0,
+            'completed_at' => 0,
+            'error' => '',
+        ];
+    }
+
+    $payload = json_decode($raw, true);
+    if (!is_array($payload)) {
+        return [
+            'token' => $token,
+            'status' => 'idle',
+            'total_months' => 0,
+            'current_month_index' => 0,
+            'current_month_label' => '',
+            'current_call_label' => '',
+            'message' => 'Wachten op start',
+            'updated_at' => 0,
+            'started_at' => 0,
+            'completed_at' => 0,
+            'error' => '',
+        ];
+    }
+
+    return [
+        'token' => (string) ($payload['token'] ?? $token),
+        'status' => (string) ($payload['status'] ?? 'idle'),
+        'total_months' => max(0, (int) ($payload['total_months'] ?? 0)),
+        'current_month_index' => max(0, (int) ($payload['current_month_index'] ?? 0)),
+        'current_month_label' => trim((string) ($payload['current_month_label'] ?? '')),
+        'current_call_label' => trim((string) ($payload['current_call_label'] ?? '')),
+        'message' => trim((string) ($payload['message'] ?? '')),
+        'updated_at' => max(0, (int) ($payload['updated_at'] ?? 0)),
+        'started_at' => max(0, (int) ($payload['started_at'] ?? 0)),
+        'completed_at' => max(0, (int) ($payload['completed_at'] ?? 0)),
+        'error' => trim((string) ($payload['error'] ?? '')),
+    ];
 }
 
 function cache_cleanup_marker_path(): string
@@ -476,6 +753,23 @@ function odata_send_cache_clear_json(): void
         'deleted_count' => $deletedCount,
         'failed_count' => $failedCount,
     ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function odata_send_load_progress_json(): void
+{
+    if (function_exists('xdebug_disable')) {
+        xdebug_disable();
+    }
+
+    require_once __DIR__ . '/auth.php';
+    require_once __DIR__ . '/logincheck.php';
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+
+    $token = trim((string) ($_GET['token'] ?? ''));
+    echo json_encode(odata_load_progress_payload($token), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 
@@ -1360,4 +1654,7 @@ if (odata_is_direct_request() && $odataAction === 'cache_delete') {
 }
 if (odata_is_direct_request() && $odataAction === 'cache_clear') {
     odata_send_cache_clear_json();
+}
+if (odata_is_direct_request() && $odataAction === 'load_progress') {
+    odata_send_load_progress_json();
 }
