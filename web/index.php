@@ -160,6 +160,17 @@ function current_user_email_or_fallback(): string
     return 'ict@kvt.nl';
 }
 
+function demeter_release_session_lock_if_active(): void
+{
+    if (!function_exists('session_status') || !function_exists('session_write_close')) {
+        return;
+    }
+
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        @session_write_close();
+    }
+}
+
 function memo_setting_keys(): array
 {
     return [
@@ -383,6 +394,8 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
 $memoColumnSettings = load_memo_column_settings($currentUserEmail);
 $layoutStyleSetting = load_layout_style_setting($currentUserEmail);
 $keepProjectWorkordersTogetherSetting = load_keep_project_workorders_together_setting($currentUserEmail);
+
+demeter_release_session_lock_if_active();
 
 $companies = [
     "Koninklijke van Twist",
