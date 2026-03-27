@@ -371,7 +371,7 @@ function odata_load_progress_set_current_call(string $token, string $url): void
         if ($filterValue !== '') {
             $normalizedFilter = preg_replace('/\s+/', ' ', $filterValue);
             if (is_string($normalizedFilter) && $normalizedFilter !== '') {
-                $label .= ' | ' . mb_substr($normalizedFilter, 0, 90);
+                $label .= ' | ' . substr($normalizedFilter, 0, 90);
             }
         }
     }
