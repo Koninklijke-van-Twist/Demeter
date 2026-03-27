@@ -125,7 +125,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Line_Amount',
                     ],
-                    'filter' => '',
+                    'filter' => "Entry_Type eq 'Verkoop'",
                     'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
@@ -147,7 +147,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Line_Amount',
                     ],
-                    'filter' => '',
+                    'filter' => "Entry_Type eq 'Verkoop'",
                     'row_mode' => self::ROW_MODE_SUM_INVERT,
                 ],
             ],
@@ -371,7 +371,8 @@ class ProjectFinanceService
                         (string) $lineDiscountAmount,
                     ]);
 
-                    if (!isset($invoiceDetailsById[$invoiceId]['_seen_lines'][$lineDedupKey])) {
+                    $isNewInvoiceLine = !isset($invoiceDetailsById[$invoiceId]['_seen_lines'][$lineDedupKey]);
+                    if ($isNewInvoiceLine) {
                         $invoiceDetailsById[$invoiceId]['_seen_lines'][$lineDedupKey] = true;
                         $invoiceDetailsById[$invoiceId]['Lines'][] = $linePayload;
                     }
@@ -381,10 +382,12 @@ class ProjectFinanceService
                     }
                     $projectInvoiceIdsByJob[$normalizedJobNo][$invoiceId] = true;
 
-                    if (!isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
-                        $projectInvoicedTotalByJob[$normalizedJobNo] = 0.0;
+                    if ($isNewInvoiceLine) {
+                        if (!isset($projectInvoicedTotalByJob[$normalizedJobNo])) {
+                            $projectInvoicedTotalByJob[$normalizedJobNo] = 0.0;
+                        }
+                        $projectInvoicedTotalByJob[$normalizedJobNo] += $amount;
                     }
-                    $projectInvoicedTotalByJob[$normalizedJobNo] += $amount;
                 }
             }
         }
@@ -443,9 +446,10 @@ class ProjectFinanceService
         $projectKeyField = (string) ($projectCostSource['key_field'] ?? 'Job_No');
         $workorderKeyField = (string) ($workorderCostSource['key_field'] ?? 'Job_Task_No');
         $dateField = 'Posting_Date';
+        $entryTypeField = 'Entry_Type';
 
         $selectFields = array_values(array_unique(array_filter(array_merge(
-            [$projectKeyField, $workorderKeyField, $dateField],
+            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField],
             is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
             is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
             is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
@@ -477,11 +481,13 @@ class ProjectFinanceService
                 is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
                 (string) ($projectCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
             ),
-            self::aggregateAmountByKey(
+            self::aggregateAmountByKeyWithEntryTypeFilter(
                 $rows,
                 $projectKeyField,
                 is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
-                (string) ($projectRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
+                (string) ($projectRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
+                'Entry_Type',
+                'Verkoop'
             )
         );
 
@@ -492,12 +498,54 @@ class ProjectFinanceService
                 is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
                 (string) ($workorderCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
             ),
-            self::aggregateAmountByKey(
+            self::aggregateAmountByKeyWithEntryTypeFilter(
                 $rows,
                 $workorderKeyField,
                 is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [],
-                (string) ($workorderRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
+                (string) ($workorderRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
+                'Entry_Type',
+                'Verkoop'
             )
+        );
+
+        $workorderCostByProjectAndNumber = [];
+        $workorderRevenueByProjectAndNumber = [];
+        $workorderCostFields = is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [];
+        $workorderRevenueFields = is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [];
+        $workorderCostMode = (string) ($workorderCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
+        $workorderRevenueMode = (string) ($workorderRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $jobNo = trim((string) ($row[$projectKeyField] ?? ''));
+            $jobTaskNo = trim((string) ($row[$workorderKeyField] ?? ''));
+            if ($jobNo === '' || $jobTaskNo === '') {
+                continue;
+            }
+
+            $compositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($jobTaskNo);
+            if (!isset($workorderCostByProjectAndNumber[$compositeKey])) {
+                $workorderCostByProjectAndNumber[$compositeKey] = 0.0;
+            }
+            if (!isset($workorderRevenueByProjectAndNumber[$compositeKey])) {
+                $workorderRevenueByProjectAndNumber[$compositeKey] = 0.0;
+            }
+
+            $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
+            
+            // Only include revenue if Entry_Type is 'Verkoop'
+            $entryType = trim((string) ($row['Entry_Type'] ?? ''));
+            if ($entryType === 'Verkoop') {
+                $workorderRevenueByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderRevenueFields, $workorderRevenueMode);
+            }
+        }
+
+        $workorderTotalsByProjectAndNumber = self::combineTotalsByKey(
+            $workorderCostByProjectAndNumber,
+            $workorderRevenueByProjectAndNumber
         );
 
         $projectNumbers = [];
@@ -526,6 +574,7 @@ class ProjectFinanceService
         return [
             'project_totals_by_job' => $projectTotalsByJob,
             'workorder_totals_by_number' => $workorderTotalsByNumber,
+            'workorder_totals_by_project_and_number' => $workorderTotalsByProjectAndNumber,
             'project_numbers' => $projectNumbers,
             'workorder_numbers' => $workorderNumbers,
         ];
@@ -1066,13 +1115,14 @@ class ProjectFinanceService
         $result = [];
         $keys = array_values(array_unique(array_merge(array_keys($costTotalsByKey), array_keys($revenueTotalsByKey))));
 
-        foreach ($keys as $normalizedKey) {
-            if (!is_string($normalizedKey) || $normalizedKey === '') {
+        foreach ($keys as $rawKey) {
+            $normalizedKey = trim((string) $rawKey);
+            if ($normalizedKey === '') {
                 continue;
             }
 
-            $costs = (float) ($costTotalsByKey[$normalizedKey] ?? 0.0);
-            $revenue = (float) ($revenueTotalsByKey[$normalizedKey] ?? 0.0);
+            $costs = (float) ($costTotalsByKey[$rawKey] ?? 0.0);
+            $revenue = (float) ($revenueTotalsByKey[$rawKey] ?? 0.0);
 
             $result[$normalizedKey] = [
                 'costs' => $costs,
@@ -1098,6 +1148,46 @@ class ProjectFinanceService
 
             $keyRaw = trim((string) ($row[$keyField] ?? ''));
             if ($keyRaw === '') {
+                continue;
+            }
+
+            $normalizedKey = self::normalizeMatchValue($keyRaw);
+            if (!isset($result[$normalizedKey])) {
+                $result[$normalizedKey] = 0.0;
+            }
+
+            $result[$normalizedKey] += self::extractRowAmount($row, $fields, $rowMode);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Aggregeert bedragen per sleutel, met optioneel filteren op Entry_Type voor opbrengsten.
+     */
+    private static function aggregateAmountByKeyWithEntryTypeFilter(
+        array $rows,
+        string $keyField,
+        array $fields,
+        string $rowMode,
+        string $entryTypeField = 'Entry_Type',
+        string $entryTypeValue = 'Verkoop'
+    ): array {
+        $result = [];
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $keyRaw = trim((string) ($row[$keyField] ?? ''));
+            if ($keyRaw === '') {
+                continue;
+            }
+
+            // Filter on Entry_Type
+            $entryType = trim((string) ($row[$entryTypeField] ?? ''));
+            if ($entryType !== $entryTypeValue) {
                 continue;
             }
 

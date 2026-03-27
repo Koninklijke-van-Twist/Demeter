@@ -512,6 +512,7 @@ try {
     $projectInvoiceIdsByJob = is_array($overviewData['project_invoice_ids_by_job'] ?? null) ? $overviewData['project_invoice_ids_by_job'] : [];
     $projectInvoicedTotalByJob = is_array($overviewData['project_invoiced_total_by_job'] ?? null) ? $overviewData['project_invoiced_total_by_job'] : [];
     $workorderTotalsByNumber = is_array($overviewData['workorder_totals_by_number'] ?? null) ? $overviewData['workorder_totals_by_number'] : [];
+    $workorderTotalsByProjectAndNumber = is_array($overviewData['workorder_totals_by_project_and_number'] ?? null) ? $overviewData['workorder_totals_by_project_and_number'] : [];
 
     foreach ($workorders as $workorder) {
         if (!is_array($workorder)) {
@@ -537,8 +538,9 @@ try {
         }
 
         $normalizedWorkorderNo = strtolower(trim((string) ($workorder['Job_Task_No'] ?? '')));
-        $workorderTotals = $normalizedWorkorderNo !== '' && isset($workorderTotalsByNumber[$normalizedWorkorderNo])
-            ? $workorderTotalsByNumber[$normalizedWorkorderNo]
+        $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderNo;
+        $workorderTotals = $workorderProjectCompositeKey !== '|' && isset($workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey])
+            ? $workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey]
             : null;
         $actualCosts = is_array($workorderTotals) ? (float) ($workorderTotals['costs'] ?? 0.0) : 0.0;
         $totalRevenue = is_array($workorderTotals) ? (float) ($workorderTotals['revenue'] ?? 0.0) : 0.0;

@@ -195,7 +195,6 @@ function finance_extract_row_amount(array $row, array $fields, string $mode): fl
 
     if ($normalizedMode === 'sum_invert') {
         $sum = 0.0;
-        $hasNegativeValue = false;
 
         foreach ($fields as $field) {
             if (!is_string($field) || $field === '' || !array_key_exists($field, $row)) {
@@ -207,15 +206,11 @@ function finance_extract_row_amount(array $row, array $fields, string $mode): fl
                 continue;
             }
 
-            $numeric = (float) $raw;
-            if ($numeric < 0.0) {
-                $hasNegativeValue = true;
-            }
-
-            $sum += $numeric;
+            $sum += (float) $raw;
         }
 
-        return $hasNegativeValue ? -$sum : $sum;
+        // Voor omzet uit ProjectPosten wordt Line_Amount per regel geinverteerd.
+        return -$sum;
     }
 
     if ($normalizedMode === 'sum') {
