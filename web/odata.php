@@ -1,4 +1,7 @@
 <?php
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
 if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
     define('DEMETER_ODATA_MAX_EXECUTION_SECONDS', 600);
