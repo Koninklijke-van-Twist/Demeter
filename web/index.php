@@ -1063,7 +1063,7 @@ $initialData = [
         }
 
         .notes-modal {
-            width: min(860px, 95vw);
+            width: min(1360px, 95vw);
             max-height: 85vh;
             overflow: auto;
             background: #fff;
