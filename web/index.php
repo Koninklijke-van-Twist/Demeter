@@ -540,7 +540,10 @@ try {
         }
 
         $normalizedWorkorderNo = strtolower(trim((string) ($workorder['No'] ?? '')));
-        $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderNo;
+        $normalizedWorkorderSourceKey = $jobTaskNo !== ''
+            ? strtolower($jobTaskNo)
+            : $normalizedWorkorderNo;
+        $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderSourceKey;
         $workorderTotals = $workorderProjectCompositeKey !== '|' && isset($workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey])
             ? $workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey]
             : null;
@@ -607,6 +610,10 @@ try {
             $displayOrderType = $orderTypeFromDescription;
         }
 
+        $normalizedPopupWorkorderSourceKey = $isImportSapPseudoRow
+            ? $normalizedWorkorderNo
+            : strtolower($jobTaskNo);
+
         $rows[] = [
             'No' => $displayWorkorderNo,
             'Order_Type' => $displayOrderType,
@@ -634,7 +641,7 @@ try {
             'Invoice_Ids' => $invoiceIdsForProject,
             'Job_No' => $jobNo,
             'Job_Task_No' => $jobTaskNo,
-            'Workorder_Source_Key' => $normalizedWorkorderNo,
+            'Workorder_Source_Key' => $normalizedPopupWorkorderSourceKey,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
         ];
     }

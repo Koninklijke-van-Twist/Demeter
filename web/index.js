@@ -1767,8 +1767,9 @@
                 {
                     const workorderValue = String(row[column.key] || '').trim();
                     td.textContent = workorderValue;
+                    const workorderLines = getProjectPostenRowsForWorkorder(row);
 
-                    if (workorderValue !== '')
+                    if (workorderValue !== '' && workorderLines.length > 0)
                     {
                         td.classList.add('project-posten-link');
                         td.title = 'Klik voor ProjectPosten-regels van deze werkorder.';
@@ -2960,10 +2961,10 @@
         return String(value || '').trim().toLowerCase();
     }
 
-    function buildProjectWorkorderCompositeKey (row)
+    function buildProjectWorkorderCompositeKey (row, workorderKeyCandidate)
     {
         const projectKey = normalizeProjectPostenMapKey((row && row.Job_No) || '');
-        const sourceWorkorderKey = normalizeProjectPostenMapKey((row && row.Workorder_Source_Key) || (row && row.No) || '');
+        const sourceWorkorderKey = normalizeProjectPostenMapKey(workorderKeyCandidate);
         if (projectKey === '' || sourceWorkorderKey === '')
         {
             return '';
@@ -2974,14 +2975,28 @@
 
     function getProjectPostenRowsForWorkorder (row)
     {
-        const compositeKey = buildProjectWorkorderCompositeKey(row);
-        if (compositeKey === '')
+        const keyCandidates = [
+            (row && row.Workorder_Source_Key) || '',
+            (row && row.Job_Task_No) || '',
+            (row && row.No) || ''
+        ];
+
+        for (const candidate of keyCandidates)
         {
-            return [];
+            const compositeKey = buildProjectWorkorderCompositeKey(row, candidate);
+            if (compositeKey === '')
+            {
+                continue;
+            }
+
+            const lines = projectPostenRowsByProjectAndWorkorder[compositeKey];
+            if (Array.isArray(lines) && lines.length > 0)
+            {
+                return lines.slice();
+            }
         }
 
-        const lines = projectPostenRowsByProjectAndWorkorder[compositeKey];
-        return Array.isArray(lines) ? lines.slice() : [];
+        return [];
     }
 
     function getProjectPostenRowsForProject (projectNo)
@@ -3064,11 +3079,15 @@
 
         const thead = document.createElement('thead');
         const headRow = document.createElement('tr');
-        const headings = ['Posting_Date', 'Entry_Type', 'Type', 'No', 'Description', 'Total_Cost', 'Line_Amount'];
+        const headings = ['Workorder', 'Posting_Date', 'Entry_Type', 'Type', 'No', 'Description', 'Total_Cost', 'Line_Amount'];
         for (const headingText of headings)
         {
             const th = document.createElement('th');
             th.textContent = headingText;
+            if (headingText === 'Type')
+            {
+                th.style.minWidth = '120px';
+            }
             headRow.appendChild(th);
         }
         thead.appendChild(headRow);
@@ -3081,6 +3100,7 @@
         {
             const tr = document.createElement('tr');
             const cellValues = [
+                String((line && line.Workorder) || ''),
                 String((line && line.Posting_Date) || ''),
                 String((line && line.Entry_Type) || ''),
                 String((line && line.Type) || ''),

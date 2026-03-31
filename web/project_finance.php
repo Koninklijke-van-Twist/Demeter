@@ -549,6 +549,9 @@ class ProjectFinanceService
 
             $normalizedProjectNo = self::normalizeMatchValue($jobNo);
             $projectPostenRow = [
+                'Workorder' => $jobTaskNo !== ''
+                    ? $jobTaskNo
+                    : (self::descriptionStartsWithImportSap((string) ($row[$descriptionField] ?? '')) ? 'Import SAP' : ''),
                 'Posting_Date' => (string) ($row[$dateField] ?? ''),
                 'Entry_Type' => (string) ($row[$entryTypeField] ?? ''),
                 'Type' => (string) ($row[$typeField] ?? ''),
