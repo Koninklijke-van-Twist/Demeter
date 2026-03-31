@@ -537,7 +537,7 @@ try {
             continue;
         }
 
-        $normalizedWorkorderNo = strtolower(trim((string) ($workorder['Job_Task_No'] ?? '')));
+        $normalizedWorkorderNo = strtolower(trim((string) ($workorder['No'] ?? '')));
         $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderNo;
         $workorderTotals = $workorderProjectCompositeKey !== '|' && isset($workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey])
             ? $workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey]

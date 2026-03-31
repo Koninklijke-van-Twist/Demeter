@@ -132,7 +132,7 @@ class ProjectFinanceService
             'workorder' => [
                 'cost_source' => [
                     'entity_set' => 'ProjectPosten',
-                    'key_field' => 'Job_Task_No',
+                    'key_field' => 'LVS_Work_Order_No',
                     'project_field' => 'Job_No',
                     'fields' => [
                         'Total_Cost',
@@ -142,7 +142,7 @@ class ProjectFinanceService
                 ],
                 'revenue_source' => [
                     'entity_set' => 'ProjectPosten',
-                    'key_field' => 'Job_Task_No',
+                    'key_field' => 'LVS_Work_Order_No',
                     'project_field' => 'Job_No',
                     'fields' => [
                         'Line_Amount',
@@ -535,7 +535,7 @@ class ProjectFinanceService
             }
 
             $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
-            
+
             // Only include revenue if Entry_Type is 'Verkoop'
             $entryType = trim((string) ($row['Entry_Type'] ?? ''));
             if ($entryType === 'Verkoop') {

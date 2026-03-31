@@ -1418,16 +1418,10 @@
         const invoiceIdSet = new Set();
         for (const row of projectRows)
         {
-            const rowInvoiceIds = Array.isArray(row && row.Invoice_Ids)
-                ? row.Invoice_Ids
-                : String((row && row.Invoice_Id) || '').split(',').map(function (part) { return String(part || '').trim(); });
-
+            const rowInvoiceIds = getRowInvoiceIds(row);
             for (const invoiceId of rowInvoiceIds)
             {
-                if (invoiceId !== '')
-                {
-                    invoiceIdSet.add(invoiceId);
-                }
+                invoiceIdSet.add(invoiceId);
             }
         }
 
@@ -1690,9 +1684,7 @@
 
             if (column.key === 'Invoice_Id')
             {
-                const invoiceIds = Array.isArray(row.Invoice_Ids)
-                    ? row.Invoice_Ids
-                    : String(row.Invoice_Id || '').split(',').map(function (part) { return String(part || '').trim(); }).filter(Boolean);
+                const invoiceIds = getRowInvoiceIds(row);
 
                 if (invoiceIds.length > 0)
                 {
@@ -1907,6 +1899,11 @@
             return true;
         }
 
+        if (rowMatchesProjectOrInvoiceSearch(row))
+        {
+            return true;
+        }
+
         for (const column of columns)
         {
             if (column.key === 'Notes')
@@ -1942,6 +1939,50 @@
         }
 
         return false;
+    }
+
+    function rowMatchesProjectOrInvoiceSearch (row)
+    {
+        if (appliedSearchText === '')
+        {
+            return false;
+        }
+
+        const projectNumber = String((row && row.Job_No) || '').toLowerCase();
+        if (projectNumber.includes(appliedSearchText))
+        {
+            return true;
+        }
+
+        const invoiceIds = getRowInvoiceIds(row);
+        for (const invoiceId of invoiceIds)
+        {
+            if (invoiceId.toLowerCase().includes(appliedSearchText))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function getRowInvoiceIds (row)
+    {
+        const sourceIds = Array.isArray(row && row.Invoice_Ids)
+            ? row.Invoice_Ids
+            : String((row && row.Invoice_Id) || '').split(',');
+
+        const uniqueIds = new Set();
+        for (const invoiceId of sourceIds)
+        {
+            const normalizedId = String(invoiceId || '').trim();
+            if (normalizedId !== '')
+            {
+                uniqueIds.add(normalizedId);
+            }
+        }
+
+        return Array.from(uniqueIds);
     }
 
     function buildStatusInfoMap ()
@@ -2042,11 +2083,12 @@
 
     function getVisibleGlobalRows ()
     {
-        const filteredRows = getVisibleFilteredRows();
-        return filteredRows.slice().sort(compareRowsForGlobalOrder);
+        const globallyFilteredRows = getRowsMatchingGlobalFilters();
+        const searchFilteredRows = globallyFilteredRows.filter(rowMatchesSearch);
+        return searchFilteredRows.slice().sort(compareRowsForGlobalOrder);
     }
 
-    function getVisibleFilteredRows ()
+    function getRowsMatchingGlobalFilters ()
     {
         return rows.filter(function (row)
         {
@@ -2061,7 +2103,7 @@
                 return false;
             }
 
-            return rowMatchesSearch(row);
+            return true;
         });
     }
 
@@ -2083,8 +2125,41 @@
 
     function getVisibleProjectGroups ()
     {
-        const globalRows = getVisibleGlobalRows();
+        const globalRows = getVisibleGlobalRowsForProjectGroups();
         return buildProjectGroupsFromGlobalRows(globalRows);
+    }
+
+    function getVisibleGlobalRowsForProjectGroups ()
+    {
+        const globallyFilteredRows = getRowsMatchingGlobalFilters().slice().sort(compareRowsForGlobalOrder);
+
+        if (appliedSearchText === '')
+        {
+            return globallyFilteredRows;
+        }
+
+        const groups = buildProjectGroupsFromGlobalRows(globallyFilteredRows);
+        const visibleRows = [];
+
+        for (const group of groups)
+        {
+            const matchingRows = group.rows.filter(rowMatchesSearch);
+            if (matchingRows.length === 0)
+            {
+                continue;
+            }
+
+            const hasProjectOrInvoiceMatch = group.rows.some(rowMatchesProjectOrInvoiceSearch);
+            if (hasProjectOrInvoiceMatch)
+            {
+                visibleRows.push.apply(visibleRows, group.rows);
+                continue;
+            }
+
+            visibleRows.push.apply(visibleRows, matchingRows);
+        }
+
+        return visibleRows;
     }
 
     function buildProjectGroupsFromGlobalRows (globalRows)
