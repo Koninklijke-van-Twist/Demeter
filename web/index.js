@@ -1267,6 +1267,8 @@
 
     function renderHeader ()
     {
+        const headerSearchTotals = getHeaderSearchTotals();
+
         for (const th of headRow.querySelectorAll('th'))
         {
             const key = th.dataset.sortKey || '';
@@ -1288,7 +1290,81 @@
             }
 
             label.textContent = formatDisplayLabel(column.label) + arrow;
+
+            if (!headerSearchTotals)
+            {
+                continue;
+            }
+
+            let totalValue = null;
+            let isResultTotal = false;
+
+            if (key === 'Actual_Costs')
+            {
+                totalValue = headerSearchTotals.actualCosts;
+            }
+            else if (key === 'Total_Revenue')
+            {
+                totalValue = headerSearchTotals.totalRevenue;
+            }
+            else if (key === 'Actual_Total')
+            {
+                totalValue = headerSearchTotals.actualTotal;
+                isResultTotal = true;
+            }
+
+            if (totalValue === null)
+            {
+                continue;
+            }
+
+            const totalLine = document.createElement('span');
+            totalLine.className = 'column-header-total';
+
+            if (totalValue > 0)
+            {
+                totalLine.classList.add('amount-positive');
+            }
+            else if (totalValue < 0)
+            {
+                totalLine.classList.add('amount-negative');
+            }
+
+            totalLine.textContent = isResultTotal
+                ? formatSignedCurrencyOrZero(totalValue)
+                : formatCurrencyOrZero(totalValue);
+
+            label.appendChild(totalLine);
         }
+    }
+
+    function getHeaderSearchTotals ()
+    {
+        if (appliedSearchText === '')
+        {
+            return null;
+        }
+
+        const visibleRows = layoutStyle === 'projectgroups'
+            ? getVisibleGlobalRowsForProjectGroups()
+            : getVisibleSortedRows();
+
+        let actualCosts = 0;
+        let totalRevenue = 0;
+        let actualTotal = 0;
+
+        for (const row of visibleRows)
+        {
+            actualCosts += Number(getColumnValueForSorting(row, 'Actual_Costs') || 0);
+            totalRevenue += Number(getColumnValueForSorting(row, 'Total_Revenue') || 0);
+            actualTotal += Number(getColumnValueForSorting(row, 'Actual_Total') || 0);
+        }
+
+        return {
+            actualCosts: actualCosts,
+            totalRevenue: totalRevenue,
+            actualTotal: actualTotal,
+        };
     }
 
     function renderRows ()
@@ -1382,6 +1458,10 @@
         }
         else
         {
+            const projectResult = summary.totalRevenue - summary.totalCosts;
+            const projectResultClass = projectResult > 0 ? 'amount-positive' : (projectResult < 0 ? 'amount-negative' : '');
+            const projectResultSpan = '<span' + (projectResultClass ? ' class="' + projectResultClass + '"' : '') + '>' + escapeHtml(formatSignedCurrency(projectResult)) + '</span>';
+
             const summaryParts = [
                 '<div class="project-group-summary-content">',
                 '<strong>Project: </strong>' + escapeHtml(summary.projectLabel),
@@ -1390,7 +1470,7 @@
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalRevenue)),
                 '<span class="project-group-summary-sep">|</span>',
-                '<strong>Resultaat: </strong>' + escapeHtml(formatSignedCurrency(summary.totalRevenue - summary.totalCosts)),
+                '<strong>Resultaat: </strong>' + projectResultSpan,
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Project taakregels: </strong>' + escapeHtml(String(summary.taskLineCount)),
                 '<span class="project-group-summary-sep">|</span>',
@@ -2513,6 +2593,17 @@
 
         const sign = amount > 0 ? '+' : '-';
         return sign + currencyFormatter.format(Math.abs(amount));
+    }
+
+    function formatSignedCurrencyOrZero (value)
+    {
+        const amount = Number(value || 0);
+        if (amount === 0)
+        {
+            return '€ 0';
+        }
+
+        return formatSignedCurrency(amount);
     }
 
     function formatCurrencyOrZero (value)

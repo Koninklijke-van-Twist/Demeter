@@ -116,7 +116,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Total_Cost',
                     ],
-                    'filter' => '',
+                    'filter' => "Entry_Type eq 'Gebruik'",
                     'row_mode' => self::ROW_MODE_SUM_RAW,
                 ],
                 'revenue_source' => [
@@ -137,7 +137,7 @@ class ProjectFinanceService
                     'fields' => [
                         'Total_Cost',
                     ],
-                    'filter' => '',
+                    'filter' => "Entry_Type eq 'Gebruik'",
                     'row_mode' => self::ROW_MODE_SUM_RAW,
                 ],
                 'revenue_source' => [
@@ -441,6 +441,10 @@ class ProjectFinanceService
         $projectRevenueSource = $this->getAmountSourceConfig('project', 'revenue_source');
         $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
         $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
+        $projectCostFilter = trim((string) ($projectCostSource['filter'] ?? ''));
+        $projectRevenueFilter = trim((string) ($projectRevenueSource['filter'] ?? ''));
+        $workorderCostFilter = trim((string) ($workorderCostSource['filter'] ?? ''));
+        $workorderRevenueFilter = trim((string) ($workorderRevenueSource['filter'] ?? ''));
 
         $entitySet = (string) ($projectCostSource['entity_set'] ?? '');
         $projectKeyField = (string) ($projectCostSource['key_field'] ?? 'Job_No');
@@ -475,36 +479,36 @@ class ProjectFinanceService
         }
 
         $projectTotalsByJob = self::combineTotalsByKey(
-            self::aggregateAmountByKey(
+            self::aggregateAmountByKeyWithSourceFilter(
                 $rows,
                 $projectKeyField,
                 is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
-                (string) ($projectCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
+                (string) ($projectCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
+                $projectCostFilter
             ),
-            self::aggregateAmountByKeyWithEntryTypeFilter(
+            self::aggregateAmountByKeyWithSourceFilter(
                 $rows,
                 $projectKeyField,
                 is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
                 (string) ($projectRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
-                'Entry_Type',
-                'Verkoop'
+                $projectRevenueFilter
             )
         );
 
         $workorderTotalsByNumber = self::combineTotalsByKey(
-            self::aggregateAmountByKey(
+            self::aggregateAmountByKeyWithSourceFilter(
                 $rows,
                 $workorderKeyField,
                 is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
-                (string) ($workorderCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC)
+                (string) ($workorderCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
+                $workorderCostFilter
             ),
-            self::aggregateAmountByKeyWithEntryTypeFilter(
+            self::aggregateAmountByKeyWithSourceFilter(
                 $rows,
                 $workorderKeyField,
                 is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [],
                 (string) ($workorderRevenueSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC),
-                'Entry_Type',
-                'Verkoop'
+                $workorderRevenueFilter
             )
         );
 
@@ -534,11 +538,11 @@ class ProjectFinanceService
                 $workorderRevenueByProjectAndNumber[$compositeKey] = 0.0;
             }
 
-            $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
+            if (self::rowMatchesSourceFilter($row, $workorderCostFilter)) {
+                $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
+            }
 
-            // Only include revenue if Entry_Type is 'Verkoop'
-            $entryType = trim((string) ($row['Entry_Type'] ?? ''));
-            if ($entryType === 'Verkoop') {
+            if (self::rowMatchesSourceFilter($row, $workorderRevenueFilter)) {
                 $workorderRevenueByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderRevenueFields, $workorderRevenueMode);
             }
         }
@@ -1163,6 +1167,43 @@ class ProjectFinanceService
     }
 
     /**
+     * Aggregeert bedragen per sleutel met toepassing van de geconfigureerde bronfilter.
+     */
+    private static function aggregateAmountByKeyWithSourceFilter(
+        array $rows,
+        string $keyField,
+        array $fields,
+        string $rowMode,
+        string $sourceFilter
+    ): array {
+        $result = [];
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            if (!self::rowMatchesSourceFilter($row, $sourceFilter)) {
+                continue;
+            }
+
+            $keyRaw = trim((string) ($row[$keyField] ?? ''));
+            if ($keyRaw === '') {
+                continue;
+            }
+
+            $normalizedKey = self::normalizeMatchValue($keyRaw);
+            if (!isset($result[$normalizedKey])) {
+                $result[$normalizedKey] = 0.0;
+            }
+
+            $result[$normalizedKey] += self::extractRowAmount($row, $fields, $rowMode);
+        }
+
+        return $result;
+    }
+
+    /**
      * Aggregeert bedragen per sleutel, met optioneel filteren op Entry_Type voor opbrengsten.
      */
     private static function aggregateAmountByKeyWithEntryTypeFilter(
@@ -1200,6 +1241,27 @@ class ProjectFinanceService
         }
 
         return $result;
+    }
+
+    /**
+     * Ondersteunt eenvoudige OData-filters in de vorm "Veld eq 'Waarde'".
+     */
+    private static function rowMatchesSourceFilter(array $row, string $sourceFilter): bool
+    {
+        $filter = trim($sourceFilter);
+        if ($filter === '') {
+            return true;
+        }
+
+        if (preg_match("/^([A-Za-z0-9_]+)\s+eq\s+'((?:''|[^'])*)'$/", $filter, $matches) !== 1) {
+            return true;
+        }
+
+        $fieldName = (string) ($matches[1] ?? '');
+        $expectedValue = str_replace("''", "'", (string) ($matches[2] ?? ''));
+        $actualValue = trim((string) ($row[$fieldName] ?? ''));
+
+        return $actualValue === $expectedValue;
     }
 
     /**

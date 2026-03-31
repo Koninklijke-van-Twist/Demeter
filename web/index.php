@@ -1255,6 +1255,13 @@ $initialData = [
             hyphens: auto;
         }
 
+        .column-header-total {
+            display: block;
+            margin-top: 4px;
+            font-size: 11px;
+            line-height: 1.15;
+        }
+
         th.col-compact,
         td.col-compact {
             width: 88px;
