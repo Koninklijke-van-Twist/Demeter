@@ -20,6 +20,12 @@
     const invoiceDetailsById = payload && typeof payload.invoice_details_by_id === 'object' && payload.invoice_details_by_id !== null
         ? payload.invoice_details_by_id
         : {};
+    const projectPostenRowsByProject = payload && typeof payload.projectposten_rows_by_project === 'object' && payload.projectposten_rows_by_project !== null
+        ? payload.projectposten_rows_by_project
+        : {};
+    const projectPostenRowsByProjectAndWorkorder = payload && typeof payload.projectposten_rows_by_project_and_workorder === 'object' && payload.projectposten_rows_by_project_and_workorder !== null
+        ? payload.projectposten_rows_by_project_and_workorder
+        : {};
     const error = typeof payload.error === 'string' ? payload.error : null;
     const invoiceFilter = typeof payload.invoice_filter === 'string' ? payload.invoice_filter : 'both';
     const showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
@@ -665,7 +671,7 @@
         let canScrollVertically = false;
         let dragRafId = 0;
 
-        const interactiveSelector = 'button, input, select, textarea, a, [role="button"], .notes-btn, .memo-cell-clickable, .invoice-id-clickable, .amount-info-clickable';
+        const interactiveSelector = 'button, input, select, textarea, a, [role="button"], .notes-btn, .memo-cell-clickable, .invoice-id-clickable, .amount-info-clickable, .project-posten-link';
 
         function endDrag ()
         {
@@ -1464,7 +1470,7 @@
 
             const summaryParts = [
                 '<div class="project-group-summary-content">',
-                '<strong>Project: </strong>' + escapeHtml(summary.projectLabel),
+                '<strong>Project: </strong><a href="#" class="project-posten-link project-posten-project-link">' + escapeHtml(summary.projectLabel) + '</a>',
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalCosts)),
                 '<span class="project-group-summary-sep">|</span>',
@@ -1497,6 +1503,16 @@
                         openInvoiceDetailsModal(summary.invoiceIds);
                     });
                 }
+            }
+
+            const projectPostenLink = headerCell.querySelector('.project-posten-project-link');
+            if (projectPostenLink)
+            {
+                projectPostenLink.addEventListener('click', function (event)
+                {
+                    event.preventDefault();
+                    openProjectPostenModalForProject(summary.projectLabel);
+                });
             }
         }
 
@@ -1747,7 +1763,37 @@
             }
             else
             {
-                if (column.key === 'Actual_Total' || column.key === 'Project_Total')
+                if (column.key === 'No')
+                {
+                    const workorderValue = String(row[column.key] || '').trim();
+                    td.textContent = workorderValue;
+
+                    if (workorderValue !== '')
+                    {
+                        td.classList.add('project-posten-link');
+                        td.title = 'Klik voor ProjectPosten-regels van deze werkorder.';
+                        td.addEventListener('click', function ()
+                        {
+                            openProjectPostenModalForWorkorder(row);
+                        });
+                    }
+                }
+                else if (column.key === 'Job_No')
+                {
+                    const projectValue = String(row[column.key] || '').trim();
+                    td.textContent = projectValue;
+
+                    if (projectValue !== '')
+                    {
+                        td.classList.add('project-posten-link');
+                        td.title = 'Klik voor ProjectPosten-regels van dit project.';
+                        td.addEventListener('click', function ()
+                        {
+                            openProjectPostenModalForProject(projectValue);
+                        });
+                    }
+                }
+                else if (column.key === 'Actual_Total' || column.key === 'Project_Total')
                 {
                     const totalAmount = Number(getColumnValueForSorting(row, column.key) || 0);
                     if (totalAmount === 0)
@@ -2906,6 +2952,156 @@
         table.appendChild(tbodyElement);
         notesBody.appendChild(table);
 
+        notesOverlay.style.display = '';
+    }
+
+    function normalizeProjectPostenMapKey (value)
+    {
+        return String(value || '').trim().toLowerCase();
+    }
+
+    function buildProjectWorkorderCompositeKey (row)
+    {
+        const projectKey = normalizeProjectPostenMapKey((row && row.Job_No) || '');
+        const sourceWorkorderKey = normalizeProjectPostenMapKey((row && row.Workorder_Source_Key) || (row && row.No) || '');
+        if (projectKey === '' || sourceWorkorderKey === '')
+        {
+            return '';
+        }
+
+        return projectKey + '|' + sourceWorkorderKey;
+    }
+
+    function getProjectPostenRowsForWorkorder (row)
+    {
+        const compositeKey = buildProjectWorkorderCompositeKey(row);
+        if (compositeKey === '')
+        {
+            return [];
+        }
+
+        const lines = projectPostenRowsByProjectAndWorkorder[compositeKey];
+        return Array.isArray(lines) ? lines.slice() : [];
+    }
+
+    function getProjectPostenRowsForProject (projectNo)
+    {
+        const projectKey = normalizeProjectPostenMapKey(projectNo);
+        if (projectKey === '')
+        {
+            return [];
+        }
+
+        const lines = projectPostenRowsByProject[projectKey];
+        return Array.isArray(lines) ? lines.slice() : [];
+    }
+
+    function sortProjectPostenRows (lines)
+    {
+        return lines.slice().sort(function (left, right)
+        {
+            const leftDate = normalizeSortValue((left && left.Posting_Date) || '');
+            const rightDate = normalizeSortValue((right && right.Posting_Date) || '');
+            const dateCompare = leftDate.localeCompare(rightDate, 'nl', { numeric: true, sensitivity: 'base' });
+            if (dateCompare !== 0)
+            {
+                return dateCompare;
+            }
+
+            const leftDescription = normalizeSortValue((left && left.Description) || '');
+            const rightDescription = normalizeSortValue((right && right.Description) || '');
+            return leftDescription.localeCompare(rightDescription, 'nl', { numeric: true, sensitivity: 'base' });
+        });
+    }
+
+    function openProjectPostenModalForWorkorder (row)
+    {
+        const lines = getProjectPostenRowsForWorkorder(row);
+        const projectNo = String((row && row.Job_No) || '').trim();
+        const workorderNo = String((row && row.No) || '').trim();
+        const title = 'ProjectPosten - Werkorder ' + (workorderNo !== '' ? workorderNo : '(leeg)') + (projectNo !== '' ? ' (Project ' + projectNo + ')' : '');
+        openProjectPostenModal(title, lines);
+    }
+
+    function openProjectPostenModalForProject (projectNo)
+    {
+        const safeProjectNo = String(projectNo || '').trim();
+        const lines = getProjectPostenRowsForProject(safeProjectNo);
+        const title = 'ProjectPosten - Project ' + (safeProjectNo !== '' ? safeProjectNo : '(leeg)');
+        openProjectPostenModal(title, lines);
+    }
+
+    function openProjectPostenModal (title, lines)
+    {
+        if (!notesBody)
+        {
+            return;
+        }
+
+        if (notesModalTitle)
+        {
+            notesModalTitle.textContent = title;
+        }
+
+        notesBody.innerHTML = '';
+
+        const normalizedLines = Array.isArray(lines) ? lines.filter(function (line)
+        {
+            return line && typeof line === 'object';
+        }) : [];
+
+        if (normalizedLines.length === 0)
+        {
+            const empty = document.createElement('div');
+            empty.textContent = 'Geen ProjectPosten-regels beschikbaar.';
+            notesBody.appendChild(empty);
+            notesOverlay.style.display = '';
+            return;
+        }
+
+        const table = document.createElement('table');
+        table.className = 'workorders-table';
+
+        const thead = document.createElement('thead');
+        const headRow = document.createElement('tr');
+        const headings = ['Posting_Date', 'Entry_Type', 'Type', 'No', 'Description', 'Total_Cost', 'Line_Amount'];
+        for (const headingText of headings)
+        {
+            const th = document.createElement('th');
+            th.textContent = headingText;
+            headRow.appendChild(th);
+        }
+        thead.appendChild(headRow);
+        table.appendChild(thead);
+
+        const tbodyElement = document.createElement('tbody');
+        const sortedLines = sortProjectPostenRows(normalizedLines);
+
+        for (const line of sortedLines)
+        {
+            const tr = document.createElement('tr');
+            const cellValues = [
+                String((line && line.Posting_Date) || ''),
+                String((line && line.Entry_Type) || ''),
+                String((line && line.Type) || ''),
+                String((line && line.No) || ''),
+                String((line && line.Description) || ''),
+                formatCurrencyOrZero(Number((line && line.Total_Cost) || 0)),
+                formatCurrencyOrZero(Number((line && line.Line_Amount) || 0))
+            ];
+
+            for (const cellValue of cellValues)
+            {
+                const td = document.createElement('td');
+                td.textContent = cellValue;
+                tr.appendChild(td);
+            }
+
+            tbodyElement.appendChild(tr);
+        }
+
+        table.appendChild(tbodyElement);
+        notesBody.appendChild(table);
         notesOverlay.style.display = '';
     }
 

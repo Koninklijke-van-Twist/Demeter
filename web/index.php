@@ -513,6 +513,8 @@ try {
     $projectInvoicedTotalByJob = is_array($overviewData['project_invoiced_total_by_job'] ?? null) ? $overviewData['project_invoiced_total_by_job'] : [];
     $workorderTotalsByNumber = is_array($overviewData['workorder_totals_by_number'] ?? null) ? $overviewData['workorder_totals_by_number'] : [];
     $workorderTotalsByProjectAndNumber = is_array($overviewData['workorder_totals_by_project_and_number'] ?? null) ? $overviewData['workorder_totals_by_project_and_number'] : [];
+    $projectpostenRowsByProject = is_array($overviewData['projectposten_rows_by_project'] ?? null) ? $overviewData['projectposten_rows_by_project'] : [];
+    $projectpostenRowsByProjectAndWorkorder = is_array($overviewData['projectposten_rows_by_project_and_workorder'] ?? null) ? $overviewData['projectposten_rows_by_project_and_workorder'] : [];
 
     foreach ($workorders as $workorder) {
         if (!is_array($workorder)) {
@@ -632,6 +634,7 @@ try {
             'Invoice_Ids' => $invoiceIdsForProject,
             'Job_No' => $jobNo,
             'Job_Task_No' => $jobTaskNo,
+            'Workorder_Source_Key' => $normalizedWorkorderNo,
             'End_Date' => (string) ($workorder['End_Date'] ?? ''),
         ];
     }
@@ -669,6 +672,8 @@ $initialData = [
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
     'invoice_details_by_id' => $invoiceDetailsById,
+    'projectposten_rows_by_project' => $projectpostenRowsByProject,
+    'projectposten_rows_by_project_and_workorder' => $projectpostenRowsByProjectAndWorkorder,
     'error' => $errorMessage,
 ];
 ?>
@@ -1374,6 +1379,17 @@ $initialData = [
 
         td.invoice-id-clickable:hover {
             background: #f8fafc;
+        }
+
+        .project-posten-link {
+            color: #1f4ea6;
+            text-decoration: underline;
+            text-decoration-style: dotted;
+            cursor: pointer;
+        }
+
+        .project-posten-link:hover {
+            color: #1a438e;
         }
 
         td.amount-info-clickable {

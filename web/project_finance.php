@@ -461,9 +461,13 @@ class ProjectFinanceService
         $dateField = 'Posting_Date';
         $entryTypeField = 'Entry_Type';
         $descriptionField = 'Description';
+        $typeField = 'Type';
+        $noField = 'No';
+        $totalCostField = 'Total_Cost';
+        $lineAmountField = 'Line_Amount';
 
         $selectFields = array_values(array_unique(array_filter(array_merge(
-            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField, $descriptionField],
+            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField, $typeField, $noField, $descriptionField, $totalCostField, $lineAmountField],
             is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
             is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
             is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
@@ -524,6 +528,8 @@ class ProjectFinanceService
 
         $workorderCostByProjectAndNumber = [];
         $workorderRevenueByProjectAndNumber = [];
+        $projectPostenRowsByProject = [];
+        $projectPostenRowsByProjectAndWorkorder = [];
         $importSapWorkorderRowsByCompositeKey = [];
         $workorderCostFields = is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [];
         $workorderRevenueFields = is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [];
@@ -541,14 +547,34 @@ class ProjectFinanceService
                 continue;
             }
 
+            $normalizedProjectNo = self::normalizeMatchValue($jobNo);
+            $projectPostenRow = [
+                'Posting_Date' => (string) ($row[$dateField] ?? ''),
+                'Entry_Type' => (string) ($row[$entryTypeField] ?? ''),
+                'Type' => (string) ($row[$typeField] ?? ''),
+                'No' => (string) ($row[$noField] ?? ''),
+                'Description' => (string) ($row[$descriptionField] ?? ''),
+                'Total_Cost' => finance_to_float($row[$totalCostField] ?? 0.0),
+                'Line_Amount' => finance_to_float($row[$lineAmountField] ?? 0.0),
+            ];
+
+            if (!isset($projectPostenRowsByProject[$normalizedProjectNo])) {
+                $projectPostenRowsByProject[$normalizedProjectNo] = [];
+            }
+            $projectPostenRowsByProject[$normalizedProjectNo][] = $projectPostenRow;
+
             if ($jobTaskNo !== '') {
-                $compositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($jobTaskNo);
+                $compositeKey = $normalizedProjectNo . '|' . self::normalizeMatchValue($jobTaskNo);
                 if (!isset($workorderCostByProjectAndNumber[$compositeKey])) {
                     $workorderCostByProjectAndNumber[$compositeKey] = 0.0;
                 }
                 if (!isset($workorderRevenueByProjectAndNumber[$compositeKey])) {
                     $workorderRevenueByProjectAndNumber[$compositeKey] = 0.0;
                 }
+                if (!isset($projectPostenRowsByProjectAndWorkorder[$compositeKey])) {
+                    $projectPostenRowsByProjectAndWorkorder[$compositeKey] = [];
+                }
+                $projectPostenRowsByProjectAndWorkorder[$compositeKey][] = $projectPostenRow;
 
                 if (self::rowMatchesSourceFilter($row, $workorderCostFilter)) {
                     $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
@@ -566,13 +592,17 @@ class ProjectFinanceService
                 continue;
             }
 
-            $importCompositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($descriptionText);
+            $importCompositeKey = $normalizedProjectNo . '|' . self::normalizeMatchValue($descriptionText);
             if (!isset($workorderCostByProjectAndNumber[$importCompositeKey])) {
                 $workorderCostByProjectAndNumber[$importCompositeKey] = 0.0;
             }
             if (!isset($workorderRevenueByProjectAndNumber[$importCompositeKey])) {
                 $workorderRevenueByProjectAndNumber[$importCompositeKey] = 0.0;
             }
+            if (!isset($projectPostenRowsByProjectAndWorkorder[$importCompositeKey])) {
+                $projectPostenRowsByProjectAndWorkorder[$importCompositeKey] = [];
+            }
+            $projectPostenRowsByProjectAndWorkorder[$importCompositeKey][] = $projectPostenRow;
 
             if (self::rowMatchesSourceFilter($row, $workorderCostFilter)) {
                 $workorderCostByProjectAndNumber[$importCompositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
@@ -642,6 +672,8 @@ class ProjectFinanceService
             'workorder_totals_by_project_and_number' => $workorderTotalsByProjectAndNumber,
             'project_numbers' => $projectNumbers,
             'workorder_numbers' => $workorderNumbers,
+            'projectposten_rows_by_project' => $projectPostenRowsByProject,
+            'projectposten_rows_by_project_and_workorder' => $projectPostenRowsByProjectAndWorkorder,
             'import_sap_workorder_rows' => array_values($importSapWorkorderRowsByCompositeKey),
         ];
     }

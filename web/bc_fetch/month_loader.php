@@ -21,6 +21,8 @@ function bc_fetch_load_workorder_overview_data(string $company, array $ranges, a
     $projectTotalsByJob = [];
     $workorderTotalsByNumber = [];
     $workorderTotalsByProjectAndNumber = [];
+    $projectPostenRowsByProject = [];
+    $projectPostenRowsByProjectAndWorkorder = [];
     $invoiceDetailsById = [];
     $projectInvoiceIdsByJob = [];
     $projectInvoicedTotalByJob = [];
@@ -139,6 +141,12 @@ function bc_fetch_load_workorder_overview_data(string $company, array $ranges, a
         $workorderTotalsByProjectAndNumber = is_array($rangeFinance['workorder_totals_by_project_and_number'] ?? null)
             ? $rangeFinance['workorder_totals_by_project_and_number']
             : [];
+        $projectPostenRowsByProject = is_array($rangeFinance['projectposten_rows_by_project'] ?? null)
+            ? $rangeFinance['projectposten_rows_by_project']
+            : [];
+        $projectPostenRowsByProjectAndWorkorder = is_array($rangeFinance['projectposten_rows_by_project_and_workorder'] ?? null)
+            ? $rangeFinance['projectposten_rows_by_project_and_workorder']
+            : [];
 
         $importSapWorkorderRows = is_array($rangeFinance['import_sap_workorder_rows'] ?? null)
             ? $rangeFinance['import_sap_workorder_rows']
@@ -180,6 +188,8 @@ function bc_fetch_load_workorder_overview_data(string $company, array $ranges, a
         'project_totals_by_job' => $projectTotalsByJob,
         'workorder_totals_by_number' => $workorderTotalsByNumber,
         'workorder_totals_by_project_and_number' => $workorderTotalsByProjectAndNumber,
+        'projectposten_rows_by_project' => $projectPostenRowsByProject,
+        'projectposten_rows_by_project_and_workorder' => $projectPostenRowsByProjectAndWorkorder,
         'invoice_details_by_id' => $invoiceDetailsById,
         'project_invoice_ids_by_job' => $projectInvoiceIdsByJob,
         'project_invoiced_total_by_job' => $projectInvoicedTotalByJob,
