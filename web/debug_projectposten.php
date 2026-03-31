@@ -69,6 +69,21 @@ function debug_float(mixed $value): float
     return is_numeric($value) ? (float) $value : 0.0;
 }
 
+function debug_is_import_sap_without_workorder(array $row): bool
+{
+    $lvsWorkorderNo = trim((string) ($row['LVS_Work_Order_No'] ?? ''));
+    if ($lvsWorkorderNo !== '') {
+        return false;
+    }
+
+    $description = trim((string) ($row['Description'] ?? ''));
+    if ($description === '') {
+        return false;
+    }
+
+    return strncasecmp($description, 'IMPORT SAP', strlen('IMPORT SAP')) === 0;
+}
+
 try {
     $financeService = new ProjectFinanceService($selectedCompany);
     $rangeData = $financeService->collectProjectAndWorkorderFinanceFromProjectPostenRange($fromDate, $toDateExclusive, $ttl);
@@ -84,7 +99,7 @@ try {
 
         $projectFilter = "Job_No eq '" . debug_escape_odata($projectNoText) . "'";
         $postenUrl = company_entity_url_with_query($baseUrl, $environment, $selectedCompany, 'ProjectPosten', [
-            '$select' => 'Job_No,Job_Task_No,Posting_Date,Entry_Type,Total_Cost,Line_Amount,Description,No,Type',
+            '$select' => 'Job_No,Job_Task_No,LVS_Work_Order_No,Posting_Date,Entry_Type,Total_Cost,Line_Amount,Description,No,Type',
             '$filter' => "Posting_Date ge $fromDate and Posting_Date lt $toDateExclusive and ($projectFilter)",
         ]);
         $postenRows = odata_get_all($postenUrl, $auth, $ttl);
@@ -299,6 +314,10 @@ function f(float $value): string
             color: #475569;
             font-size: 12px;
         }
+
+        .sap-import-row {
+            background: #e0f2ff;
+        }
     </style>
 </head>
 
@@ -414,7 +433,8 @@ function f(float $value): string
                         <?php if (!is_array($row)) {
                             continue;
                         } ?>
-                        <tr>
+                        <?php $isImportSapWithoutWorkorder = debug_is_import_sap_without_workorder($row); ?>
+                        <tr class="<?= $isImportSapWithoutWorkorder ? 'sap-import-row' : '' ?>">
                             <td><?= h((string) ($row['Posting_Date'] ?? '')) ?></td>
                             <td><?= h((string) ($row['Job_No'] ?? '')) ?></td>
                             <td><?= h((string) ($row['Job_Task_No'] ?? '')) ?></td>

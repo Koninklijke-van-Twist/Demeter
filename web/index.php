@@ -575,9 +575,39 @@ try {
         $projectActualCosts = is_array($projectTotals) ? (float) ($projectTotals['costs'] ?? 0) : 0.0;
         $projectTotalRevenue = is_array($projectTotals) ? (float) ($projectTotals['revenue'] ?? 0) : 0.0;
 
+        $isImportSapPseudoRow = $jobTaskNo === ''
+            && strtolower(trim((string) ($workorder['Task_Code'] ?? ''))) === 'import sap';
+
+        $displayWorkorderNo = (string) ($workorder['No'] ?? '');
+        $displayOrderType = (string) ($workorder['Task_Code'] ?? '');
+
+        if ($isImportSapPseudoRow) {
+            $displayWorkorderNo = 'Import SAP';
+            $orderTypeFromDescription = (string) ($workorder['Task_Description'] ?? '');
+            $orderTypeFromDescription = preg_replace('/\bJAAR\s+\d{4}\b/i', '', $orderTypeFromDescription);
+            if (!is_string($orderTypeFromDescription)) {
+                $orderTypeFromDescription = '';
+            }
+
+            $orderTypeFromDescription = str_ireplace('IMPORT SAP', '', $orderTypeFromDescription);
+            $orderTypeFromDescription = str_replace('_', ' ', $orderTypeFromDescription);
+            $orderTypeFromDescription = preg_replace('/\b\d{4}\b/', '', $orderTypeFromDescription);
+            $orderTypeFromDescription = preg_replace('/\s+/', ' ', trim($orderTypeFromDescription));
+            if (!is_string($orderTypeFromDescription)) {
+                $orderTypeFromDescription = '';
+            }
+
+            $orderTypeFromDescription = strtolower($orderTypeFromDescription);
+            if ($orderTypeFromDescription !== '') {
+                $orderTypeFromDescription = strtoupper(substr($orderTypeFromDescription, 0, 1)) . substr($orderTypeFromDescription, 1);
+            }
+
+            $displayOrderType = $orderTypeFromDescription;
+        }
+
         $rows[] = [
-            'No' => (string) ($workorder['No'] ?? ''),
-            'Order_Type' => (string) ($workorder['Task_Code'] ?? ''),
+            'No' => $displayWorkorderNo,
+            'Order_Type' => $displayOrderType,
             'Contract_No' => (string) ($workorder['Contract_No'] ?? ''),
             'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
             'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),

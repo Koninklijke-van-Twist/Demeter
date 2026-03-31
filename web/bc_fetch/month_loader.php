@@ -139,6 +139,40 @@ function bc_fetch_load_workorder_overview_data(string $company, array $ranges, a
         $workorderTotalsByProjectAndNumber = is_array($rangeFinance['workorder_totals_by_project_and_number'] ?? null)
             ? $rangeFinance['workorder_totals_by_project_and_number']
             : [];
+
+        $importSapWorkorderRows = is_array($rangeFinance['import_sap_workorder_rows'] ?? null)
+            ? $rangeFinance['import_sap_workorder_rows']
+            : [];
+
+        foreach ($importSapWorkorderRows as $importRow) {
+            if (!is_array($importRow)) {
+                continue;
+            }
+
+            $jobNo = trim((string) ($importRow['Job_No'] ?? ''));
+            $descriptionAsWorkorder = trim((string) ($importRow['No'] ?? ''));
+            if ($jobNo === '' || $descriptionAsWorkorder === '') {
+                continue;
+            }
+
+            if (!isset($seenProjectNumbers[$jobNo])) {
+                $seenProjectNumbers[$jobNo] = true;
+            }
+
+            $rowKey = implode('|', [
+                (string) ($importRow['No'] ?? ''),
+                (string) ($importRow['Job_No'] ?? ''),
+                (string) ($importRow['Job_Task_No'] ?? ''),
+                (string) ($importRow['Start_Date'] ?? ''),
+            ]);
+
+            if (isset($seenWorkorderRows[$rowKey])) {
+                continue;
+            }
+
+            $seenWorkorderRows[$rowKey] = true;
+            $workorders[] = $importRow;
+        }
     }
 
     return [

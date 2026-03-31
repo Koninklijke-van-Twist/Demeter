@@ -2,6 +2,15 @@
 
 require_once __DIR__ . '/finance_calculations.php';
 
+const SAP_IMPORT_NOS = [
+    '800001',
+    '415000',
+    '415001',
+    '415002',
+    '450000',
+    '450060'
+];
+
 /**
  * Usage summary:
  * - Laad eerst auth.php en odata.php.
@@ -451,9 +460,10 @@ class ProjectFinanceService
         $workorderKeyField = (string) ($workorderCostSource['key_field'] ?? 'Job_Task_No');
         $dateField = 'Posting_Date';
         $entryTypeField = 'Entry_Type';
+        $descriptionField = 'Description';
 
         $selectFields = array_values(array_unique(array_filter(array_merge(
-            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField],
+            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField, $descriptionField],
             is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
             is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
             is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
@@ -514,6 +524,7 @@ class ProjectFinanceService
 
         $workorderCostByProjectAndNumber = [];
         $workorderRevenueByProjectAndNumber = [];
+        $importSapWorkorderRowsByCompositeKey = [];
         $workorderCostFields = is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [];
         $workorderRevenueFields = is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [];
         $workorderCostMode = (string) ($workorderCostSource['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
@@ -526,24 +537,74 @@ class ProjectFinanceService
 
             $jobNo = trim((string) ($row[$projectKeyField] ?? ''));
             $jobTaskNo = trim((string) ($row[$workorderKeyField] ?? ''));
-            if ($jobNo === '' || $jobTaskNo === '') {
+            if ($jobNo === '') {
                 continue;
             }
 
-            $compositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($jobTaskNo);
-            if (!isset($workorderCostByProjectAndNumber[$compositeKey])) {
-                $workorderCostByProjectAndNumber[$compositeKey] = 0.0;
+            if ($jobTaskNo !== '') {
+                $compositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($jobTaskNo);
+                if (!isset($workorderCostByProjectAndNumber[$compositeKey])) {
+                    $workorderCostByProjectAndNumber[$compositeKey] = 0.0;
+                }
+                if (!isset($workorderRevenueByProjectAndNumber[$compositeKey])) {
+                    $workorderRevenueByProjectAndNumber[$compositeKey] = 0.0;
+                }
+
+                if (self::rowMatchesSourceFilter($row, $workorderCostFilter)) {
+                    $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
+                }
+
+                if (self::rowMatchesSourceFilter($row, $workorderRevenueFilter)) {
+                    $workorderRevenueByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderRevenueFields, $workorderRevenueMode);
+                }
+
+                continue;
             }
-            if (!isset($workorderRevenueByProjectAndNumber[$compositeKey])) {
-                $workorderRevenueByProjectAndNumber[$compositeKey] = 0.0;
+
+            $descriptionText = trim((string) ($row[$descriptionField] ?? ''));
+            if (!self::descriptionStartsWithImportSap($descriptionText)) {
+                continue;
+            }
+
+            $importCompositeKey = self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($descriptionText);
+            if (!isset($workorderCostByProjectAndNumber[$importCompositeKey])) {
+                $workorderCostByProjectAndNumber[$importCompositeKey] = 0.0;
+            }
+            if (!isset($workorderRevenueByProjectAndNumber[$importCompositeKey])) {
+                $workorderRevenueByProjectAndNumber[$importCompositeKey] = 0.0;
             }
 
             if (self::rowMatchesSourceFilter($row, $workorderCostFilter)) {
-                $workorderCostByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
+                $workorderCostByProjectAndNumber[$importCompositeKey] += self::extractRowAmount($row, $workorderCostFields, $workorderCostMode);
             }
 
             if (self::rowMatchesSourceFilter($row, $workorderRevenueFilter)) {
-                $workorderRevenueByProjectAndNumber[$compositeKey] += self::extractRowAmount($row, $workorderRevenueFields, $workorderRevenueMode);
+                $workorderRevenueByProjectAndNumber[$importCompositeKey] += self::extractRowAmount($row, $workorderRevenueFields, $workorderRevenueMode);
+            }
+
+            if (!isset($importSapWorkorderRowsByCompositeKey[$importCompositeKey])) {
+                $importSapWorkorderRowsByCompositeKey[$importCompositeKey] = [
+                    'No' => $descriptionText,
+                    'Job_No' => $jobNo,
+                    'Job_Task_No' => '',
+                    'Task_Description' => $descriptionText,
+                    'Start_Date' => (string) ($row[$dateField] ?? ''),
+                    'End_Date' => '',
+                    'Task_Code' => 'IMPORT SAP',
+                    'Contract_No' => '',
+                    'Bill_to_Customer_No' => '',
+                    'Bill_to_Name' => '',
+                    'Component_No' => '',
+                    'Sub_Entity_Description' => '',
+                    'Job_Dimension_1_Value' => '',
+                    'Status' => 'Open',
+                    'KVT_Document_Status' => '',
+                    'Memo' => '',
+                    'Memo_Internal_Use_Only' => '',
+                    'Memo_Invoice' => '',
+                    'KVT_Memo_Invoice_Details' => '',
+                    'KVT_Remarks_Invoicing' => '',
+                ];
             }
         }
 
@@ -581,6 +642,7 @@ class ProjectFinanceService
             'workorder_totals_by_project_and_number' => $workorderTotalsByProjectAndNumber,
             'project_numbers' => $projectNumbers,
             'workorder_numbers' => $workorderNumbers,
+            'import_sap_workorder_rows' => array_values($importSapWorkorderRowsByCompositeKey),
         ];
     }
 
@@ -1262,6 +1324,16 @@ class ProjectFinanceService
         $actualValue = trim((string) ($row[$fieldName] ?? ''));
 
         return $actualValue === $expectedValue;
+    }
+
+    private static function descriptionStartsWithImportSap(string $description): bool
+    {
+        $text = trim($description);
+        if ($text === '') {
+            return false;
+        }
+
+        return strncasecmp($text, 'IMPORT SAP', strlen('IMPORT SAP')) === 0;
     }
 
     /**
