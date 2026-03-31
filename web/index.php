@@ -1458,6 +1458,10 @@ $initialData = [
             border-top: 3px solid #64748b;
         }
 
+        .workorders-table td.project-finance-merged {
+            vertical-align: middle;
+        }
+
         tbody tr.status-hidden-by-filter {
             display: none;
         }

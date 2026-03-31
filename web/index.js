@@ -83,6 +83,7 @@
     const amountColumnKeys = new Set([]);
     const numericSortKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total']);
     const compactColumnKeys = new Set(['Actual_Costs', 'Total_Revenue', 'Actual_Total', 'Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total', 'Cost_Center', 'Status', 'Document_Status']);
+    const projectFinancialColumnKeys = new Set(['Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total']);
     const invoiceAmountTooltip = 'Factuur gevonden, kosten en opbrengst uit de factuur gelezen.';
     const workorderAmountModalMessage = 'Deze bedragen zijn overgenomen uit de werkorder. Controleer ze extra zorgvuldig; zonder gekoppelde factuur kunnen ze afwijken van de uiteindelijke factuur.';
     const invoiceAmountModalMessage = 'Deze bedragen komen direct uit de gekoppelde factuur en gelden als de meest betrouwbare bron.';
@@ -1309,20 +1310,46 @@
             return;
         }
 
+        if (keepProjectWorkordersTogether)
+        {
+            const groupedRows = getVisibleGlobalRows();
+            const groups = buildProjectGroupsFromGlobalRows(groupedRows);
+            let visibleRowCount = 0;
+            let isFirstGroup = true;
+
+            for (const group of groups)
+            {
+                const groupSize = group.rows.length;
+                visibleRowCount += groupSize;
+                let isFirstInGroup = true;
+
+                for (const row of group.rows)
+                {
+                    const projectCellConfig = groupSize > 1
+                        ? { rowspan: groupSize, isFirst: isFirstInGroup }
+                        : null;
+                    const tr = renderWorkorderRow(row, projectCellConfig);
+
+                    if (!isFirstGroup && isFirstInGroup)
+                    {
+                        tr.classList.add('project-break-row');
+                    }
+
+                    tbody.appendChild(tr);
+                    isFirstInGroup = false;
+                }
+
+                isFirstGroup = false;
+            }
+
+            noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
+            return;
+        }
+
         const visibleRows = getVisibleSortedRows();
-        let previousProjectKey = null;
         for (const row of visibleRows)
         {
             const tr = renderWorkorderRow(row);
-            if (keepProjectWorkordersTogether)
-            {
-                const currentProjectKey = normalizeSortValue(row.Job_No || '');
-                if (previousProjectKey !== null && currentProjectKey !== previousProjectKey)
-                {
-                    tr.classList.add('project-break-row');
-                }
-                previousProjectKey = currentProjectKey;
-            }
             tbody.appendChild(tr);
         }
 
@@ -1497,7 +1524,7 @@
         };
     }
 
-    function renderWorkorderRow (row)
+    function renderWorkorderRow (row, projectCellConfig)
     {
         const tr = document.createElement('tr');
         const statusKey = normalizeStatus(row.Status || '');
@@ -1506,6 +1533,13 @@
 
         for (const column of columns)
         {
+            const isProjectFinancialColumn = projectFinancialColumnKeys.has(column.key);
+
+            if (isProjectFinancialColumn && projectCellConfig !== null && projectCellConfig !== undefined && !projectCellConfig.isFirst)
+            {
+                continue;
+            }
+
             const td = document.createElement('td');
             if (compactColumnKeys.has(column.key))
             {
@@ -1560,6 +1594,13 @@
             if (column.key === 'Memo_KVT_Remarks_Invoicing')
             {
                 td.classList.add('col-memo-remarks');
+            }
+
+            if (isProjectFinancialColumn && projectCellConfig !== null && projectCellConfig !== undefined && projectCellConfig.isFirst && projectCellConfig.rowspan > 1)
+            {
+                td.rowSpan = projectCellConfig.rowspan;
+                td.style.verticalAlign = 'middle';
+                td.classList.add('project-finance-merged');
             }
 
             if (column.key === 'Notes')
@@ -2242,10 +2283,22 @@
         });
 
         const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
+        const seenProjectsForCsv = new Set();
         for (const row of visibleRows)
         {
+            const csvProjectKey = normalizeSortValue(String(row.Job_No || ''));
+            const isFirstProjectRowForCsv = csvProjectKey === '' || !seenProjectsForCsv.has(csvProjectKey);
+            if (csvProjectKey !== '')
+            {
+                seenProjectsForCsv.add(csvProjectKey);
+            }
+
             const values = exportColumns.map(function (column)
             {
+                if (projectFinancialColumnKeys.has(column.key) && !isFirstProjectRowForCsv)
+                {
+                    return '';
+                }
                 return getExportValue(row, column.key);
             });
             csvLines.push(values.map(escapeCsvValue).join(delimiter));
