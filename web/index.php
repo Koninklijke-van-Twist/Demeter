@@ -621,7 +621,7 @@ try {
             'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
             'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
             'Component_No' => $equipmentNumber,
-            'Component_Description' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
+            'Component_Description' => (string) ($workorder['Component_Description'] ?? $workorder['Sub_Entity_Description'] ?? ''),
             'Equipment_Number' => $equipmentNumber,
             'Equipment_Name' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
             'Description' => (string) ($workorder['Task_Description'] ?? ''),

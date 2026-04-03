@@ -34,9 +34,60 @@ function bc_fetch_column_workorders(string $company, string $yearMonth, array $p
     ]);
     $rows = odata_get_all($url, $auth, $ttl);
 
-    foreach ($rows as $row) {
+    $appWorkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'AppWerkorders', [
+        '$select' => 'No,Job_No,Job_Task_No,Start_Date,Component_Description',
+        '$filter' => 'Start_Date ge ' . $fromStr . ' and Start_Date lt ' . $toStr,
+    ]);
+    $appWorkorderRows = odata_get_all($appWorkordersUrl, $auth, $ttl);
+
+    $componentDescriptionByRowKey = [];
+    $componentDescriptionByTaskNo = [];
+    foreach ($appWorkorderRows as $appWorkorderRow) {
+        if (!is_array($appWorkorderRow)) {
+            continue;
+        }
+
+        $componentDescription = trim((string) ($appWorkorderRow['Component_Description'] ?? ''));
+        if ($componentDescription === '') {
+            continue;
+        }
+
+        $rowKey = implode('|', [
+            (string) ($appWorkorderRow['No'] ?? ''),
+            (string) ($appWorkorderRow['Job_No'] ?? ''),
+            (string) ($appWorkorderRow['Job_Task_No'] ?? ''),
+            (string) ($appWorkorderRow['Start_Date'] ?? ''),
+        ]);
+        if ($rowKey !== '|||') {
+            $componentDescriptionByRowKey[$rowKey] = $componentDescription;
+        }
+
+        $jobTaskNo = trim((string) ($appWorkorderRow['Job_Task_No'] ?? ''));
+        if ($jobTaskNo !== '' && !isset($componentDescriptionByTaskNo[$jobTaskNo])) {
+            $componentDescriptionByTaskNo[$jobTaskNo] = $componentDescription;
+        }
+    }
+
+    foreach ($rows as &$row) {
         if (!is_array($row)) {
             continue;
+        }
+
+        $rowKey = implode('|', [
+            (string) ($row['No'] ?? ''),
+            (string) ($row['Job_No'] ?? ''),
+            (string) ($row['Job_Task_No'] ?? ''),
+            (string) ($row['Start_Date'] ?? ''),
+        ]);
+        $jobTaskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+        $fallbackDescription = trim((string) ($row['Sub_Entity_Description'] ?? ''));
+
+        if (isset($componentDescriptionByRowKey[$rowKey])) {
+            $row['Component_Description'] = $componentDescriptionByRowKey[$rowKey];
+        } elseif ($jobTaskNo !== '' && isset($componentDescriptionByTaskNo[$jobTaskNo])) {
+            $row['Component_Description'] = $componentDescriptionByTaskNo[$jobTaskNo];
+        } else {
+            $row['Component_Description'] = $fallbackDescription;
         }
 
         $projectNo = trim((string) ($row['Job_No'] ?? ''));
@@ -54,6 +105,7 @@ function bc_fetch_column_workorders(string $company, string $yearMonth, array $p
 
         $dictionary[$normProjectNo]['rows'][] = $row;
     }
+    unset($row);
 
     return [
         'column' => 'workorders',
