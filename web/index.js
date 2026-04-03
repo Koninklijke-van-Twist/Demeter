@@ -37,6 +37,7 @@
         { key: 'Customer_Name', label: 'Klantnaam' },
         { key: 'Start_Date', label: 'Startdatum' },
         { key: 'Component_No', label: 'Component Nr.' },
+        { key: 'Component_Description', label: 'Component Description' },
         { key: 'Description', label: 'Omschrijving' },
         { key: 'Actual_Costs', label: 'Kosten werkorder' },
         { key: 'Total_Revenue', label: 'Opbrengst werkorder' },
