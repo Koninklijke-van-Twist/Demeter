@@ -620,6 +620,7 @@ try {
             'Contract_No' => (string) ($workorder['Contract_No'] ?? ''),
             'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
             'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
+            'Component_No' => $equipmentNumber,
             'Equipment_Number' => $equipmentNumber,
             'Equipment_Name' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
             'Description' => (string) ($workorder['Task_Description'] ?? ''),

@@ -36,7 +36,7 @@
         { key: 'Customer_Id', label: 'Klant Nr.' },
         { key: 'Customer_Name', label: 'Klantnaam' },
         { key: 'Start_Date', label: 'Startdatum' },
-        { key: 'Equipment_Number', label: 'Equipment Nr.' },
+        { key: 'Component_No', label: 'Component Nr.' },
         { key: 'Description', label: 'Omschrijving' },
         { key: 'Actual_Costs', label: 'Kosten werkorder' },
         { key: 'Total_Revenue', label: 'Opbrengst werkorder' },
@@ -1163,7 +1163,7 @@
                 th.classList.add('col-start-date');
             }
 
-            if (column.key === 'Equipment_Number')
+            if (column.key === 'Component_No')
             {
                 th.classList.add('col-equipment-number');
             }
@@ -1682,7 +1682,7 @@
                 td.classList.add('col-start-date');
             }
 
-            if (column.key === 'Equipment_Number')
+            if (column.key === 'Component_No')
             {
                 td.classList.add('col-equipment-number');
             }
@@ -1817,7 +1817,7 @@
                 }
                 else
                 {
-                    if (column.key === 'Equipment_Number')
+                    if (column.key === 'Component_No')
                     {
                         td.textContent = getEquipmentDisplayValue(row);
                     }
@@ -2079,7 +2079,7 @@
                 continue;
             }
 
-            if (column.key === 'Equipment_Number')
+            if (column.key === 'Component_No')
             {
                 const equipmentValue = getEquipmentDisplayValue(row).toLowerCase();
                 if (equipmentValue.includes(appliedSearchText))
@@ -2467,7 +2467,7 @@
             return lines.join(' | ');
         }
 
-        if (key === 'Equipment_Number')
+        if (key === 'Component_No')
         {
             return getEquipmentDisplayValue(row);
         }
@@ -2514,7 +2514,7 @@
 
     function compareRowsByActiveSort (a, b)
     {
-        if (sortState.key === 'Equipment_Number')
+        if (sortState.key === 'Component_No')
         {
             const leftEquipment = getEquipmentDisplayValue(a);
             const rightEquipment = getEquipmentDisplayValue(b);
@@ -2606,7 +2606,7 @@
             return projectRevenue - projectCosts;
         }
 
-        if (key === 'Equipment_Number')
+        if (key === 'Component_No')
         {
             return getEquipmentDisplayValue(row);
         }
@@ -2756,13 +2756,7 @@
 
     function getEquipmentDisplayValue (row)
     {
-        const numberValue = String((row && row.Equipment_Number) || '').trim();
-        if (numberValue !== '')
-        {
-            return numberValue;
-        }
-
-        return String((row && row.Equipment_Name) || '').trim();
+        return String((row && (row.Component_No || row.Equipment_Number)) || '').trim();
     }
 
     function openNotesModal (parts)
