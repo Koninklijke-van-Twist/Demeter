@@ -2475,15 +2475,21 @@
 
         if (key === 'Actual_Total' || key === 'Project_Total')
         {
-            return formatSignedCurrency(getColumnValueForSorting(row, key));
+            return formatCurrencyForCsv(getColumnValueForSorting(row, key));
         }
 
         if (key === 'Actual_Costs' || key === 'Total_Revenue' || key === 'Project_Actual_Costs' || key === 'Project_Total_Revenue')
         {
-            return formatCurrencyOrZero(getColumnValueForSorting(row, key));
+            return formatCurrencyForCsv(getColumnValueForSorting(row, key));
         }
 
         return String(row[key] || '');
+    }
+
+    function formatCurrencyForCsv (value)
+    {
+        const amount = Number(value || 0);
+        return amount.toFixed(2);
     }
 
     function escapeCsvValue (value)
