@@ -4,20 +4,23 @@ ini_set('display_startup_errors', 1);
 error_reporting(E_ALL);
 
 require_once __DIR__ . '/auth.php';
+require_once __DIR__ . '/auth_helper.php';
 require_once __DIR__ . '/odata.php';
 require_once __DIR__ . '/logincheck.php';
 require_once __DIR__ . '/project_finance.php';
 require_once __DIR__ . '/bc_fetch/helpers.php';
 
-$companies = [
-    'Koninklijke van Twist',
-    'Hunter van Twist',
-    'KVT Gas',
-];
+$companies = [];
+try {
+    $companyDiscovery = auth_discover_companies_across_active_environments(300);
+    $companies = is_array($companyDiscovery['companies'] ?? null) ? $companyDiscovery['companies'] : [];
+} catch (Throwable $error) {
+    $companies = [];
+}
 
-$selectedCompany = trim((string) ($_GET['company'] ?? $companies[0]));
+$selectedCompany = trim((string) ($_GET['company'] ?? ($companies[0] ?? '')));
 if (!in_array($selectedCompany, $companies, true)) {
-    $selectedCompany = $companies[0];
+    $selectedCompany = $companies[0] ?? '';
 }
 
 $projects = [
@@ -85,6 +88,13 @@ function debug_is_import_sap_without_workorder(array $row): bool
 }
 
 try {
+    if ($selectedCompany === '') {
+        throw new RuntimeException('Geen bedrijf geselecteerd of beschikbaar.');
+    }
+
+    auth_set_current_company_context($selectedCompany, 300);
+    $companyAuth = auth_get_auth_for_company($selectedCompany, 300);
+
     $financeService = new ProjectFinanceService($selectedCompany);
     $rangeData = $financeService->collectProjectAndWorkorderFinanceFromProjectPostenRange($fromDate, $toDateExclusive, $ttl);
     $projectTotalsByJob = is_array($rangeData['project_totals_by_job'] ?? null)
@@ -102,7 +112,7 @@ try {
             '$select' => 'Job_No,Job_Task_No,LVS_Work_Order_No,Posting_Date,Entry_Type,Total_Cost,Line_Amount,Description,No,Type',
             '$filter' => "Posting_Date ge $fromDate and Posting_Date lt $toDateExclusive and ($projectFilter)",
         ]);
-        $postenRows = odata_get_all($postenUrl, $auth, $ttl);
+        $postenRows = odata_get_all($postenUrl, $companyAuth, $ttl);
 
         $rawCostSum = 0.0;
         $rawRevenueSum = 0.0;
@@ -153,7 +163,7 @@ try {
             '$select' => 'No,Job_No,Job_Task_No,Start_Date,End_Date,Task_Description',
             '$filter' => "Start_Date ge $fromDate and Start_Date lt $toDateExclusive and ($projectFilter)",
         ]);
-        $workorderRows = odata_get_all($workorderUrl, $auth, $ttl);
+        $workorderRows = odata_get_all($workorderUrl, $companyAuth, $ttl);
 
         $workorderTaskSet = [];
         foreach ($workorderRows as $woRow) {

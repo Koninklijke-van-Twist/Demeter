@@ -150,9 +150,24 @@ function odata_get_json(string $url, array $auth): array
 
 function build_cache_key(string $url, array $auth): string
 {
-    require __DIR__ . "/auth.php";
+    require_once __DIR__ . "/auth.php";
+    require_once __DIR__ . "/auth_helper.php";
     $user = (string) ($auth['user'] ?? '');
-    return $url . '|' . $user . '|' . $environment;
+    $environmentSegment = '';
+    if (function_exists('auth_get_environment_key_fragment')) {
+        $environmentSegment = auth_get_environment_key_fragment();
+    }
+
+    if ($environmentSegment === '') {
+        $environmentValue = $GLOBALS['environment'] ?? '';
+        if (is_array($environmentValue)) {
+            $environmentSegment = implode(',', array_map('strval', $environmentValue));
+        } else {
+            $environmentSegment = trim((string) $environmentValue);
+        }
+    }
+
+    return $url . '|' . $user . '|' . $environmentSegment;
 }
 
 function cache_base_dir(): string

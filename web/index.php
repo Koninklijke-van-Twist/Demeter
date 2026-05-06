@@ -140,6 +140,7 @@ register_shutdown_function(function () {
 });
 
 require __DIR__ . "/auth.php";
+require_once __DIR__ . "/auth_helper.php";
 require_once __DIR__ . "/logincheck.php";
 require_once __DIR__ . "/odata.php";
 require_once __DIR__ . "/project_finance.php";
@@ -169,6 +170,25 @@ function demeter_release_session_lock_if_active(): void
     if (session_status() === PHP_SESSION_ACTIVE) {
         @session_write_close();
     }
+}
+
+function demeter_store_selected_company_context(string $company, string $environment): void
+{
+    if (!function_exists('session_status') || !function_exists('session_start') || !function_exists('session_write_close')) {
+        return;
+    }
+
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        @session_start();
+    }
+
+    if (session_status() !== PHP_SESSION_ACTIVE) {
+        return;
+    }
+
+    $_SESSION['demeter_selected_company'] = $company;
+    $_SESSION['demeter_selected_environment'] = $environment;
+    @session_write_close();
 }
 
 function memo_setting_keys(): array
@@ -397,15 +417,43 @@ $keepProjectWorkordersTogetherSetting = load_keep_project_workorders_together_se
 
 demeter_release_session_lock_if_active();
 
-$companies = [
-    "Koninklijke van Twist",
-    "Hunter van Twist",
-    "KVT Gas",
-];
+$allCompaniesOptionValue = '__all_companies__';
+$allCompaniesOptionLabel = 'Alle bedrijven';
+$companies = [];
+$companyEnvironmentMap = [];
+$companyDiscoveryErrorMessage = null;
 
-$selectedCompany = $_GET['company'] ?? $companies[0];
-if (!in_array($selectedCompany, $companies, true)) {
-    $selectedCompany = $companies[0];
+try {
+    $companyDiscovery = auth_discover_companies_across_active_environments(300);
+    $companies = is_array($companyDiscovery['companies'] ?? null) ? $companyDiscovery['companies'] : [];
+    $companyEnvironmentMap = is_array($companyDiscovery['map'] ?? null) ? $companyDiscovery['map'] : [];
+} catch (Throwable $error) {
+    $companyDiscoveryErrorMessage = $error->getMessage();
+}
+
+$companyOptions = $companies;
+if ($companyOptions !== []) {
+    array_unshift($companyOptions, $allCompaniesOptionValue);
+}
+
+$defaultCompanySelection = '';
+$selectedCompany = trim((string) ($_GET['company'] ?? ''));
+if ($selectedCompany !== '' && !in_array($selectedCompany, $companyOptions, true)) {
+    $selectedCompany = '';
+}
+
+$selectedEnvironment = '';
+if ($selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue) {
+    try {
+        $selectedEnvironment = auth_get_environment_for_company($selectedCompany, 300);
+        auth_set_current_company_context($selectedCompany, 300);
+        demeter_store_selected_company_context($selectedCompany, $selectedEnvironment);
+    } catch (Throwable $error) {
+        $companyDiscoveryErrorMessage = $error->getMessage();
+    }
+} elseif ($selectedCompany === $allCompaniesOptionValue) {
+    $selectedEnvironment = auth_get_primary_environment();
+    demeter_store_selected_company_context($selectedCompany, $selectedEnvironment);
 }
 
 $invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? '')));
@@ -475,8 +523,9 @@ $ranges = month_ranges($fromMonth, $toMonth);
 $totalMonths = count($ranges);
 $totalProgressSteps = $totalMonths;
 
+$shouldLoadData = $selectedCompany !== '';
 $isBootRequest = trim((string) ($_GET['boot'] ?? '')) === '1';
-if (!$isBootRequest) {
+if ($shouldLoadData && !$isBootRequest) {
     odata_load_progress_begin($activeLoadProgressToken, $totalProgressSteps);
 
     $bootQuery = $_GET;
@@ -502,10 +551,85 @@ if (!$isBootRequest) {
 }
 
 $rows = [];
-$errorMessage = null;
+$invoiceDetailsById = [];
+$projectpostenRowsByProject = [];
+$projectpostenRowsByProjectAndWorkorder = [];
+$errorMessage = $companyDiscoveryErrorMessage;
 
 try {
-    $overviewData = bc_fetch_load_workorder_overview_data($selectedCompany, $ranges, $auth, $ttl, $activeLoadProgressToken);
+    if (!$shouldLoadData) {
+        throw new RuntimeException('Kies eerst een bedrijf om gegevens op te halen.');
+    }
+
+    if ($selectedCompany === '') {
+        throw new RuntimeException('Geen bedrijven beschikbaar voor de geselecteerde actieve environments.');
+    }
+
+    $overviewData = [
+        'workorders' => [],
+        'project_totals_by_job' => [],
+        'invoice_details_by_id' => [],
+        'project_invoice_ids_by_job' => [],
+        'project_invoiced_total_by_job' => [],
+        'workorder_totals_by_number' => [],
+        'workorder_totals_by_project_and_number' => [],
+        'projectposten_rows_by_project' => [],
+        'projectposten_rows_by_project_and_workorder' => [],
+    ];
+
+    $companiesToLoad = $selectedCompany === $allCompaniesOptionValue ? $companies : [$selectedCompany];
+
+    foreach ($companiesToLoad as $companyToLoad) {
+        $companyAuth = auth_get_auth_for_company($companyToLoad, 300);
+        $companyOverviewData = bc_fetch_load_workorder_overview_data($companyToLoad, $ranges, $companyAuth, $ttl, $activeLoadProgressToken);
+
+        $overviewData['workorders'] = array_merge(
+            $overviewData['workorders'],
+            is_array($companyOverviewData['workorders'] ?? null) ? $companyOverviewData['workorders'] : []
+        );
+
+        $projectTotalsByJobPart = is_array($companyOverviewData['project_totals_by_job'] ?? null) ? $companyOverviewData['project_totals_by_job'] : [];
+        $projectInvoiceIdsByJobPart = is_array($companyOverviewData['project_invoice_ids_by_job'] ?? null) ? $companyOverviewData['project_invoice_ids_by_job'] : [];
+        $projectInvoicedTotalByJobPart = is_array($companyOverviewData['project_invoiced_total_by_job'] ?? null) ? $companyOverviewData['project_invoiced_total_by_job'] : [];
+        $workorderTotalsByNumberPart = is_array($companyOverviewData['workorder_totals_by_number'] ?? null) ? $companyOverviewData['workorder_totals_by_number'] : [];
+        $workorderTotalsByProjectAndNumberPart = is_array($companyOverviewData['workorder_totals_by_project_and_number'] ?? null) ? $companyOverviewData['workorder_totals_by_project_and_number'] : [];
+        $projectpostenRowsByProjectPart = is_array($companyOverviewData['projectposten_rows_by_project'] ?? null) ? $companyOverviewData['projectposten_rows_by_project'] : [];
+        $projectpostenRowsByProjectAndWorkorderPart = is_array($companyOverviewData['projectposten_rows_by_project_and_workorder'] ?? null)
+            ? $companyOverviewData['projectposten_rows_by_project_and_workorder']
+            : [];
+
+        foreach ($projectTotalsByJobPart as $key => $value) {
+            $overviewData['project_totals_by_job'][$key] = $value;
+        }
+        foreach ($projectInvoiceIdsByJobPart as $key => $value) {
+            $overviewData['project_invoice_ids_by_job'][$key] = $value;
+        }
+        foreach ($projectInvoicedTotalByJobPart as $key => $value) {
+            $overviewData['project_invoiced_total_by_job'][$key] = $value;
+        }
+        foreach ($workorderTotalsByNumberPart as $key => $value) {
+            $overviewData['workorder_totals_by_number'][$key] = $value;
+        }
+        foreach ($workorderTotalsByProjectAndNumberPart as $key => $value) {
+            $overviewData['workorder_totals_by_project_and_number'][$key] = $value;
+        }
+        foreach ($projectpostenRowsByProjectPart as $key => $value) {
+            $overviewData['projectposten_rows_by_project'][$key] = $value;
+        }
+        foreach ($projectpostenRowsByProjectAndWorkorderPart as $key => $value) {
+            $overviewData['projectposten_rows_by_project_and_workorder'][$key] = $value;
+        }
+
+        $invoiceDetailsPart = is_array($companyOverviewData['invoice_details_by_id'] ?? null) ? $companyOverviewData['invoice_details_by_id'] : [];
+        foreach ($invoiceDetailsPart as $invoiceId => $details) {
+            if (!is_string($invoiceId) || $invoiceId === '' || !is_array($details) || isset($overviewData['invoice_details_by_id'][$invoiceId])) {
+                continue;
+            }
+
+            $overviewData['invoice_details_by_id'][$invoiceId] = $details;
+        }
+    }
+
     $workorders = is_array($overviewData['workorders'] ?? null) ? $overviewData['workorders'] : [];
     $projectTotalsByJob = is_array($overviewData['project_totals_by_job'] ?? null) ? $overviewData['project_totals_by_job'] : [];
     $invoiceDetailsById = is_array($overviewData['invoice_details_by_id'] ?? null) ? $overviewData['invoice_details_by_id'] : [];
@@ -1558,6 +1682,14 @@ $initialData = [
     <form class="controls" method="get">
         <label for="companySelect">Bedrijf</label>
         <select id="companySelect" name="company" onchange="this.form.submit()">
+            <option value="" <?= $selectedCompany === '' ? 'selected' : '' ?>>
+                Kies een bedrijf...
+            </option>
+            <?php if ($companies !== []): ?>
+                <option value="<?= htmlspecialchars($allCompaniesOptionValue) ?>" <?= $selectedCompany === $allCompaniesOptionValue ? 'selected' : '' ?>>
+                    <?= htmlspecialchars($allCompaniesOptionLabel) ?>
+                </option>
+            <?php endif; ?>
             <?php foreach ($companies as $company): ?>
                 <option value="<?= htmlspecialchars($company) ?>" <?= $company === $selectedCompany ? 'selected' : '' ?>>
                     <?= htmlspecialchars($company) ?>

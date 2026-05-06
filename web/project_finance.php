@@ -59,6 +59,16 @@ class ProjectFinanceService
         $this->baseUrl = (string) $context['base_url'];
         $this->environment = (string) $context['environment'];
         $this->auth = is_array($context['auth']) ? $context['auth'] : [];
+
+        require_once __DIR__ . '/auth_helper.php';
+        if ($this->company !== '' && function_exists('auth_get_environment_for_company') && function_exists('auth_get_auth_for_company')) {
+            try {
+                $this->environment = auth_get_environment_for_company($this->company);
+                $this->auth = auth_get_auth_for_company($this->company);
+            } catch (Throwable $error) {
+                // Val terug op de reeds bepaalde context als mapping niet beschikbaar is.
+            }
+        }
     }
 
     /**
@@ -1008,14 +1018,41 @@ class ProjectFinanceService
     {
         global $baseUrl, $environment, $auth;
 
-        if (!isset($baseUrl, $environment, $auth) || !is_array($auth)) {
+        require_once __DIR__ . '/auth_helper.php';
+
+        $resolvedEnvironment = '';
+        if (is_array($environment ?? null)) {
+            $normalizedEnvironments = function_exists('auth_normalize_environment_list')
+                ? auth_normalize_environment_list($environment)
+                : array_values(array_filter(array_map('strval', $environment), static function (string $env): bool {
+                    return trim($env) !== '';
+                }));
+            $resolvedEnvironment = (string) ($normalizedEnvironments[0] ?? '');
+        } else {
+            $resolvedEnvironment = trim((string) $environment);
+        }
+        $resolvedAuth = is_array($auth ?? null) ? $auth : [];
+
+        if (function_exists('auth_get_environment_for_company') && function_exists('auth_get_auth_for_company')) {
+            $selectedCompany = trim((string) ($_SESSION['demeter_selected_company'] ?? ''));
+            if ($selectedCompany !== '') {
+                try {
+                    $resolvedEnvironment = auth_get_environment_for_company($selectedCompany);
+                    $resolvedAuth = auth_get_auth_for_company($selectedCompany);
+                } catch (Throwable $error) {
+                    // Val terug op bestaande globale context als er geen geldige map beschikbaar is.
+                }
+            }
+        }
+
+        if (!isset($baseUrl) || $resolvedEnvironment === '' || !is_array($resolvedAuth) || $resolvedAuth === []) {
             throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
         }
 
         return [
             'base_url' => (string) $baseUrl,
-            'environment' => (string) $environment,
-            'auth' => $auth,
+            'environment' => $resolvedEnvironment,
+            'auth' => $resolvedAuth,
         ];
     }
 
