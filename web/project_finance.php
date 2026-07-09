@@ -454,7 +454,12 @@ class ProjectFinanceService
     /**
      * Haalt ProjectPosten exact één keer op binnen een datumrange en aggregeert daarna project- en werkordertotalen.
      */
-    public function collectProjectAndWorkorderFinanceFromProjectPostenRange(string $fromDate, string $toDateExclusive, int $ttl = 3600): array
+    public function collectProjectAndWorkorderFinanceFromProjectPostenRange(
+        string $fromDate,
+        string $toDateExclusive,
+        int $ttl = 3600,
+        ?string $costCenter = null
+    ): array
     {
         $projectCostSource = $this->getAmountSourceConfig('project', 'cost_source');
         $projectRevenueSource = $this->getAmountSourceConfig('project', 'revenue_source');
@@ -476,17 +481,25 @@ class ProjectFinanceService
         $totalCostField = 'Total_Cost';
         $lineAmountField = 'Line_Amount';
 
+        $discoveryFields = [];
+        if (function_exists('bc_fetch_projectposten_discovery_fields')) {
+            $discoveryFields = bc_fetch_projectposten_discovery_fields();
+        }
+
         $selectFields = array_values(array_unique(array_filter(array_merge(
             [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField, $typeField, $noField, $descriptionField, $totalCostField, $lineAmountField],
             is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
             is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
             is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
-            is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : []
+            is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [],
+            $discoveryFields,
+            ['Job_Task_No']
         ), static function ($field): bool {
             return is_string($field) && trim($field) !== '';
         })));
 
         $queryFilter = $dateField . ' ge ' . $fromDate . ' and ' . $dateField . ' lt ' . $toDateExclusive;
+        $normalizedCostCenter = is_string($costCenter) ? trim($costCenter) : '';
 
         try {
             $url = $this->companyEntityUrlWithQuery($entitySet, [
@@ -500,6 +513,14 @@ class ProjectFinanceService
                 0,
                 $loadError
             );
+        }
+
+        if ($normalizedCostCenter !== '') {
+            if (!function_exists('bc_fetch_filter_rows_by_cost_center')) {
+                require_once __DIR__ . '/bc_fetch/cost_center.php';
+            }
+
+            $rows = bc_fetch_filter_rows_by_cost_center($rows, $normalizedCostCenter);
         }
 
         $projectTotalsByJob = self::combineTotalsByKey(
@@ -688,6 +709,7 @@ class ProjectFinanceService
             'projectposten_rows_by_project' => $projectPostenRowsByProject,
             'projectposten_rows_by_project_and_workorder' => $projectPostenRowsByProjectAndWorkorder,
             'import_sap_workorder_rows' => array_values($importSapWorkorderRowsByCompositeKey),
+            'projectposten_rows' => $rows,
         ];
     }
 
