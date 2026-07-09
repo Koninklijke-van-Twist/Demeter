@@ -14,6 +14,7 @@
     const fromMonthInput = document.getElementById('fromMonth');
     const toMonthInput = document.getElementById('toMonth');
     const invoiceFilterSelect = document.getElementById('invoiceFilter');
+    const costCenterInput = document.getElementById('costCenterInput');
     const loadProgressTokenInput = document.getElementById('loadProgressToken');
     const payload = window.workorderOverviewData || {};
     const rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
@@ -26,6 +27,10 @@
     const projectPostenRowsByProjectAndWorkorder = payload && typeof payload.projectposten_rows_by_project_and_workorder === 'object' && payload.projectposten_rows_by_project_and_workorder !== null
         ? payload.projectposten_rows_by_project_and_workorder
         : {};
+    const loadMeta = payload && typeof payload.load_meta === 'object' && payload.load_meta !== null
+        ? payload.load_meta
+        : {};
+    const loadedCostCenter = typeof payload.cost_center === 'string' ? payload.cost_center.trim() : '';
     const error = typeof payload.error === 'string' ? payload.error : null;
     const invoiceFilter = typeof payload.invoice_filter === 'string' ? payload.invoice_filter : 'both';
     const showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
@@ -163,6 +168,25 @@
     summary.textContent = summaryPrefix + rows.length;
     summaryRow.appendChild(summary);
 
+    if (loadedCostCenter !== '')
+    {
+        const costCenterNote = document.createElement('div');
+        costCenterNote.className = 'summary-note';
+        costCenterNote.textContent = 'Kostenplaats: ' + loadedCostCenter;
+        summaryRow.appendChild(costCenterNote);
+    }
+
+    if (loadMeta.incremental)
+    {
+        const loadInfo = document.createElement('div');
+        loadInfo.className = 'summary-note';
+        loadInfo.textContent = 'Incrementeel geladen: '
+            + String(loadMeta.fetched_workorder_count || 0) + ' opgehaald, '
+            + String(loadMeta.cached_closed_count || 0) + ' uit cache, '
+            + String(loadMeta.stale_checked_count || 0) + ' gecontroleerd op afsluiting.';
+        summaryRow.appendChild(loadInfo);
+    }
+
     const statusHint = document.createElement('div');
     statusHint.className = 'status-filter-hint';
     statusHint.textContent = 'Tip: dubbel-klik op een filter om alleen die status weer te geven';
@@ -254,8 +278,15 @@
     {
         if (controlsForm)
         {
-            controlsForm.addEventListener('submit', function ()
+            controlsForm.addEventListener('submit', function (event)
             {
+                if (costCenterInput && String(costCenterInput.value || '').trim() === '')
+                {
+                    event.preventDefault();
+                    costCenterInput.focus();
+                    return;
+                }
+
                 startPageLoaderProgress('Gegevens laden...');
             });
         }
@@ -1100,7 +1131,8 @@
             body: JSON.stringify({
                 memo_columns: memoColumns,
                 layout_style: layoutStyle,
-                keep_project_workorders_together: keepProjectWorkordersTogether
+                keep_project_workorders_together: keepProjectWorkordersTogether,
+                cost_center: costCenterInput ? String(costCenterInput.value || '').trim() : ''
             })
         }).catch(function ()
         {

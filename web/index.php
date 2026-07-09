@@ -335,7 +335,7 @@ function normalize_memo_column_settings(array $input): array
     return $normalized;
 }
 
-function save_user_settings(string $email, ?array $memoColumns, ?string $layoutStyle, mixed $keepProjectWorkordersTogether): bool
+function save_user_settings(string $email, ?array $memoColumns, ?string $layoutStyle, mixed $keepProjectWorkordersTogether, ?string $costCenter = null): bool
 {
     $directory = __DIR__ . '/cache/usersettings';
     if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
@@ -360,11 +360,29 @@ function save_user_settings(string $email, ?array $memoColumns, ?string $layoutS
         $normalizedKeepProjectWorkordersTogether = normalize_keep_project_workorders_together($keepProjectWorkordersTogether);
     }
 
+    $normalizedCostCenter = trim((string) ($existing['cost_center'] ?? ''));
+    if ($costCenter !== null) {
+        $normalizedCostCenter = trim($costCenter);
+    }
+
+    $knownCostCenters = is_array($existing['known_cost_centers'] ?? null) ? $existing['known_cost_centers'] : [];
+    $knownCostCenters = array_values(array_unique(array_filter(array_map(static function ($value): string {
+        return trim((string) $value);
+    }, $knownCostCenters), static function (string $value): bool {
+        return $value !== '';
+    })));
+    if ($normalizedCostCenter !== '' && !in_array($normalizedCostCenter, $knownCostCenters, true)) {
+        array_unshift($knownCostCenters, $normalizedCostCenter);
+        $knownCostCenters = array_slice($knownCostCenters, 0, 25);
+    }
+
     $path = usersettings_file_path_for_email($email);
     $payload = [
         'memo_columns' => $normalizedMemoColumns,
         'layout_style' => $normalizedLayoutStyle,
         'keep_project_workorders_together' => $normalizedKeepProjectWorkordersTogether,
+        'cost_center' => $normalizedCostCenter,
+        'known_cost_centers' => $knownCostCenters,
         'updated_at' => gmdate('c'),
     ];
 
@@ -388,8 +406,9 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
     $keepProjectWorkordersTogether = is_array($decoded)
         ? ($decoded['keep_project_workorders_together'] ?? null)
         : null;
+    $costCenter = is_array($decoded) ? ($decoded['cost_center'] ?? null) : null;
 
-    if (!is_array($memoColumns) && $layoutStyle === null && $keepProjectWorkordersTogether === null) {
+    if (!is_array($memoColumns) && $layoutStyle === null && $keepProjectWorkordersTogether === null && $costCenter === null) {
         http_response_code(400);
         echo json_encode(['ok' => false, 'error' => 'Ongeldige instellingen'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
@@ -399,7 +418,8 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
         $currentUserEmail,
         is_array($memoColumns) ? $memoColumns : null,
         $layoutStyle === null ? null : normalize_layout_style($layoutStyle),
-        $keepProjectWorkordersTogether
+        $keepProjectWorkordersTogether,
+        is_string($costCenter) ? trim($costCenter) : null
     );
     if (!$saved) {
         http_response_code(500);
@@ -411,9 +431,32 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
     exit;
 }
 
+function load_cost_center_setting(string $email): string
+{
+    $parsed = load_user_settings_payload($email);
+    return trim((string) ($parsed['cost_center'] ?? ''));
+}
+
+function load_known_cost_centers_setting(string $email): array
+{
+    $parsed = load_user_settings_payload($email);
+    $known = $parsed['known_cost_centers'] ?? null;
+    if (!is_array($known)) {
+        return [];
+    }
+
+    return array_values(array_unique(array_filter(array_map(static function ($value): string {
+        return trim((string) $value);
+    }, $known), static function (string $value): bool {
+        return $value !== '';
+    })));
+}
+
 $memoColumnSettings = load_memo_column_settings($currentUserEmail);
 $layoutStyleSetting = load_layout_style_setting($currentUserEmail);
 $keepProjectWorkordersTogetherSetting = load_keep_project_workorders_together_setting($currentUserEmail);
+$defaultCostCenterSetting = load_cost_center_setting($currentUserEmail);
+$knownCostCentersSetting = load_known_cost_centers_setting($currentUserEmail);
 
 demeter_release_session_lock_if_active();
 
@@ -468,6 +511,13 @@ if (!in_array($invoiceFilter, ['both', 'uninvoiced', 'invoiced'], true)) {
 
 $showInvoiced = $invoiceFilter === 'both' || $invoiceFilter === 'invoiced';
 
+$selectedCostCenter = trim((string) ($_GET['cost_center'] ?? ''));
+if ($selectedCostCenter === '' && $defaultCostCenterSetting !== '') {
+    $selectedCostCenter = $defaultCostCenterSetting;
+}
+
+$forceFullReload = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
+
 $activeLoadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
 $activeLoadProgressToken = odata_load_progress_is_valid_token($activeLoadProgressTokenRaw)
     ? $activeLoadProgressTokenRaw
@@ -521,9 +571,9 @@ $fromMonthValue = $fromMonth->format('Y-m');
 $toMonthValue = $toMonth->format('Y-m');
 $ranges = month_ranges($fromMonth, $toMonth);
 $totalMonths = count($ranges);
-$totalProgressSteps = $totalMonths;
+$totalProgressSteps = 4;
 
-$shouldLoadData = $selectedCompany !== '';
+$shouldLoadData = $selectedCompany !== '' && $selectedCostCenter !== '';
 $isBootRequest = trim((string) ($_GET['boot'] ?? '')) === '1';
 if ($shouldLoadData && !$isBootRequest) {
     odata_load_progress_begin($activeLoadProgressToken, $totalProgressSteps);
@@ -554,17 +604,19 @@ $rows = [];
 $invoiceDetailsById = [];
 $projectpostenRowsByProject = [];
 $projectpostenRowsByProjectAndWorkorder = [];
+$loadMeta = [];
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
     if (!$shouldLoadData) {
-        throw new RuntimeException('Kies eerst een bedrijf om gegevens op te halen.');
-    }
-
-    if ($selectedCompany === '') {
+        if ($selectedCompany === '') {
+            throw new RuntimeException('Kies eerst een bedrijf om gegevens op te halen.');
+        }
+    } elseif ($selectedCompany === '') {
         throw new RuntimeException('Geen bedrijven beschikbaar voor de geselecteerde actieve environments.');
     }
 
+    if ($shouldLoadData) {
     $overviewData = [
         'workorders' => [],
         'project_totals_by_job' => [],
@@ -575,13 +627,29 @@ try {
         'workorder_totals_by_project_and_number' => [],
         'projectposten_rows_by_project' => [],
         'projectposten_rows_by_project_and_workorder' => [],
+        'finance_key_by_pair' => [],
+        'load_meta' => [],
+    ];
+
+    $loaderOptions = [
+        'cost_center' => $selectedCostCenter,
+        'from_month' => $fromMonthValue,
+        'to_month' => $toMonthValue,
+        'force_full' => $forceFullReload,
     ];
 
     $companiesToLoad = $selectedCompany === $allCompaniesOptionValue ? $companies : [$selectedCompany];
 
     foreach ($companiesToLoad as $companyToLoad) {
         $companyAuth = auth_get_auth_for_company($companyToLoad, 300);
-        $companyOverviewData = bc_fetch_load_workorder_overview_data($companyToLoad, $ranges, $companyAuth, $ttl, $activeLoadProgressToken);
+        $companyOverviewData = bc_fetch_load_workorder_overview_data(
+            $companyToLoad,
+            $ranges,
+            $companyAuth,
+            $ttl,
+            $activeLoadProgressToken,
+            $loaderOptions
+        );
 
         $overviewData['workorders'] = array_merge(
             $overviewData['workorders'],
@@ -620,6 +688,21 @@ try {
             $overviewData['projectposten_rows_by_project_and_workorder'][$key] = $value;
         }
 
+        $financeKeyByPairPart = is_array($companyOverviewData['finance_key_by_pair'] ?? null)
+            ? $companyOverviewData['finance_key_by_pair']
+            : [];
+        foreach ($financeKeyByPairPart as $pairKey => $financeKey) {
+            if (!is_string($pairKey) || $pairKey === '' || !is_string($financeKey) || $financeKey === '') {
+                continue;
+            }
+
+            $overviewData['finance_key_by_pair'][$pairKey] = $financeKey;
+        }
+
+        if (is_array($companyOverviewData['load_meta'] ?? null) && $overviewData['load_meta'] === []) {
+            $overviewData['load_meta'] = $companyOverviewData['load_meta'];
+        }
+
         $invoiceDetailsPart = is_array($companyOverviewData['invoice_details_by_id'] ?? null) ? $companyOverviewData['invoice_details_by_id'] : [];
         foreach ($invoiceDetailsPart as $invoiceId => $details) {
             if (!is_string($invoiceId) || $invoiceId === '' || !is_array($details) || isset($overviewData['invoice_details_by_id'][$invoiceId])) {
@@ -639,6 +722,10 @@ try {
     $workorderTotalsByProjectAndNumber = is_array($overviewData['workorder_totals_by_project_and_number'] ?? null) ? $overviewData['workorder_totals_by_project_and_number'] : [];
     $projectpostenRowsByProject = is_array($overviewData['projectposten_rows_by_project'] ?? null) ? $overviewData['projectposten_rows_by_project'] : [];
     $projectpostenRowsByProjectAndWorkorder = is_array($overviewData['projectposten_rows_by_project_and_workorder'] ?? null) ? $overviewData['projectposten_rows_by_project_and_workorder'] : [];
+    $financeKeyByPair = is_array($overviewData['finance_key_by_pair'] ?? null) ? $overviewData['finance_key_by_pair'] : [];
+    $loadMeta = is_array($overviewData['load_meta'] ?? null) ? $overviewData['load_meta'] : [];
+
+    save_user_settings($currentUserEmail, null, null, null, $selectedCostCenter);
 
     foreach ($workorders as $workorder) {
         if (!is_array($workorder)) {
@@ -664,9 +751,11 @@ try {
         }
 
         $normalizedWorkorderNo = strtolower(trim((string) ($workorder['No'] ?? '')));
-        $normalizedWorkorderSourceKey = $jobTaskNo !== ''
-            ? strtolower($jobTaskNo)
-            : $normalizedWorkorderNo;
+        $pairKey = $jobTaskNo !== '' ? demeter_workorder_pair_key($jobNo, $jobTaskNo) : '';
+        $financeSourceKey = $pairKey !== '' && isset($financeKeyByPair[$pairKey])
+            ? (string) $financeKeyByPair[$pairKey]
+            : ($jobTaskNo !== '' ? strtolower($jobTaskNo) : $normalizedWorkorderNo);
+        $normalizedWorkorderSourceKey = $financeSourceKey;
         $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderSourceKey;
         $workorderTotals = $workorderProjectCompositeKey !== '|' && isset($workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey])
             ? $workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey]
@@ -736,7 +825,7 @@ try {
 
         $normalizedPopupWorkorderSourceKey = $isImportSapPseudoRow
             ? $normalizedWorkorderNo
-            : strtolower($jobTaskNo);
+            : $normalizedWorkorderSourceKey;
 
         $rows[] = [
             'No' => $displayWorkorderNo,
@@ -781,6 +870,7 @@ try {
         return strnatcasecmp((string) ($a['No'] ?? ''), (string) ($b['No'] ?? ''));
     });
     odata_load_progress_complete($activeLoadProgressToken, $totalProgressSteps);
+    }
 } catch (Throwable $error) {
     $errorMessage = $error->getMessage();
     $progressPayload = odata_load_progress_payload($activeLoadProgressToken);
@@ -796,6 +886,9 @@ $initialData = [
     'company' => $selectedCompany,
     'from_month' => $fromMonthValue,
     'to_month' => $toMonthValue,
+    'cost_center' => $selectedCostCenter,
+    'known_cost_centers' => $knownCostCentersSetting,
+    'load_meta' => $loadMeta ?? [],
     'invoice_filter' => $invoiceFilter,
     'memo_column_settings' => $memoColumnSettings,
     'layout_style' => $layoutStyleSetting,
@@ -1059,6 +1152,26 @@ $initialData = [
             justify-content: flex-start;
             gap: 10px;
             margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .summary-note {
+            font-size: 13px;
+            color: #475569;
+        }
+
+        .secondary-button {
+            border: 1px solid #94a3b8;
+            background: #fff;
+            color: #334155;
+            border-radius: 8px;
+            padding: 6px 12px;
+            font: inherit;
+            cursor: pointer;
+        }
+
+        .secondary-button:hover {
+            background: #f8fafc;
         }
 
         .workorders-table {
@@ -1700,6 +1813,15 @@ $initialData = [
         <input id="fromMonth" type="month" name="from_month" value="<?= htmlspecialchars($fromMonthValue) ?>">
         <label for="toMonth">Tot</label>
         <input id="toMonth" type="month" name="to_month" value="<?= htmlspecialchars($toMonthValue) ?>">
+        <label for="costCenterInput">Kostenplaats</label>
+        <input id="costCenterInput" type="text" name="cost_center" list="costCenterOptions"
+            value="<?= htmlspecialchars($selectedCostCenter) ?>" required
+            placeholder="Kies of typ een kostenplaats" autocomplete="off">
+        <datalist id="costCenterOptions">
+            <?php foreach ($knownCostCentersSetting as $knownCostCenter): ?>
+                <option value="<?= htmlspecialchars($knownCostCenter) ?>"></option>
+            <?php endforeach; ?>
+        </datalist>
         <label for="invoiceFilter">Factuurfilter</label>
         <select id="invoiceFilter" name="invoice_filter">
             <option value="both" <?= $invoiceFilter === 'both' ? 'selected' : '' ?>>Beide</option>
@@ -1709,6 +1831,9 @@ $initialData = [
         <input type="hidden" name="load_token" id="loadProgressToken"
             value="<?= htmlspecialchars($nextLoadProgressToken) ?>">
         <button type="submit">Toon</button>
+        <?php if ($selectedCompany !== '' && $selectedCostCenter !== ''): ?>
+            <button type="submit" name="force_full" value="1" class="secondary-button">Volledig herladen</button>
+        <?php endif; ?>
         <div class="memo-menu-wrap" id="memoMenuWrap">
             <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Voorkeuren</button>
             <div class="memo-menu-panel" id="memoMenuPanel">
