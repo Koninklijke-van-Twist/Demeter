@@ -69,20 +69,20 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
  *
  * @param array<string, bool> $pairKeysInPosten
  * @param array<string, array> $cachedWorkorders
- * @return array{fetch_pairs: list<array{job_no: string, job_task_no: string}>, stale_pairs: list<array{job_no: string, job_task_no: string}>, use_cached_closed_rows: list<array>}
+ * @return array{fetch_pairs: list<array{job_no: string, job_task_no: string}>, stale_pairs: list<array{job_no: string, job_task_no: string}>, use_cached_rows: list<array>}
  */
 function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPosten, ?array $cachedState, bool $forceFull): array
 {
     $fetchPairs = [];
     $stalePairs = [];
-    $useCachedClosedRows = [];
-    $cachedWorkorders = is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
+    $useCachedRows = [];
+    $cachedWorkorders = is_array($cachedState) && is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
 
     if ($forceFull || $cachedState === null) {
         return [
             'fetch_pairs' => $pairs,
             'stale_pairs' => [],
-            'use_cached_closed_rows' => [],
+            'use_cached_rows' => [],
         ];
     }
 
@@ -101,8 +101,8 @@ function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPo
 
         $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
         $cachedEntry = $cachedWorkorders[$pairKey] ?? null;
-        if (is_array($cachedEntry) && !empty($cachedEntry['is_closed']) && is_array($cachedEntry['row'] ?? null)) {
-            $useCachedClosedRows[] = $cachedEntry['row'];
+        if (is_array($cachedEntry) && is_array($cachedEntry['row'] ?? null)) {
+            $useCachedRows[] = $cachedEntry['row'];
             continue;
         }
 
@@ -146,7 +146,7 @@ function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPo
     return [
         'fetch_pairs' => $fetchPairs,
         'stale_pairs' => $stalePairs,
-        'use_cached_closed_rows' => $useCachedClosedRows,
+        'use_cached_rows' => $useCachedRows,
     ];
 }
 
@@ -162,33 +162,35 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
     $werkorderSelect = 'No,Task_Code,Task_Description,Status,KVT_Document_Status,Job_No,Job_Task_No,Contract_No,External_Document_No,Start_Date,End_Date,Sub_Entity,Sub_Entity_Description,Component_No,Serial_No,Bill_to_Customer_No,Bill_to_Name,Sell_to_Customer_No,Sell_to_Name,Job_Dimension_1_Value,Memo,Memo_Internal_Use_Only,Memo_Invoice,KVT_Memo_Invoice_Details,KVT_Remarks_Invoicing,LVS_Show_on_Planboard,LVS_Fixed_Planned';
     $appSelect = 'No,Job_No,Job_Task_No,Start_Date,Component_Description';
 
-    $allRows = [];
-    $seenRowKeys = [];
-    $pairChunks = array_chunk($pairs, 12);
-
-    foreach ($pairChunks as $chunk) {
-        $pairFilters = [];
-        foreach ($chunk as $pair) {
-            if (!is_array($pair)) {
-                continue;
-            }
-
-            $jobNo = trim((string) ($pair['job_no'] ?? ''));
-            $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
-            if ($jobNo === '' || $jobTaskNo === '') {
-                continue;
-            }
-
-            $escapedJobNo = str_replace("'", "''", $jobNo);
-            $escapedJobTaskNo = str_replace("'", "''", $jobTaskNo);
-            $pairFilters[] = "(Job_No eq '" . $escapedJobNo . "' and Job_Task_No eq '" . $escapedJobTaskNo . "')";
-        }
-
-        if ($pairFilters === []) {
+    $wantedPairKeys = [];
+    $jobNos = [];
+    foreach ($pairs as $pair) {
+        if (!is_array($pair)) {
             continue;
         }
 
-        $filter = implode(' or ', $pairFilters);
+        $jobNo = trim((string) ($pair['job_no'] ?? ''));
+        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+
+        $wantedPairKeys[demeter_workorder_pair_key($jobNo, $jobTaskNo)] = true;
+        $jobNos[$jobNo] = true;
+    }
+
+    if ($wantedPairKeys === []) {
+        return [];
+    }
+
+    $allRows = [];
+    $seenRowKeys = [];
+    $componentDescriptionByRowKey = [];
+    $componentDescriptionByTaskNo = [];
+
+    foreach (array_keys($jobNos) as $jobNo) {
+        $escapedJobNo = str_replace("'", "''", $jobNo);
+        $filter = "Job_No eq '" . $escapedJobNo . "'";
 
         $werkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $werkorderSelect,
@@ -202,8 +204,6 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
         ]);
         $appWorkorderRows = odata_get_all($appWorkordersUrl, $auth, $ttl);
 
-        $componentDescriptionByRowKey = [];
-        $componentDescriptionByTaskNo = [];
         foreach ($appWorkorderRows as $appWorkorderRow) {
             if (!is_array($appWorkorderRow)) {
                 continue;
@@ -235,6 +235,12 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
                 continue;
             }
 
+            $jobTaskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+            $pairKey = demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), $jobTaskNo);
+            if (!isset($wantedPairKeys[$pairKey])) {
+                continue;
+            }
+
             $rowKey = implode('|', [
                 (string) ($row['No'] ?? ''),
                 (string) ($row['Job_No'] ?? ''),
@@ -258,6 +264,63 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
             }
 
             $allRows[] = $row;
+        }
+    }
+
+    $foundPairKeys = [];
+    foreach ($allRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $foundPairKeys[demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), (string) ($row['Job_Task_No'] ?? ''))] = true;
+    }
+
+    foreach ($pairs as $pair) {
+        if (!is_array($pair)) {
+            continue;
+        }
+
+        $jobNo = trim((string) ($pair['job_no'] ?? ''));
+        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+
+        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+        if (isset($foundPairKeys[$pairKey])) {
+            continue;
+        }
+
+        $escapedJobNo = str_replace("'", "''", $jobNo);
+        $escapedJobTaskNo = str_replace("'", "''", $jobTaskNo);
+        $pairFilter = "Job_No eq '" . $escapedJobNo . "' and Job_Task_No eq '" . $escapedJobTaskNo . "'";
+
+        $pairWerkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => $werkorderSelect,
+            '$filter' => $pairFilter,
+        ]);
+        $pairRows = odata_get_all($pairWerkordersUrl, $auth, $ttl);
+
+        foreach ($pairRows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $rowKey = implode('|', [
+                (string) ($row['No'] ?? ''),
+                (string) ($row['Job_No'] ?? ''),
+                (string) ($row['Job_Task_No'] ?? ''),
+                (string) ($row['Start_Date'] ?? ''),
+            ]);
+            if (isset($seenRowKeys[$rowKey])) {
+                continue;
+            }
+
+            $seenRowKeys[$rowKey] = true;
+            $row['Component_Description'] = trim((string) ($row['Sub_Entity_Description'] ?? ''));
+            $allRows[] = $row;
+            $foundPairKeys[$pairKey] = true;
         }
     }
 
@@ -308,7 +371,7 @@ function bc_fetch_build_workorder_state_cache(
     array $pairKeysInPosten,
     ?array $existingCache
 ): array {
-    $state = is_array($existingCache['workorders'] ?? null) ? $existingCache['workorders'] : [];
+    $state = is_array($existingCache) && is_array($existingCache['workorders'] ?? null) ? $existingCache['workorders'] : [];
     $updatedPairKeys = [];
 
     foreach ($workorderRows as $workorderRow) {
@@ -326,6 +389,11 @@ function bc_fetch_build_workorder_state_cache(
         $updatedPairKeys[$pairKey] = true;
         $financeKey = $financeKeyByPair[$pairKey] ?? strtolower($jobTaskNo);
         $seenInPosten = isset($pairKeysInPosten[$pairKey]);
+        $existingEntry = $state[$pairKey] ?? null;
+        if (is_array($existingEntry) && !empty($existingEntry['is_closed']) && is_array($existingEntry['row'] ?? null)) {
+            continue;
+        }
+
         $state[$pairKey] = demeter_workorder_state_cache_entry_from_row($workorderRow, $financeKey, $seenInPosten);
     }
 

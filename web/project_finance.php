@@ -500,16 +500,6 @@ class ProjectFinanceService
 
         $queryFilter = $dateField . ' ge ' . $fromDate . ' and ' . $dateField . ' lt ' . $toDateExclusive;
         $normalizedCostCenter = is_string($costCenter) ? trim($costCenter) : '';
-        if ($normalizedCostCenter !== '') {
-            if (!function_exists('bc_fetch_cost_center_odata_filter') || !function_exists('bc_fetch_append_odata_filter')) {
-                throw new RuntimeException('Kostenplaatsfilter is niet beschikbaar.');
-            }
-
-            $queryFilter = bc_fetch_append_odata_filter(
-                $queryFilter,
-                bc_fetch_cost_center_odata_filter($normalizedCostCenter)
-            );
-        }
 
         try {
             $url = $this->companyEntityUrlWithQuery($entitySet, [
@@ -523,6 +513,14 @@ class ProjectFinanceService
                 0,
                 $loadError
             );
+        }
+
+        if ($normalizedCostCenter !== '') {
+            if (!function_exists('bc_fetch_filter_rows_by_cost_center')) {
+                require_once __DIR__ . '/bc_fetch/cost_center.php';
+            }
+
+            $rows = bc_fetch_filter_rows_by_cost_center($rows, $normalizedCostCenter);
         }
 
         $projectTotalsByJob = self::combineTotalsByKey(
