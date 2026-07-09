@@ -167,8 +167,10 @@ function demeter_workorder_state_cache_save(
 
 /**
  * JSON-encode met UTF-8 fallback voor cache en API-responses.
+ *
+ * @return string|false
  */
-function demeter_workorder_state_cache_json_encode(array $payload): string|false
+function demeter_workorder_state_cache_json_encode(array $payload)
 {
     $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES;
     if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {

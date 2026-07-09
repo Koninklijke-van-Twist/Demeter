@@ -7,10 +7,23 @@
 require_once __DIR__ . '/helpers.php';
 
 /**
+ * Controleert of een dimensiewaarde een echte tekstbeschrijving heeft (geen leeg label of puur getal).
+ */
+function bc_fetch_dimension_value_has_text_label(string $name): bool
+{
+    $normalized = trim($name);
+    if ($normalized === '') {
+        return false;
+    }
+
+    return (bool) preg_match('/\p{L}/u', $normalized);
+}
+
+/**
  * Haalt afdelingen/kostenplaatsen op uit DimensionValueList.
  *
- * Alleen rijen die in de tabel voorkomen met een puur numerieke code < 100.
- * Er worden geen ontbrekende nummers aangevuld.
+ * Alleen rijen die in de tabel voorkomen met een puur numerieke code < 100
+ * en een niet-lege tekstbeschrijving. Er worden geen ontbrekende nummers aangevuld.
  *
  * @return list<array{code: string, name: string, label: string}>
  */
@@ -42,13 +55,17 @@ function bc_fetch_department_cost_center_options(string $company, array $auth, i
             continue;
         }
 
+        $name = trim((string) ($row['Name'] ?? ''));
+        if (!bc_fetch_dimension_value_has_text_label($name)) {
+            continue;
+        }
+
         if (isset($seenCodes[$code])) {
             continue;
         }
 
         $seenCodes[$code] = true;
-        $name = trim((string) ($row['Name'] ?? ''));
-        $label = $name !== '' ? $code . ' - ' . $name : $code;
+        $label = $code . ' - ' . $name;
 
         $options[] = [
             'code' => $code,
