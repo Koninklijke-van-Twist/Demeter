@@ -499,7 +499,6 @@ class ProjectFinanceService
         })));
 
         $queryFilter = $dateField . ' ge ' . $fromDate . ' and ' . $dateField . ' lt ' . $toDateExclusive;
-        $normalizedCostCenter = is_string($costCenter) ? trim($costCenter) : '';
 
         try {
             $url = $this->companyEntityUrlWithQuery($entitySet, [
@@ -515,13 +514,34 @@ class ProjectFinanceService
             );
         }
 
-        if ($normalizedCostCenter !== '') {
-            if (!function_exists('bc_fetch_filter_rows_by_cost_center')) {
-                require_once __DIR__ . '/bc_fetch/cost_center.php';
-            }
+        return $this->aggregateProjectAndWorkorderFinanceFromProjectPostenRows($rows);
+    }
 
-            $rows = bc_fetch_filter_rows_by_cost_center($rows, $normalizedCostCenter);
-        }
+    /**
+     * Aggregeert project- en werkordertotalen uit reeds opgehaalde ProjectPosten-rijen.
+     *
+     * @param list<array> $rows
+     */
+    public function aggregateProjectAndWorkorderFinanceFromProjectPostenRows(array $rows): array
+    {
+        $projectCostSource = $this->getAmountSourceConfig('project', 'cost_source');
+        $projectRevenueSource = $this->getAmountSourceConfig('project', 'revenue_source');
+        $workorderCostSource = $this->getAmountSourceConfig('workorder', 'cost_source');
+        $workorderRevenueSource = $this->getAmountSourceConfig('workorder', 'revenue_source');
+        $projectCostFilter = trim((string) ($projectCostSource['filter'] ?? ''));
+        $projectRevenueFilter = trim((string) ($projectRevenueSource['filter'] ?? ''));
+        $workorderCostFilter = trim((string) ($workorderCostSource['filter'] ?? ''));
+        $workorderRevenueFilter = trim((string) ($workorderRevenueSource['filter'] ?? ''));
+
+        $projectKeyField = (string) ($projectCostSource['key_field'] ?? 'Job_No');
+        $workorderKeyField = (string) ($workorderCostSource['key_field'] ?? 'Job_Task_No');
+        $dateField = 'Posting_Date';
+        $entryTypeField = 'Entry_Type';
+        $descriptionField = 'Description';
+        $typeField = 'Type';
+        $noField = 'No';
+        $totalCostField = 'Total_Cost';
+        $lineAmountField = 'Line_Amount';
 
         $projectTotalsByJob = self::combineTotalsByKey(
             self::aggregateAmountByKeyWithSourceFilter(

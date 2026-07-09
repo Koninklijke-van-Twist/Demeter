@@ -8,7 +8,7 @@
 
 require_once __DIR__ . '/cost_center.php';
 
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 2;
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 5;
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 5;
 
 /**
@@ -275,6 +275,9 @@ function demeter_previous_year_month(string $yearMonth): ?string
 
 /**
  * Bepaalt of een maand overgeslagen kan worden op basis van scan-cache.
+ *
+ * Lege maanden worden niet permanent overgeslagen: alleen maanden vóór stop_before_month
+ * (na 5 opeenvolgende lege maanden) en maanden met uitsluitend gesloten cache-rijen.
  */
 function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
 {
@@ -286,10 +289,6 @@ function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
     $monthMeta = $monthScan['months'][$yearMonth] ?? null;
     if (!is_array($monthMeta)) {
         return false;
-    }
-
-    if (!empty($monthMeta['empty']) && !empty($monthMeta['scanned_at'])) {
-        return true;
     }
 
     return !empty($monthMeta['only_closed_cached']) && !empty($monthMeta['scanned_at']);
@@ -320,14 +319,15 @@ function demeter_month_scan_should_continue(array $monthScan, ?string $nextMonth
  * Werkt month_scan bij na het laden van een maand.
  *
  * @param list<string> $rowKeys
+ * @param bool $hasMonthRows Of deze maand rijen opleverde voor de gekozen kostenplaats
  */
-function demeter_month_scan_update_after_load(string $yearMonth, bool $hasProjectPosten, bool $onlyClosedCached, array $rowKeys, array $monthScan): array
+function demeter_month_scan_update_after_load(string $yearMonth, bool $hasMonthRows, bool $onlyClosedCached, array $rowKeys, array $monthScan): array
 {
     if (!is_array($monthScan['months'] ?? null)) {
         $monthScan['months'] = [];
     }
 
-    $empty = !$hasProjectPosten;
+    $empty = !$hasMonthRows;
     if ($empty) {
         $monthScan['consecutive_empty'] = (int) ($monthScan['consecutive_empty'] ?? 0) + 1;
     } else {
@@ -340,7 +340,7 @@ function demeter_month_scan_update_after_load(string $yearMonth, bool $hasProjec
 
     $monthScan['months'][$yearMonth] = [
         'scanned_at' => gmdate('c'),
-        'has_projectposten' => $hasProjectPosten,
+        'has_projectposten' => $hasMonthRows,
         'empty' => $empty,
         'only_closed_cached' => $onlyClosedCached,
         'row_keys' => array_values(array_unique(array_filter($rowKeys, static function (string $key): bool {

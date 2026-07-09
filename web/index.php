@@ -616,6 +616,7 @@ if ($selectedCostCenter === '' && $defaultCostCenterSetting !== '') {
 }
 
 $forceFullReload = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
+$dataLoadRequested = array_key_exists('show', $_GET) || $forceFullReload;
 
 $activeLoadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
 $activeLoadProgressToken = odata_load_progress_is_valid_token($activeLoadProgressTokenRaw)
@@ -640,7 +641,7 @@ if ($selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue) {
     }
 }
 
-$shouldLoadData = $selectedCompany !== '' && $selectedCostCenter !== '';
+$shouldLoadData = $selectedCompany !== '' && $selectedCostCenter !== '' && $dataLoadRequested;
 $asyncLoadEnabledForBoot = $selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue;
 $isBootRequest = trim((string) ($_GET['boot'] ?? '')) === '1';
 if ($shouldLoadData && !$isBootRequest && !$asyncLoadEnabledForBoot) {
@@ -677,6 +678,8 @@ $monthScan = demeter_workorder_month_scan_defaults();
 $asyncLoadEnabled = false;
 $pendingRowKeys = [];
 $cacheUsedForFirstPaint = false;
+$bootMonthPreloaded = false;
+$builtRows = ['rows' => [], 'row_keys' => []];
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -703,18 +706,40 @@ try {
         'load_meta' => [],
     ];
 
-    $asyncLoadEnabled = $selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue;
+    $asyncLoadEnabled = $selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue && $dataLoadRequested;
     $cachedState = null;
 
     if ($asyncLoadEnabled) {
         $cachedState = $forceFullReload ? null : demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter);
         if (is_array($cachedState)) {
-            $cacheUsedForFirstPaint = true;
             $monthScan = is_array($cachedState['month_scan'] ?? null)
                 ? $cachedState['month_scan']
                 : demeter_workorder_month_scan_defaults();
             $pendingRowKeys = demeter_pending_refresh_row_keys_from_cache($cachedState, $forceFullReload);
         }
+
+        $companyAuth = auth_get_auth_for_company($selectedCompany, 300);
+        $bootChunk = bc_fetch_load_workorder_month_chunk(
+            $selectedCompany,
+            $syncLoadMonth,
+            $companyAuth,
+            $ttl,
+            $activeLoadProgressToken,
+            [
+                'cost_center' => $selectedCostCenter,
+                'force_full' => $forceFullReload,
+                'partial_to_today' => true,
+                'skip_if_cached' => false,
+            ]
+        );
+        $overviewData = demeter_merge_overview_chunks($overviewData, $bootChunk);
+        if (is_array($bootChunk['month_scan'] ?? null)) {
+            $monthScan = $bootChunk['month_scan'];
+        }
+        if (is_array($bootChunk['load_meta'] ?? null)) {
+            $loadMeta = $bootChunk['load_meta'];
+        }
+        $bootMonthPreloaded = true;
     } else {
         $loaderOptions = [
             'cost_center' => $selectedCostCenter,
@@ -757,7 +782,28 @@ try {
     $loadMeta = is_array($overviewData['load_meta'] ?? null) ? $overviewData['load_meta'] : [];
 
     $builtRows = demeter_build_workorder_rows_from_overview($overviewData, $invoiceFilter);
-    if ($cacheUsedForFirstPaint && is_array($cachedState)) {
+    if ($asyncLoadEnabled) {
+        $displayRowsByKey = $forceFullReload
+            ? []
+            : demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
+        if ($displayRowsByKey !== []) {
+            $cacheUsedForFirstPaint = true;
+            foreach ($builtRows['rows'] as $bootRow) {
+                if (!is_array($bootRow)) {
+                    continue;
+                }
+
+                $rowKey = trim((string) ($bootRow['Row_Key'] ?? ''));
+                if ($rowKey !== '') {
+                    $displayRowsByKey[$rowKey] = $bootRow;
+                }
+            }
+
+            $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, $invoiceFilter);
+        } else {
+            $rows = $builtRows['rows'];
+        }
+    } elseif ($cacheUsedForFirstPaint && is_array($cachedState)) {
         $rows = demeter_build_paint_rows_from_workorder_cache(
             $cachedState,
             $invoiceFilter,
@@ -791,12 +837,13 @@ $initialData = [
     'load_meta' => $loadMeta ?? [],
     'initial_load_stats' => [
         'from_cache_count' => $cacheUsedForFirstPaint ? count($rows) : 0,
-        'updated_from_bc_count' => 0,
+        'updated_from_bc_count' => $bootMonthPreloaded ? count($builtRows['rows']) : 0,
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
         'current_month' => $syncLoadMonth,
         'next_month' => demeter_previous_year_month($syncLoadMonth),
+        'boot_month_preloaded' => $bootMonthPreloaded,
         'month_scan' => $monthScan,
         'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_year_month($syncLoadMonth)),
         'load_month_url' => 'index.php?action=load_month',
@@ -1803,8 +1850,7 @@ $initialData = [
             <?php endforeach; ?>
         </select>
         <label for="costCenterSelect">Kostenplaats</label>
-        <select id="costCenterSelect" name="cost_center" required <?= $selectedCompany === '' ? 'disabled' : '' ?>
-            onchange="if(this.value){this.form.submit()}">
+        <select id="costCenterSelect" name="cost_center" <?= $selectedCompany === '' ? 'disabled' : '' ?>>
             <option value="" <?= $selectedCostCenter === '' ? 'selected' : '' ?>>
                 <?= $selectedCompany === '' ? 'Kies eerst een bedrijf...' : 'Kies een kostenplaats...' ?>
             </option>
@@ -1829,7 +1875,7 @@ $initialData = [
         </select>
         <input type="hidden" name="load_token" id="loadProgressToken"
             value="<?= htmlspecialchars($nextLoadProgressToken) ?>">
-        <button type="submit">Toon</button>
+        <button type="submit" name="show" value="1">Toon</button>
         <?php if ($selectedCompany !== '' && $selectedCostCenter !== ''): ?>
             <button type="submit" name="force_full" value="1" class="secondary-button">Volledig herladen</button>
         <?php endif; ?>

@@ -66,6 +66,10 @@ function bc_fetch_load_workorder_month_chunk(
     $rangeStart = $monthRange['from'];
     $rangeEndExclusive = $monthRange['to'];
     $normalizedYearMonth = $monthRange['year_month'];
+    $currentCalendarMonth = (new DateTimeImmutable('first day of this month'))->format('Y-m');
+    if ($normalizedYearMonth === $currentCalendarMonth) {
+        $skipIfCached = false;
+    }
 
     $cachedState = $forceFull ? null : demeter_workorder_state_cache_load($company, $costCenter);
     $monthScan = is_array($cachedState['month_scan'] ?? null) ? $cachedState['month_scan'] : demeter_workorder_month_scan_defaults();
@@ -121,25 +125,42 @@ function bc_fetch_load_workorder_month_chunk(
         $rangeStart->format('Y-m-d'),
         $rangeEndExclusive->format('Y-m-d'),
         $ttl,
-        $costCenter
+        null
     );
 
-    $projectPostenRows = is_array($rangeFinance['projectposten_rows'] ?? null) ? $rangeFinance['projectposten_rows'] : [];
-    $hasProjectPosten = $projectPostenRows !== [];
-    $extractedKeys = bc_fetch_extract_workorder_keys_from_projectposten_rows($projectPostenRows);
+    $allProjectPostenRows = is_array($rangeFinance['projectposten_rows'] ?? null) ? $rangeFinance['projectposten_rows'] : [];
+    $extractedKeys = bc_fetch_extract_workorder_keys_from_projectposten_rows($allProjectPostenRows);
     $pairs = $extractedKeys['pairs'];
     $financeKeyByPair = $extractedKeys['finance_key_by_pair'];
     $pairKeysInPosten = $extractedKeys['pair_keys_in_posten'];
 
     $fetchPlan = bc_fetch_resolve_workorder_fetch_plan($pairs, $pairKeysInPosten, $cachedState, $forceFull);
     $fetchPairs = array_merge($fetchPlan['fetch_pairs'], $fetchPlan['stale_pairs']);
-    $onlyClosedCached = $hasProjectPosten
-        && $fetchPairs === []
-        && $fetchPlan['use_cached_rows'] !== [];
 
     $advanceProgress($isIncrementalRun ? 'Werkorders (open)' : 'Werkorders');
     $fetchedWorkorders = bc_fetch_workorders_by_job_task_pairs($company, $fetchPairs, $auth, $ttl);
-    $workorders = bc_fetch_merge_workorder_rows($fetchPlan['use_cached_rows'], $fetchedWorkorders);
+    $cachedWorkorderRows = $fetchPlan['use_cached_rows'];
+    $workorders = bc_fetch_merge_workorder_rows($cachedWorkorderRows, $fetchedWorkorders);
+
+    if ($costCenter !== '') {
+        $workorders = bc_fetch_filter_workorders_for_cost_center($workorders, $allProjectPostenRows, $costCenter);
+        $allowedPairKeys = bc_fetch_pair_keys_from_workorders($workorders);
+        $allowedPairKeys = array_merge(
+            $allowedPairKeys,
+            bc_fetch_pair_keys_from_projectposten_rows($allProjectPostenRows, $costCenter)
+        );
+        $filteredProjectPostenRows = bc_fetch_filter_projectposten_rows_by_pair_keys($allProjectPostenRows, $allowedPairKeys);
+        $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows($filteredProjectPostenRows);
+        $extractedKeys = bc_fetch_extract_workorder_keys_from_projectposten_rows($filteredProjectPostenRows);
+        $financeKeyByPair = $extractedKeys['finance_key_by_pair'];
+        $pairKeysInPosten = $extractedKeys['pair_keys_in_posten'];
+    }
+
+    $projectPostenRows = is_array($rangeFinance['projectposten_rows'] ?? null) ? $rangeFinance['projectposten_rows'] : [];
+    $hasProjectPostenForCostCenter = $projectPostenRows !== [];
+    $onlyClosedCached = $hasProjectPostenForCostCenter
+        && $fetchPairs === []
+        && $fetchPlan['use_cached_rows'] !== [];
 
     $advanceProgress($fetchPlan['stale_pairs'] !== [] ? 'Afgesloten werkorders controleren' : 'Werkorders samenvoegen');
 
@@ -183,6 +204,9 @@ function bc_fetch_load_workorder_month_chunk(
     $importSapWorkorderRows = is_array($rangeFinance['import_sap_workorder_rows'] ?? null)
         ? $rangeFinance['import_sap_workorder_rows']
         : [];
+    if ($costCenter !== '') {
+        $importSapWorkorderRows = bc_fetch_filter_workorders_for_cost_center($importSapWorkorderRows, $allProjectPostenRows, $costCenter);
+    }
     $workorders = bc_fetch_merge_workorder_rows($workorders, $importSapWorkorderRows);
 
     $cacheState = bc_fetch_build_workorder_state_cache(
@@ -204,24 +228,24 @@ function bc_fetch_load_workorder_month_chunk(
     ], 'both');
 
     $rowKeys = $builtRows['row_keys'];
-    if ($rowKeys === [] && $pairs !== []) {
-        $rowKeys = demeter_row_keys_from_pairs($pairs, $financeKeyByPair);
+    $pairsForMonthScan = is_array($extractedKeys['pairs'] ?? null) ? $extractedKeys['pairs'] : [];
+    if ($rowKeys === [] && $pairsForMonthScan !== []) {
+        $rowKeys = demeter_row_keys_from_pairs($pairsForMonthScan, $financeKeyByPair);
     }
 
     $monthScan = demeter_month_scan_update_after_load(
         $normalizedYearMonth,
-        $hasProjectPosten,
+        $builtRows['rows'] !== [],
         $onlyClosedCached,
         $rowKeys,
         $monthScan
     );
 
     $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
-    $currentMonth = (new DateTimeImmutable('first day of this month'))->format('Y-m');
     $displayRowsByKey = demeter_merge_display_rows_for_month_chunk(
         $displayRowsByKey,
         $builtRows['rows'],
-        $normalizedYearMonth === $currentMonth,
+        $normalizedYearMonth === $currentCalendarMonth,
         is_array($rangeFinance['project_totals_by_job'] ?? null) ? $rangeFinance['project_totals_by_job'] : []
     );
 
@@ -233,8 +257,8 @@ function bc_fetch_load_workorder_month_chunk(
     return [
         'skipped' => false,
         'year_month' => $normalizedYearMonth,
-        'has_projectposten' => $hasProjectPosten,
-        'empty' => !$hasProjectPosten,
+        'has_projectposten' => $hasProjectPostenForCostCenter,
+        'empty' => $builtRows['rows'] === [],
         'only_closed_cached' => $onlyClosedCached,
         'row_keys' => $rowKeys,
         'rows' => $builtRows['rows'],

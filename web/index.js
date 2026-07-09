@@ -332,7 +332,10 @@
     updateSummaryCount();
     syncTableScrollWrapMaxHeight();
     hidePageLoader();
-    startIncrementalMonthLoading();
+    if (asyncLoadConfig.enabled)
+    {
+        startIncrementalMonthLoading();
+    }
 
     function initializePageLoaderHandlers ()
     {
@@ -340,6 +343,15 @@
         {
             controlsForm.addEventListener('submit', function (event)
             {
+                const submitter = event.submitter;
+                const isDataLoadRequest = submitter
+                    && (submitter.name === 'show' || submitter.name === 'force_full');
+
+                if (!isDataLoadRequest)
+                {
+                    return;
+                }
+
                 if (costCenterSelect && String(costCenterSelect.value || '').trim() === '')
                 {
                     event.preventDefault();
@@ -356,9 +368,19 @@
         {
             inputElement.addEventListener('change', function ()
             {
-                if (inputElement === invoiceFilterSelect || inputElement === costCenterSelect)
+                if (inputElement === invoiceFilterSelect)
                 {
                     showPageLoader('Filter toepassen...');
+                    return;
+                }
+
+                if (inputElement === companySelect)
+                {
+                    return;
+                }
+
+                if (inputElement === costCenterSelect)
+                {
                     return;
                 }
 
@@ -2425,6 +2447,24 @@
         });
     }
 
+    function normalizeCostCenterForMatch (value)
+    {
+        const trimmed = String(value || '').trim();
+        if (trimmed === '')
+        {
+            return '';
+        }
+
+        const leadingDigits = trimmed.match(/^(\d+)/);
+        if (leadingDigits)
+        {
+            const withoutLeadingZeros = leadingDigits[1].replace(/^0+/, '');
+            return withoutLeadingZeros === '' ? '0' : withoutLeadingZeros;
+        }
+
+        return trimmed;
+    }
+
     function matchesSelectedCostCenter (row)
     {
         if (selectedCostCenter === 'all')
@@ -2438,7 +2478,7 @@
             return rowCostCenter === '';
         }
 
-        return rowCostCenter === selectedCostCenter;
+        return normalizeCostCenterForMatch(rowCostCenter) === normalizeCostCenterForMatch(selectedCostCenter);
     }
 
     function getVisibleProjectGroups ()
@@ -3808,8 +3848,11 @@
         }
 
         historyLoadRunning = true;
-        let monthToLoad = currentMonth;
-        let isFirstMonth = true;
+        const bootMonthPreloaded = asyncLoadConfig.boot_month_preloaded === true;
+        let monthToLoad = bootMonthPreloaded
+            ? (typeof asyncLoadConfig.next_month === 'string' ? asyncLoadConfig.next_month : null)
+            : currentMonth;
+        let isFirstMonth = !bootMonthPreloaded;
 
         try
         {
