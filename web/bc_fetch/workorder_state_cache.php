@@ -9,7 +9,7 @@
 require_once __DIR__ . '/cost_center.php';
 
 const DEMETER_WORKORDER_STATE_CACHE_VERSION = 5;
-const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 5;
+const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 12;
 
 /**
  * Bepaalt of een werkorderstatus als afgesloten telt.
@@ -277,7 +277,7 @@ function demeter_previous_year_month(string $yearMonth): ?string
  * Bepaalt of een maand overgeslagen kan worden op basis van scan-cache.
  *
  * Lege maanden worden niet permanent overgeslagen: alleen maanden vóór stop_before_month
- * (na 5 opeenvolgende lege maanden) en maanden met uitsluitend gesloten cache-rijen.
+ * (na opeenvolgende lege maanden, zie DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT) en maanden met uitsluitend gesloten cache-rijen.
  */
 function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
 {

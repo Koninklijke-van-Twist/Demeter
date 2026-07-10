@@ -101,6 +101,7 @@
     let columns = buildTableColumns();
     const rowsByKey = new Map();
     const rowLoadStates = new Map();
+    const monthScanEmptyStopCount = Number(asyncLoadConfig.empty_stop_count || 12);
     let monthScanState = asyncLoadConfig.month_scan && typeof asyncLoadConfig.month_scan === 'object'
         ? asyncLoadConfig.month_scan
         : { consecutive_empty: 0, stop_before_month: null, months: {} };
@@ -3505,7 +3506,7 @@
             return false;
         }
 
-        if (Number((monthScan && monthScan.consecutive_empty) || 0) >= 5)
+        if (Number((monthScan && monthScan.consecutive_empty) || 0) >= monthScanEmptyStopCount)
         {
             return false;
         }

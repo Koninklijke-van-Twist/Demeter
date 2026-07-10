@@ -846,6 +846,7 @@ $initialData = [
         'boot_month_preloaded' => $bootMonthPreloaded,
         'month_scan' => $monthScan,
         'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_year_month($syncLoadMonth)),
+        'empty_stop_count' => DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT,
         'load_month_url' => 'index.php?action=load_month',
     ],
     'invoice_filter' => $invoiceFilter,
