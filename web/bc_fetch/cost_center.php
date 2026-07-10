@@ -101,6 +101,34 @@ function bc_fetch_row_matches_cost_center(array $row, string $costCenter): bool
 }
 
 /**
+ * Strikt: alleen ProjectPosten met expliciet overeenkomende dimensiecode.
+ */
+function bc_fetch_row_matches_cost_center_explicit(array $row, string $costCenter): bool
+{
+    $normalized = bc_fetch_normalize_cost_center($costCenter);
+    if ($normalized === '' || $normalized === bc_fetch_cost_center_none_value()) {
+        return true;
+    }
+
+    $candidates = [
+        trim((string) ($row['Global_Dimension_1_Code'] ?? '')),
+        trim((string) ($row['LVS_Global_Dimension_1_Code'] ?? '')),
+    ];
+
+    foreach ($candidates as $candidate) {
+        if ($candidate === '') {
+            continue;
+        }
+
+        if (bc_fetch_cost_centers_match($candidate, $normalized)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Controleert of een werkorder bij de gekozen kostenplaats hoort (Job_Dimension_1_Value).
  */
 function bc_fetch_workorder_matches_cost_center(array $workorder, string $costCenter): bool
@@ -138,7 +166,7 @@ function bc_fetch_filter_workorders_by_cost_center(array $workorders, string $co
  * @param list<array> $rows
  * @return array<string, bool>
  */
-function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCenter): array
+function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCenter, bool $explicitDimensionOnly = false): array
 {
     $normalized = bc_fetch_normalize_cost_center($costCenter);
     $pairKeys = [];
@@ -152,8 +180,13 @@ function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCen
             continue;
         }
 
-        if ($normalized !== '' && !bc_fetch_row_matches_cost_center($row, $normalized)) {
-            continue;
+        if ($normalized !== '') {
+            $matches = $explicitDimensionOnly
+                ? bc_fetch_row_matches_cost_center_explicit($row, $normalized)
+                : bc_fetch_row_matches_cost_center($row, $normalized);
+            if (!$matches) {
+                continue;
+            }
         }
 
         $jobNo = trim((string) ($row['Job_No'] ?? ''));
@@ -182,7 +215,7 @@ function bc_fetch_filter_workorders_for_cost_center(array $workorders, array $al
         return $workorders;
     }
 
-    $pairKeysFromPosten = bc_fetch_pair_keys_from_projectposten_rows($allPostenRows, $normalized);
+    $pairKeysFromPosten = bc_fetch_pair_keys_from_projectposten_rows($allPostenRows, $normalized, true);
 
     return array_values(array_filter($workorders, static function ($workorder) use ($normalized, $pairKeysFromPosten): bool {
         if (!is_array($workorder)) {
