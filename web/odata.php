@@ -9,6 +9,15 @@ if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
 if (!defined('DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS')) {
     define('DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS', 30);
 }
+if (!defined('DEMETER_ODATA_RETRY_MAX_ATTEMPTS')) {
+    define('DEMETER_ODATA_RETRY_MAX_ATTEMPTS', 8);
+}
+if (!defined('DEMETER_ODATA_RETRY_BASE_DELAY_MS')) {
+    define('DEMETER_ODATA_RETRY_BASE_DELAY_MS', 2000);
+}
+if (!defined('DEMETER_ODATA_RETRY_MAX_DELAY_MS')) {
+    define('DEMETER_ODATA_RETRY_MAX_DELAY_MS', 15000);
+}
 
 @ini_set('max_execution_time', (string) DEMETER_ODATA_MAX_EXECUTION_SECONDS);
 if (function_exists('set_time_limit')) {
@@ -98,7 +107,89 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
     return $all;
 }
 
+function odata_http_error_is_retryable(int $httpCode, string $responseBody): bool
+{
+    if (in_array($httpCode, [409, 423, 429, 503, 504], true)) {
+        return true;
+    }
+
+    $normalized = strtolower($responseBody);
+    $lockPhrases = [
+        'andere sessie',
+        'another session',
+        'wordt bijgewerkt',
+        'being updated',
+        'probeer het later opnieuw',
+        'try again later',
+        'could not be saved because',
+        'kunnen nu niet worden opgeslagen',
+    ];
+    foreach ($lockPhrases as $phrase) {
+        if (strpos($normalized, $phrase) !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function odata_retry_delay_ms(int $attempt): int
+{
+    $delay = DEMETER_ODATA_RETRY_BASE_DELAY_MS * max(1, $attempt);
+
+    return min(DEMETER_ODATA_RETRY_MAX_DELAY_MS, $delay);
+}
+
 function odata_get_json(string $url, array $auth): array
+{
+    $maxAttempts = max(1, (int) DEMETER_ODATA_RETRY_MAX_ATTEMPTS);
+    $lastError = null;
+
+    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+        try {
+            return odata_get_json_once($url, $auth);
+        } catch (Exception $error) {
+            $lastError = $error;
+            if ($attempt >= $maxAttempts || !odata_exception_is_retryable($error)) {
+                throw $error;
+            }
+
+            $delayMs = odata_retry_delay_ms($attempt);
+            consolelog("OData retry {$attempt}/{$maxAttempts} after {$delayMs}ms for {$url}\n");
+
+            $activeProgressToken = odata_get_active_load_progress_token();
+            if ($activeProgressToken !== '' && function_exists('odata_load_progress_set_current_call')) {
+                odata_load_progress_set_current_call(
+                    $activeProgressToken,
+                    $url . ' | opnieuw proberen (' . $attempt . '/' . $maxAttempts . ')'
+                );
+            }
+
+            usleep($delayMs * 1000);
+        }
+    }
+
+    if ($lastError instanceof Exception) {
+        throw $lastError;
+    }
+
+    throw new Exception('OData request failed without error details.');
+}
+
+function odata_exception_is_retryable(Exception $error): bool
+{
+    $message = $error->getMessage();
+    if (!preg_match('/^HTTP (\d+) from OData:\s*(.*)$/s', $message, $matches)) {
+        return false;
+    }
+
+    $httpCode = (int) $matches[1];
+    $responseBody = (string) ($matches[2] ?? '');
+
+    return odata_http_error_is_retryable($httpCode, $responseBody);
+}
+
+function odata_get_json_once(string $url, array $auth): array
 {
     $ch = curl_init($url);
     $userAgent = 'Demeter-ODataClient/1.0 (Windows; nl-NL)';

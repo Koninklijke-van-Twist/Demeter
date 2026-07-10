@@ -3809,6 +3809,64 @@
         accumulateLoadStats(chunk.load_meta);
     }
 
+    function isRetryableODataError (message)
+    {
+        const normalized = String(message || '').toLowerCase();
+        if (normalized.indexOf('http 409') !== -1
+            || normalized.indexOf('http 423') !== -1
+            || normalized.indexOf('http 429') !== -1
+            || normalized.indexOf('http 503') !== -1
+            || normalized.indexOf('http 504') !== -1)
+        {
+            return true;
+        }
+
+        return normalized.indexOf('andere sessie') !== -1
+            || normalized.indexOf('another session') !== -1
+            || normalized.indexOf('probeer het later opnieuw') !== -1
+            || normalized.indexOf('try again later') !== -1
+            || normalized.indexOf('wordt bijgewerkt') !== -1;
+    }
+
+    function waitForMs (delayMs)
+    {
+        return new Promise(function (resolve)
+        {
+            window.setTimeout(resolve, delayMs);
+        });
+    }
+
+    async function fetchHistoryMonthWithRetry (yearMonth, attempt)
+    {
+        const maxAttempts = 4;
+        const currentAttempt = Number(attempt || 1);
+
+        try
+        {
+            return await fetchHistoryMonth(yearMonth);
+        }
+        catch (loadError)
+        {
+            const errorMessage = String(loadError && loadError.message ? loadError.message : loadError);
+            if (currentAttempt >= maxAttempts || !isRetryableODataError(errorMessage))
+            {
+                throw loadError;
+            }
+
+            const delayMs = Math.min(15000, 2000 * currentAttempt);
+            updateHistoryLoadNote(
+                'BC is bezig met een andere sessie, opnieuw proberen ('
+                + String(currentAttempt)
+                + '/'
+                + String(maxAttempts)
+                + ')...'
+            );
+            await waitForMs(delayMs);
+
+            return fetchHistoryMonthWithRetry(yearMonth, currentAttempt + 1);
+        }
+    }
+
     function fetchHistoryMonth (yearMonth)
     {
         const params = new URLSearchParams();
@@ -3873,7 +3931,7 @@
                         : ('Oudere maand laden: ' + monthToLoad + '...')
                 );
 
-                const chunk = await fetchHistoryMonth(monthToLoad);
+                const chunk = await fetchHistoryMonthWithRetry(monthToLoad);
                 monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
 
                 if (!chunk.skipped)
