@@ -466,7 +466,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
     try {
         $company = trim((string) ($_GET['company'] ?? ''));
         $costCenter = trim((string) ($_GET['cost_center'] ?? ''));
-        $yearMonth = trim((string) ($_GET['year_month'] ?? ''));
+        $yearWeek = trim((string) ($_GET['year_week'] ?? $_GET['year_month'] ?? ''));
         $invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? 'both')));
         $forceFull = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
 
@@ -474,16 +474,17 @@ if (($_GET['action'] ?? '') === 'load_month') {
             $invoiceFilter = 'both';
         }
 
-        if ($company === '' || $costCenter === '' || !preg_match('/^\d{4}-\d{2}$/', $yearMonth)) {
-            throw new InvalidArgumentException('Ongeldige parameters voor maand-laden.');
+        if ($company === '' || $costCenter === '' || !demeter_is_valid_iso_year_week($yearWeek)) {
+            throw new InvalidArgumentException('Ongeldige parameters voor week-laden.');
         }
 
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
-        $chunk = bc_fetch_load_workorder_month_chunk($company, $yearMonth, $auth, $ttl, null, [
+        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, null, [
             'cost_center' => $costCenter,
             'force_full' => $forceFull,
             'skip_if_cached' => true,
+            'partial_to_today' => $yearWeek === demeter_current_iso_year_week(),
         ]);
 
         $built = [
@@ -502,25 +503,69 @@ if (($_GET['action'] ?? '') === 'load_month') {
         }
 
         $monthScan = is_array($chunk['month_scan'] ?? null) ? $chunk['month_scan'] : demeter_workorder_month_scan_defaults();
+        $nextWeek = is_string($chunk['next_week'] ?? null)
+            ? $chunk['next_week']
+            : demeter_previous_iso_year_week($yearWeek);
 
         demeter_send_json_response([
             'ok' => true,
-            'month' => $yearMonth,
+            'week' => $yearWeek,
+            'month' => $yearWeek,
             'skipped' => !empty($chunk['skipped']),
             'rows' => $built['rows'],
             'row_keys' => !empty($chunk['skipped'])
-                ? demeter_month_scan_expected_row_keys($monthScan, $yearMonth)
+                ? demeter_month_scan_expected_row_keys($monthScan, $yearWeek)
                 : $built['row_keys'],
             'has_projectposten' => !empty($chunk['has_projectposten']),
             'empty' => !empty($chunk['empty']),
             'month_scan' => $monthScan,
-            'next_month' => $chunk['next_month'] ?? demeter_previous_year_month($yearMonth),
+            'next_week' => $nextWeek,
+            'next_month' => $nextWeek,
             'should_continue' => !empty($chunk['should_continue']),
             'project_totals_by_job' => is_array($chunk['project_totals_by_job'] ?? null) ? $chunk['project_totals_by_job'] : [],
             'projectposten_rows_by_project' => is_array($chunk['projectposten_rows_by_project'] ?? null) ? $chunk['projectposten_rows_by_project'] : [],
             'projectposten_rows_by_project_and_workorder' => is_array($chunk['projectposten_rows_by_project_and_workorder'] ?? null) ? $chunk['projectposten_rows_by_project_and_workorder'] : [],
             'invoice_details_by_id' => is_array($chunk['invoice_details_by_id'] ?? null) ? $chunk['invoice_details_by_id'] : [],
             'load_meta' => is_array($chunk['load_meta'] ?? null) ? $chunk['load_meta'] : [],
+        ]);
+    } catch (Throwable $error) {
+        demeter_send_json_response([
+            'ok' => false,
+            'error' => $error->getMessage(),
+        ], 500);
+    }
+}
+
+if (($_GET['action'] ?? '') === 'load_workorder_memos') {
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+
+    try {
+        $rawBody = file_get_contents('php://input');
+        $decoded = json_decode(is_string($rawBody) ? $rawBody : '', true);
+        if (!is_array($decoded)) {
+            throw new InvalidArgumentException('Ongeldige JSON-body voor memo-laden.');
+        }
+
+        $company = trim((string) ($decoded['company'] ?? ''));
+        $costCenter = trim((string) ($decoded['cost_center'] ?? ''));
+        $rowRefs = is_array($decoded['rows'] ?? null) ? $decoded['rows'] : [];
+
+        if ($company === '' || $rowRefs === []) {
+            throw new InvalidArgumentException('Ongeldige parameters voor memo-laden.');
+        }
+
+        auth_set_current_company_context($company, 300);
+        $auth = auth_get_auth_for_company($company, 300);
+        $memosByRowKey = demeter_fetch_workorder_memos_for_row_refs($company, $rowRefs, $auth, $ttl);
+
+        if ($costCenter !== '') {
+            demeter_persist_workorder_memos_to_display_cache($company, $costCenter, $memosByRowKey);
+        }
+
+        demeter_send_json_response([
+            'ok' => true,
+            'memos_by_row_key' => $memosByRowKey,
         ]);
     } catch (Throwable $error) {
         demeter_send_json_response([
@@ -625,8 +670,7 @@ $activeLoadProgressToken = odata_load_progress_is_valid_token($activeLoadProgres
 $nextLoadProgressToken = odata_load_progress_create_token();
 odata_set_active_load_progress_token($activeLoadProgressToken);
 
-$currentMonthStart = new DateTimeImmutable('first day of this month');
-$syncLoadMonth = $currentMonthStart->format('Y-m');
+$syncLoadWeek = demeter_current_iso_year_week();
 $totalProgressSteps = 4;
 
 $departmentCostCenterOptions = [];
@@ -679,7 +723,6 @@ $asyncLoadEnabled = false;
 $pendingRowKeys = [];
 $cacheUsedForFirstPaint = false;
 $bootMonthPreloaded = false;
-$builtRows = ['rows' => [], 'row_keys' => []];
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -710,36 +753,20 @@ try {
     $cachedState = null;
 
     if ($asyncLoadEnabled) {
-        $cachedState = $forceFullReload ? null : demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter);
+        $purgedLegacyCache = false;
+        $cachedState = $forceFullReload
+            ? null
+            : demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter, $purgedLegacyCache);
+        if ($purgedLegacyCache) {
+            $forceFullReload = true;
+        }
+
         if (is_array($cachedState)) {
             $monthScan = is_array($cachedState['month_scan'] ?? null)
                 ? $cachedState['month_scan']
                 : demeter_workorder_month_scan_defaults();
             $pendingRowKeys = demeter_pending_refresh_row_keys_from_cache($cachedState, $forceFullReload);
         }
-
-        $companyAuth = auth_get_auth_for_company($selectedCompany, 300);
-        $bootChunk = bc_fetch_load_workorder_month_chunk(
-            $selectedCompany,
-            $syncLoadMonth,
-            $companyAuth,
-            $ttl,
-            $activeLoadProgressToken,
-            [
-                'cost_center' => $selectedCostCenter,
-                'force_full' => $forceFullReload,
-                'partial_to_today' => true,
-                'skip_if_cached' => false,
-            ]
-        );
-        $overviewData = demeter_merge_overview_chunks($overviewData, $bootChunk);
-        if (is_array($bootChunk['month_scan'] ?? null)) {
-            $monthScan = $bootChunk['month_scan'];
-        }
-        if (is_array($bootChunk['load_meta'] ?? null)) {
-            $loadMeta = $bootChunk['load_meta'];
-        }
-        $bootMonthPreloaded = true;
     } else {
         $loaderOptions = [
             'cost_center' => $selectedCostCenter,
@@ -752,9 +779,9 @@ try {
 
         foreach ($companiesToLoad as $companyToLoad) {
             $companyAuth = auth_get_auth_for_company($companyToLoad, 300);
-            $companyOverviewData = bc_fetch_load_workorder_month_chunk(
+            $companyOverviewData = bc_fetch_load_workorder_week_chunk(
                 $companyToLoad,
-                $syncLoadMonth,
+                $syncLoadWeek,
                 $companyAuth,
                 $ttl,
                 $activeLoadProgressToken,
@@ -781,35 +808,19 @@ try {
         : [];
     $loadMeta = is_array($overviewData['load_meta'] ?? null) ? $overviewData['load_meta'] : [];
 
-    $builtRows = demeter_build_workorder_rows_from_overview($overviewData, $invoiceFilter);
+    $builtRows = ['rows' => [], 'row_keys' => []];
     if ($asyncLoadEnabled) {
         $displayRowsByKey = $forceFullReload
             ? []
             : demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
         if ($displayRowsByKey !== []) {
             $cacheUsedForFirstPaint = true;
-            foreach ($builtRows['rows'] as $bootRow) {
-                if (!is_array($bootRow)) {
-                    continue;
-                }
-
-                $rowKey = trim((string) ($bootRow['Row_Key'] ?? ''));
-                if ($rowKey !== '') {
-                    $displayRowsByKey[$rowKey] = $bootRow;
-                }
-            }
-
             $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, $invoiceFilter);
         } else {
-            $rows = $builtRows['rows'];
+            $rows = [];
         }
-    } elseif ($cacheUsedForFirstPaint && is_array($cachedState)) {
-        $rows = demeter_build_paint_rows_from_workorder_cache(
-            $cachedState,
-            $invoiceFilter,
-            demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter)
-        );
     } else {
+        $builtRows = demeter_build_workorder_rows_from_overview($overviewData, $invoiceFilter);
         $rows = $builtRows['rows'];
     }
 
@@ -832,7 +843,8 @@ try {
 
 $initialData = [
     'company' => $selectedCompany,
-    'sync_load_month' => $syncLoadMonth,
+    'sync_load_week' => $syncLoadWeek,
+    'sync_load_month' => $syncLoadWeek,
     'cost_center' => $selectedCostCenter,
     'load_meta' => $loadMeta ?? [],
     'initial_load_stats' => [
@@ -841,13 +853,19 @@ $initialData = [
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
-        'current_month' => $syncLoadMonth,
-        'next_month' => demeter_previous_year_month($syncLoadMonth),
+        'chunk_unit' => 'week',
+        'current_week' => $syncLoadWeek,
+        'current_month' => $syncLoadWeek,
+        'next_week' => demeter_previous_iso_year_week($syncLoadWeek),
+        'next_month' => demeter_previous_iso_year_week($syncLoadWeek),
+        'boot_week_preloaded' => $bootMonthPreloaded,
         'boot_month_preloaded' => $bootMonthPreloaded,
         'month_scan' => $monthScan,
-        'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_year_month($syncLoadMonth)),
+        'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_iso_year_week($syncLoadWeek)),
         'empty_stop_count' => DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT,
+        'history_weeks_total' => demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek),
         'load_month_url' => 'index.php?action=load_month',
+        'load_workorder_memos_url' => 'index.php?action=load_workorder_memos',
     ],
     'invoice_filter' => $invoiceFilter,
     'memo_column_settings' => $memoColumnSettings,

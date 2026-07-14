@@ -6,7 +6,87 @@
 
 require_once __DIR__ . '/finance_calculations.php';
 require_once __DIR__ . '/bc_fetch/workorder_state_cache.php';
+require_once __DIR__ . '/bc_fetch/odata_select.php';
 require_once __DIR__ . '/bc_fetch/projectposten_workorders.php';
+
+/**
+ * Label → BC-veldnaam voor werkorder-memo's.
+ *
+ * @return array<string, string>
+ */
+function demeter_workorder_memo_label_map(): array
+{
+    return [
+        'KVT_Memo' => 'Memo',
+        'KVT_Memo_Internal_Use_Only' => 'Memo_Internal_Use_Only',
+        'KVT_Memo_Invoice' => 'Memo_Invoice',
+        'KVT_Memo_Billing_Details' => 'KVT_Memo_Invoice_Details',
+        'KVT_Remarks_Invoicing' => 'KVT_Remarks_Invoicing',
+    ];
+}
+
+/**
+ * Bepaalt of een BC-werkorderrij memo-velden bevat (al opgehaald).
+ */
+function demeter_workorder_row_includes_memo_fields(array $workorder): bool
+{
+    foreach (bc_fetch_werkorder_memo_bc_fields() as $field) {
+        if (array_key_exists($field, $workorder)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Stabiele sleutel voor BC-werkorder + memo-koppeling.
+ */
+function demeter_workorder_bc_composite_key(array $workorder): string
+{
+    return implode('|', [
+        trim((string) ($workorder['No'] ?? '')),
+        trim((string) ($workorder['Job_No'] ?? '')),
+        trim((string) ($workorder['Job_Task_No'] ?? '')),
+        trim((string) ($workorder['Start_Date'] ?? '')),
+    ]);
+}
+
+/**
+ * Bouwt Notes-structuur vanuit BC-werkorder-memovelden.
+ *
+ * @return array{notes: list<array{label: string, value: string}>, notes_search: string, memos_loaded: bool}
+ */
+function demeter_build_workorder_notes_from_bc_row(array $workorder): array
+{
+    if (!demeter_workorder_row_includes_memo_fields($workorder)) {
+        return [
+            'notes' => [],
+            'notes_search' => '',
+            'memos_loaded' => false,
+        ];
+    }
+
+    $notesParts = [];
+    $notesSearchParts = [];
+
+    foreach (demeter_workorder_memo_label_map() as $label => $bcField) {
+        $value = trim((string) ($workorder[$bcField] ?? ''));
+        $notesParts[] = [
+            'label' => $label,
+            'value' => $value,
+        ];
+        if ($value !== '') {
+            $notesSearchParts[] = $value;
+        }
+    }
+
+    return [
+        'notes' => $notesParts,
+        'notes_search' => implode("\n", $notesSearchParts),
+        'memos_loaded' => true,
+    ];
+}
 
 /**
  * Voegt numerieke overview-totalen samen.
@@ -249,22 +329,10 @@ function demeter_build_single_workorder_row(
 
     $invoiceIdText = implode(', ', $invoiceIdsForProject);
     $equipmentNumber = trim((string) ($workorder['Component_No'] ?? ''));
-
-    $notesParts = [
-        ['label' => 'KVT_Memo', 'value' => trim((string) ($workorder['Memo'] ?? ''))],
-        ['label' => 'KVT_Memo_Internal_Use_Only', 'value' => trim((string) ($workorder['Memo_Internal_Use_Only'] ?? ''))],
-        ['label' => 'KVT_Memo_Invoice', 'value' => trim((string) ($workorder['Memo_Invoice'] ?? ''))],
-        ['label' => 'KVT_Memo_Billing_Details', 'value' => trim((string) ($workorder['KVT_Memo_Invoice_Details'] ?? ''))],
-        ['label' => 'KVT_Remarks_Invoicing', 'value' => trim((string) ($workorder['KVT_Remarks_Invoicing'] ?? ''))],
-    ];
-
-    $notesSearchParts = [];
-    foreach ($notesParts as $notePart) {
-        $noteValue = trim((string) ($notePart['value'] ?? ''));
-        if ($noteValue !== '') {
-            $notesSearchParts[] = $noteValue;
-        }
-    }
+    $notesBundle = demeter_build_workorder_notes_from_bc_row($workorder);
+    $notesParts = $notesBundle['notes'];
+    $memosLoaded = $notesBundle['memos_loaded'];
+    $notesSearch = $notesBundle['notes_search'];
 
     $projectTotals = $projectTotalsByJob[$normalizedJobNo] ?? null;
     $projectActualCosts = is_array($projectTotals) ? (float) ($projectTotals['costs'] ?? 0) : 0.0;
@@ -308,6 +376,7 @@ function demeter_build_single_workorder_row(
 
     return [
         'Row_Key' => $rowKey,
+        'Bc_No' => (string) ($workorder['No'] ?? ''),
         'No' => $displayWorkorderNo,
         'Order_Type' => $displayOrderType,
         'Contract_No' => (string) ($workorder['Contract_No'] ?? ''),
@@ -331,7 +400,8 @@ function demeter_build_single_workorder_row(
         'Status' => (string) ($workorder['Status'] ?? ''),
         'Document_Status' => (string) ($workorder['KVT_Document_Status'] ?? ''),
         'Notes' => $notesParts,
-        'Notes_Search' => implode("\n", $notesSearchParts),
+        'Notes_Search' => $notesSearch,
+        'Memos_Loaded' => $memosLoaded,
         'Invoice_Id' => $invoiceIdText,
         'Invoice_Ids' => $invoiceIdsForProject,
         'Job_No' => $jobNo,
@@ -368,10 +438,16 @@ function demeter_merge_month_rows_into_existing(array $rowsByKey, array $monthRo
         $existing['Total_Revenue'] = finance_add_amount((float) ($existing['Total_Revenue'] ?? 0.0), (float) ($monthRow['Total_Revenue'] ?? 0.0));
         $existing['Actual_Total'] = finance_calculate_result((float) $existing['Total_Revenue'], (float) $existing['Actual_Costs']);
 
-        foreach (['No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No', 'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description', 'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'Notes', 'Notes_Search', 'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key'] as $field) {
+        foreach (['No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No', 'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description', 'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key'] as $field) {
             if (array_key_exists($field, $monthRow) && trim((string) $monthRow[$field]) !== '') {
                 $existing[$field] = $monthRow[$field];
             }
+        }
+
+        if (!empty($monthRow['Memos_Loaded'])) {
+            $existing['Notes'] = is_array($monthRow['Notes'] ?? null) ? $monthRow['Notes'] : [];
+            $existing['Notes_Search'] = (string) ($monthRow['Notes_Search'] ?? '');
+            $existing['Memos_Loaded'] = true;
         }
 
         $normalizedJobNo = strtolower(trim((string) ($existing['Job_No'] ?? '')));
@@ -482,4 +558,137 @@ function demeter_build_paint_rows_from_workorder_cache(
     $overviewData = demeter_build_overview_from_workorder_cache($cachedState);
 
     return demeter_build_workorder_rows_from_overview($overviewData, $invoiceFilter)['rows'];
+}
+
+/**
+ * Haalt memo-velden op voor specifieke werkorderrijen (on-demand, OData-cache).
+ *
+ * @param list<array{row_key?: string, no?: string, job_no?: string, job_task_no?: string, start_date?: string}> $rowRefs
+ * @return array<string, array{notes: list<array{label: string, value: string}>, notes_search: string, memos_loaded: bool}>
+ */
+function demeter_fetch_workorder_memos_for_row_refs(string $company, array $rowRefs, array $auth, int $ttl): array
+{
+    if ($rowRefs === []) {
+        return [];
+    }
+
+    $wantedCompositeKeys = [];
+    $rowKeyByCompositeKey = [];
+    $jobNos = [];
+
+    foreach ($rowRefs as $ref) {
+        if (!is_array($ref)) {
+            continue;
+        }
+
+        $rowKey = trim((string) ($ref['row_key'] ?? ''));
+        $compositeKey = demeter_workorder_bc_composite_key([
+            'No' => (string) ($ref['no'] ?? ''),
+            'Job_No' => (string) ($ref['job_no'] ?? ''),
+            'Job_Task_No' => (string) ($ref['job_task_no'] ?? ''),
+            'Start_Date' => (string) ($ref['start_date'] ?? ''),
+        ]);
+
+        if ($compositeKey === '|||' || $rowKey === '') {
+            continue;
+        }
+
+        $wantedCompositeKeys[$compositeKey] = true;
+        $rowKeyByCompositeKey[$compositeKey] = $rowKey;
+
+        $jobNo = trim((string) ($ref['job_no'] ?? ''));
+        if ($jobNo !== '') {
+            $jobNos[$jobNo] = true;
+        }
+    }
+
+    if ($wantedCompositeKeys === []) {
+        return [];
+    }
+
+    $memosByRowKey = [];
+    $select = bc_fetch_werkorders_memo_select();
+
+    foreach (bc_fetch_chunk_string_values(array_keys($jobNos), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+        $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
+        $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => $select,
+            '$filter' => $filter,
+        ]);
+        $bcRows = odata_get_all($url, $auth, $ttl);
+
+        foreach ($bcRows as $bcRow) {
+            if (!is_array($bcRow)) {
+                continue;
+            }
+
+            $compositeKey = demeter_workorder_bc_composite_key($bcRow);
+            if (!isset($wantedCompositeKeys[$compositeKey])) {
+                continue;
+            }
+
+            $uiRowKey = $rowKeyByCompositeKey[$compositeKey] ?? '';
+            if ($uiRowKey === '') {
+                continue;
+            }
+
+            $notesBundle = demeter_build_workorder_notes_from_bc_row($bcRow);
+            $notesBundle['memos_loaded'] = true;
+            $memosByRowKey[$uiRowKey] = $notesBundle;
+        }
+    }
+
+    foreach ($rowKeyByCompositeKey as $compositeKey => $rowKey) {
+        if (isset($memosByRowKey[$rowKey])) {
+            continue;
+        }
+
+        $memosByRowKey[$rowKey] = [
+            'notes' => [],
+            'notes_search' => '',
+            'memos_loaded' => true,
+        ];
+    }
+
+    return $memosByRowKey;
+}
+
+/**
+ * Schrijft opgehaalde memo's terug naar de display-cache.
+ *
+ * @param array<string, array{notes?: list<array>, notes_search?: string, memos_loaded?: bool}> $memosByRowKey
+ */
+function demeter_persist_workorder_memos_to_display_cache(string $company, string $costCenter, array $memosByRowKey): bool
+{
+    if ($costCenter === '' || $memosByRowKey === []) {
+        return false;
+    }
+
+    $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
+    if ($displayRowsByKey === []) {
+        return false;
+    }
+
+    $changed = false;
+
+    foreach ($memosByRowKey as $rowKey => $bundle) {
+        if (!is_string($rowKey) || $rowKey === '' || !is_array($bundle)) {
+            continue;
+        }
+
+        if (!isset($displayRowsByKey[$rowKey]) || !is_array($displayRowsByKey[$rowKey])) {
+            continue;
+        }
+
+        $displayRowsByKey[$rowKey]['Notes'] = is_array($bundle['notes'] ?? null) ? $bundle['notes'] : [];
+        $displayRowsByKey[$rowKey]['Notes_Search'] = (string) ($bundle['notes_search'] ?? '');
+        $displayRowsByKey[$rowKey]['Memos_Loaded'] = true;
+        $changed = true;
+    }
+
+    if (!$changed) {
+        return false;
+    }
+
+    return demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
 }

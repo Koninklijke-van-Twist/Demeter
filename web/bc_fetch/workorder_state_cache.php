@@ -8,8 +8,13 @@
 
 require_once __DIR__ . '/cost_center.php';
 
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 5;
-const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 12;
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 6;
+/** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
+const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
+/** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */
+const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 7;
+/** Aantal Job_No filters per OData-call bij batch ophalen. */
+const DEMETER_WORKORDER_JOB_NO_BATCH_SIZE = 15;
 
 /**
  * Bepaalt of een werkorderstatus als afgesloten telt.
@@ -28,6 +33,46 @@ function demeter_workorder_status_is_closed(string $status): bool
     }
 
     return in_array($normalized, ['closed', 'cancelled', 'completed'], true);
+}
+
+/**
+ * Berekent de leeftijd van een cache-entry in dagen (op basis van updated_at).
+ */
+function demeter_workorder_cache_entry_age_days(array $entry): ?float
+{
+    $updatedAt = trim((string) ($entry['updated_at'] ?? ''));
+    if ($updatedAt === '') {
+        return null;
+    }
+
+    $parsed = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $updatedAt);
+    if (!$parsed instanceof DateTimeImmutable) {
+        $parsed = DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $updatedAt);
+    }
+    if (!$parsed instanceof DateTimeImmutable) {
+        return null;
+    }
+
+    $seconds = time() - $parsed->getTimestamp();
+
+    return max(0.0, $seconds / 86400);
+}
+
+/**
+ * Bepaalt of een open cache-entry een volledige BC-refresh nodig heeft op basis van leeftijd.
+ */
+function demeter_workorder_cache_entry_needs_full_refresh_by_age(array $entry): bool
+{
+    if (!empty($entry['is_closed'])) {
+        return false;
+    }
+
+    $ageDays = demeter_workorder_cache_entry_age_days($entry);
+    if ($ageDays === null) {
+        return true;
+    }
+
+    return $ageDays >= (float) DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS;
 }
 
 /**
@@ -69,22 +114,165 @@ function demeter_workorder_state_cache_path(string $company, string $costCenter)
 }
 
 /**
- * Normaliseert month_scan metadata.
+ * Normaliseert month_scan metadata (period keys zijn ISO-weken: YYYY-Www).
  */
 function demeter_workorder_month_scan_defaults(): array
 {
     return [
         'consecutive_empty' => 0,
         'stop_before_month' => null,
+        'chunk_unit' => 'week',
         'months' => [],
     ];
 }
 
 /**
- * Leest de werkorder-state cache.
+ * Valideert een ISO-weekkey (YYYY-Www).
  */
-function demeter_workorder_state_cache_load(string $company, string $costCenter): ?array
+function demeter_is_valid_iso_year_week(string $yearWeek): bool
 {
+    return demeter_parse_iso_year_week($yearWeek) !== null;
+}
+
+/**
+ * @return array{year: int, week: int}|null
+ */
+function demeter_parse_iso_year_week(string $yearWeek): ?array
+{
+    if (!preg_match('/^(\d{4})-W(\d{2})$/', trim($yearWeek), $matches)) {
+        return null;
+    }
+
+    $year = (int) $matches[1];
+    $week = (int) $matches[2];
+    if ($week < 1 || $week > 53) {
+        return null;
+    }
+
+    return ['year' => $year, 'week' => $week];
+}
+
+function demeter_format_iso_year_week(int $year, int $week): string
+{
+    return sprintf('%04d-W%02d', $year, $week);
+}
+
+function demeter_iso_year_week_from_date(DateTimeImmutable $date): string
+{
+    return demeter_format_iso_year_week((int) $date->format('o'), (int) $date->format('W'));
+}
+
+function demeter_current_iso_year_week(): string
+{
+    return demeter_iso_year_week_from_date(new DateTimeImmutable('today'));
+}
+
+/**
+ * @return array{from: DateTimeImmutable, to: DateTimeImmutable, year_week: string}
+ */
+function demeter_week_date_range(string $yearWeek, bool $partialToToday = false): array
+{
+    $parsed = demeter_parse_iso_year_week($yearWeek);
+    if ($parsed === null) {
+        throw new InvalidArgumentException('Ongeldige week: ' . $yearWeek);
+    }
+
+    $from = (new DateTimeImmutable())->setISODate($parsed['year'], $parsed['week'], 1)->setTime(0, 0, 0);
+    $to = $from->modify('+7 days');
+    $normalizedYearWeek = demeter_format_iso_year_week($parsed['year'], $parsed['week']);
+
+    if ($partialToToday && $normalizedYearWeek === demeter_current_iso_year_week()) {
+        $to = (new DateTimeImmutable('today'))->modify('+1 day');
+    }
+
+    return [
+        'from' => $from,
+        'to' => $to,
+        'year_week' => $normalizedYearWeek,
+    ];
+}
+
+/**
+ * Berekent de vorige ISO-week (YYYY-Www).
+ */
+function demeter_previous_iso_year_week(string $yearWeek): ?string
+{
+    $parsed = demeter_parse_iso_year_week($yearWeek);
+    if ($parsed === null) {
+        return null;
+    }
+
+    $from = (new DateTimeImmutable())->setISODate($parsed['year'], $parsed['week'], 1)->setTime(0, 0, 0);
+
+    return demeter_iso_year_week_from_date($from->modify('-7 days'));
+}
+
+/**
+ * Herken oude maand-keys (YYYY-MM) t.o.v. ISO-weekkeys (YYYY-Www).
+ */
+function demeter_is_legacy_calendar_month_key(string $periodKey): bool
+{
+    $trimmed = trim($periodKey);
+    if ($trimmed === '' || demeter_is_valid_iso_year_week($trimmed)) {
+        return false;
+    }
+
+    return preg_match('/^\d{4}-\d{2}$/', $trimmed) === 1;
+}
+
+/**
+ * Controleert of scan-metadata nog op maand-chunks is gebaseerd.
+ */
+function demeter_workorder_month_scan_uses_legacy_month_keys(array $monthScan): bool
+{
+    $chunkUnit = trim((string) ($monthScan['chunk_unit'] ?? ''));
+    $periods = is_array($monthScan['months'] ?? null) ? $monthScan['months'] : [];
+
+    if ($chunkUnit !== 'week' && $periods !== []) {
+        return true;
+    }
+
+    $stopBefore = trim((string) ($monthScan['stop_before_month'] ?? ''));
+    if ($stopBefore !== '' && demeter_is_legacy_calendar_month_key($stopBefore)) {
+        return true;
+    }
+
+    foreach (array_keys($periods) as $periodKey) {
+        if (demeter_is_legacy_calendar_month_key((string) $periodKey)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
+ * Verwijdert werkorder-state en display-cache voor bedrijf/kostenplaats.
+ */
+function demeter_workorder_state_cache_purge(string $company, string $costCenter): void
+{
+    $paths = [
+        demeter_workorder_state_cache_path($company, $costCenter),
+        demeter_workorder_state_cache_display_rows_path($company, $costCenter),
+    ];
+
+    foreach ($paths as $path) {
+        if (is_file($path)) {
+            @unlink($path);
+        }
+    }
+}
+
+/**
+ * Leest de werkorder-state cache.
+ *
+ * @param bool|null $purgedLegacy Wordt true als oude maand-keys zijn gedetecteerd en cache is gewist.
+ */
+function demeter_workorder_state_cache_load(string $company, string $costCenter, ?bool &$purgedLegacy = null): ?array
+{
+    if ($purgedLegacy !== null) {
+        $purgedLegacy = false;
+    }
     $path = demeter_workorder_state_cache_path($company, $costCenter);
     if (!is_file($path) || !is_readable($path)) {
         return null;
@@ -127,6 +315,15 @@ function demeter_workorder_state_cache_load(string $company, string $costCenter)
 
     if (!is_array($decoded['display_rows'] ?? null)) {
         $decoded['display_rows'] = [];
+    }
+
+    if (demeter_workorder_month_scan_uses_legacy_month_keys($monthScan)) {
+        demeter_workorder_state_cache_purge($company, $costCenter);
+        if ($purgedLegacy !== null) {
+            $purgedLegacy = true;
+        }
+
+        return null;
     }
 
     return $decoded;
@@ -295,16 +492,57 @@ function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
 }
 
 /**
+ * Telt ISO-weken vanaf startWeek terug tot (exclusief) stopBeforeWeek.
+ */
+function demeter_count_iso_weeks_in_load_range(string $startWeek, ?string $stopBeforeWeek): int
+{
+    if (!demeter_is_valid_iso_year_week($startWeek)) {
+        return 0;
+    }
+
+    $count = 0;
+    $week = $startWeek;
+    $safety = 0;
+
+    while ($week !== null && $safety < 400) {
+        if ($stopBeforeWeek !== null && $stopBeforeWeek !== '' && $week < $stopBeforeWeek) {
+            break;
+        }
+
+        $count++;
+        $week = demeter_previous_iso_year_week($week);
+        $safety++;
+    }
+
+    return $count;
+}
+
+/**
+ * Berekent het totaal aantal te laden weken wanneer stop_before_month bekend is.
+ */
+function demeter_history_weeks_total_for_scan(array $monthScan, string $currentWeek): ?int
+{
+    $stopBefore = trim((string) ($monthScan['stop_before_month'] ?? ''));
+    if ($stopBefore === '') {
+        return null;
+    }
+
+    $total = demeter_count_iso_weeks_in_load_range($currentWeek, $stopBefore);
+
+    return $total > 0 ? $total : null;
+}
+
+/**
  * Bepaalt of async laden verder moet gaan.
  */
-function demeter_month_scan_should_continue(array $monthScan, ?string $nextMonth): bool
+function demeter_month_scan_should_continue(array $monthScan, ?string $nextPeriod): bool
 {
-    if (!is_string($nextMonth) || !preg_match('/^\d{4}-\d{2}$/', $nextMonth)) {
+    if (!is_string($nextPeriod) || !demeter_is_valid_iso_year_week($nextPeriod)) {
         return false;
     }
 
     $stopBefore = trim((string) ($monthScan['stop_before_month'] ?? ''));
-    if ($stopBefore !== '' && $nextMonth < $stopBefore) {
+    if ($stopBefore !== '' && $nextPeriod < $stopBefore) {
         return false;
     }
 

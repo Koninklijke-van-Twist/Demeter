@@ -101,7 +101,13 @@
     let columns = buildTableColumns();
     const rowsByKey = new Map();
     const rowLoadStates = new Map();
+    const rowDomByKey = new Map();
     const monthScanEmptyStopCount = Number(asyncLoadConfig.empty_stop_count || 12);
+    let historyWeeksTotal = Number(asyncLoadConfig.history_weeks_total || 0) || null;
+    const loadWorkorderMemosUrl = typeof asyncLoadConfig.load_workorder_memos_url === 'string'
+        ? asyncLoadConfig.load_workorder_memos_url
+        : 'index.php?action=load_workorder_memos';
+    const memoFetchInFlight = new Map();
     let monthScanState = asyncLoadConfig.month_scan && typeof asyncLoadConfig.month_scan === 'object'
         ? asyncLoadConfig.month_scan
         : { consecutive_empty: 0, stop_before_month: null, months: {} };
@@ -264,7 +270,7 @@
     app.appendChild(statusFilterBar);
     renderStatusButtons();
 
-    if (rows.length === 0)
+    if (rows.length === 0 && !asyncLoadConfig.enabled)
     {
         const empty = document.createElement('div');
         empty.className = 'empty';
@@ -1505,6 +1511,7 @@
             }
 
             noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
+            syncRowDomMap();
             return;
         }
 
@@ -1541,6 +1548,7 @@
             }
 
             noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
+            syncRowDomMap();
             return;
         }
 
@@ -1552,6 +1560,171 @@
         }
 
         noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+        syncRowDomMap();
+    }
+
+    function syncRowDomMap ()
+    {
+        rowDomByKey.clear();
+        if (!tbody)
+        {
+            return;
+        }
+
+        const rowElements = tbody.querySelectorAll('tr.workorder-data-row[data-row-key]');
+        for (const tr of rowElements)
+        {
+            const key = String(tr.dataset.rowKey || '').trim();
+            if (key !== '')
+            {
+                rowDomByKey.set(key, tr);
+            }
+        }
+    }
+
+    function usesIncrementalRowRendering ()
+    {
+        return layoutStyle === 'table' && !keepProjectWorkordersTogether;
+    }
+
+    function replaceWorkorderRowTr (rowKey, row)
+    {
+        const normalizedKey = String(rowKey || '').trim();
+        if (normalizedKey === '')
+        {
+            return null;
+        }
+
+        const existingTr = rowDomByKey.get(normalizedKey);
+        const newTr = renderWorkorderRow(row);
+        if (existingTr && existingTr.parentNode)
+        {
+            existingTr.replaceWith(newTr);
+        }
+
+        rowDomByKey.set(normalizedKey, newTr);
+        observeWorkorderRow(newTr, normalizedKey);
+
+        return newTr;
+    }
+
+    function reorderVisibleRowsInDom ()
+    {
+        if (!tbody)
+        {
+            return;
+        }
+
+        const visibleRows = getVisibleSortedRows();
+        const visibleKeys = new Set();
+
+        for (const row of visibleRows)
+        {
+            const rowKey = String(row.Row_Key || '').trim();
+            if (rowKey === '')
+            {
+                continue;
+            }
+
+            visibleKeys.add(rowKey);
+            const tr = rowDomByKey.get(rowKey);
+            if (tr)
+            {
+                tbody.appendChild(tr);
+            }
+        }
+
+        for (const [key, tr] of rowDomByKey.entries())
+        {
+            if (!visibleKeys.has(key) && tr && tr.parentNode)
+            {
+                tr.remove();
+                rowDomByKey.delete(key);
+            }
+        }
+    }
+
+    function applyChunkRowsToDom (monthRows)
+    {
+        if (!usesIncrementalRowRendering())
+        {
+            renderRows();
+            return;
+        }
+
+        let touched = false;
+
+        for (const monthRow of monthRows)
+        {
+            const rowKey = String(monthRow.Row_Key || '').trim();
+            if (rowKey === '')
+            {
+                continue;
+            }
+
+            const row = rowsByKey.get(rowKey);
+            if (!row)
+            {
+                continue;
+            }
+
+            touched = true;
+
+            if (!rowDomByKey.has(rowKey))
+            {
+                const tr = renderWorkorderRow(row);
+                rowDomByKey.set(rowKey, tr);
+                observeWorkorderRow(tr, rowKey);
+            }
+            else
+            {
+                replaceWorkorderRowTr(rowKey, row);
+            }
+        }
+
+        if (touched)
+        {
+            reorderVisibleRowsInDom();
+        }
+
+        updateSummaryCount();
+        noSearchResults.style.display = getVisibleSortedRows().length === 0 ? '' : 'none';
+    }
+
+    function refreshRowLoadStatesDom (rowKeys)
+    {
+        if (!Array.isArray(rowKeys))
+        {
+            return;
+        }
+
+        for (const rowKey of rowKeys)
+        {
+            const normalizedKey = String(rowKey || '').trim();
+            if (normalizedKey === '')
+            {
+                continue;
+            }
+
+            const tr = rowDomByKey.get(normalizedKey);
+            if (!tr)
+            {
+                continue;
+            }
+
+            tr.classList.remove('is-row-loading', 'is-row-complete-flash');
+            const loadState = rowLoadStates.get(normalizedKey) || 'stable';
+            const showRowLoading = loadState === 'loading' && pendingCachedRowKeys.has(normalizedKey);
+
+            if (showRowLoading)
+            {
+                tr.classList.add('is-row-loading');
+            }
+            else if (loadState === 'completing' && pendingCachedRowKeys.has(normalizedKey))
+            {
+                tr.classList.add('is-row-complete-flash');
+            }
+        }
     }
 
     function appendProjectGroupRows (projectRows, projectKey)
@@ -1856,8 +2029,9 @@
                 {
                     return String((part && part.value) || '').trim() !== '';
                 });
+                const memosCached = rowMemosAreCached(row);
 
-                if (hasNotes)
+                if (!memosCached || hasNotes)
                 {
                     const button = document.createElement('button');
                     button.type = 'button';
@@ -1865,7 +2039,7 @@
                     button.textContent = 'Bekijk';
                     button.addEventListener('click', function ()
                     {
-                        openNotesModal(groupedParts);
+                        openNotesModalForRow(row, groupedLabelSet.size > 0 ? groupedLabelSet : null);
                     });
                     td.appendChild(button);
                 }
@@ -1877,21 +2051,22 @@
             else if (isMemoFieldKey(column.key))
             {
                 const memoValue = getMemoFieldValue(row, column.key);
+                const memosCached = rowMemosAreCached(row);
                 td.textContent = memoValue;
                 td.classList.add('memo-cell-full');
 
-                if (memoValue.trim() !== '')
+                if (!memosCached || memoValue.trim() !== '')
                 {
                     const memoField = memoFieldByKey[column.key];
                     td.classList.add('memo-cell-clickable');
+                    if (!memosCached)
+                    {
+                        td.title = 'Klik om memo te laden';
+                    }
+
                     td.addEventListener('click', function ()
                     {
-                        openNotesModal([
-                            {
-                                label: memoField ? memoField.noteLabel : column.key,
-                                value: memoValue,
-                            }
-                        ]);
+                        openNotesModalForRow(row, memoField ? new Set([memoField.noteLabel]) : null);
                     });
                 }
             }
@@ -2956,6 +3131,240 @@
         return String((row && (row.Component_No || row.Equipment_Number)) || '').trim();
     }
 
+    function rowMemosAreCached (row)
+    {
+        if (!row || typeof row !== 'object')
+        {
+            return false;
+        }
+
+        if (row.Memos_Loaded === true)
+        {
+            return true;
+        }
+
+        const parts = Array.isArray(row.Notes) ? row.Notes : [];
+
+        return parts.some(function (part)
+        {
+            return String((part && part.value) || '').trim() !== '';
+        });
+    }
+
+    function buildWorkorderMemoRowRef (row)
+    {
+        return {
+            row_key: String(row.Row_Key || '').trim(),
+            no: String(row.Bc_No || row.No || '').trim(),
+            job_no: String(row.Job_No || '').trim(),
+            job_task_no: String(row.Job_Task_No || '').trim(),
+            start_date: String(row.Start_Date || '').trim(),
+        };
+    }
+
+    function applyMemosBundleToRow (row, bundle)
+    {
+        if (!row || typeof row !== 'object' || !bundle || typeof bundle !== 'object')
+        {
+            return;
+        }
+
+        row.Notes = Array.isArray(bundle.notes) ? bundle.notes : [];
+        row.Notes_Search = String(bundle.notes_search || '');
+        row.Memos_Loaded = bundle.memos_loaded === true;
+        delete row.__memoValues;
+    }
+
+    function applyMemosResponseToRows (memosByRowKey)
+    {
+        if (!memosByRowKey || typeof memosByRowKey !== 'object')
+        {
+            return;
+        }
+
+        for (const rowKey of Object.keys(memosByRowKey))
+        {
+            const bundle = memosByRowKey[rowKey];
+            const row = rowsByKey.get(rowKey);
+            if (!row)
+            {
+                continue;
+            }
+
+            applyMemosBundleToRow(row, bundle);
+        }
+    }
+
+    async function fetchWorkorderMemos (targetRows)
+    {
+        const refs = [];
+        for (const row of targetRows)
+        {
+            if (!row || typeof row !== 'object')
+            {
+                continue;
+            }
+
+            const ref = buildWorkorderMemoRowRef(row);
+            if (ref.row_key === '')
+            {
+                continue;
+            }
+
+            refs.push(ref);
+        }
+
+        if (refs.length === 0)
+        {
+            return {};
+        }
+
+        const response = await fetch(loadWorkorderMemosUrl, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json',
+                Accept: 'application/json'
+            },
+            body: JSON.stringify({
+                company: String(payload.company || ''),
+                cost_center: loadedCostCenter,
+                rows: refs
+            })
+        });
+
+        const body = await response.json();
+        if (!response.ok || !body || body.ok !== true)
+        {
+            const errorText = body && body.error ? body.error : ('HTTP ' + response.status);
+            throw new Error(errorText);
+        }
+
+        return body.memos_by_row_key && typeof body.memos_by_row_key === 'object'
+            ? body.memos_by_row_key
+            : {};
+    }
+
+    async function fetchAndApplyWorkorderMemos (targetRows)
+    {
+        const pendingRows = targetRows.filter(function (row)
+        {
+            return row && typeof row === 'object' && !rowMemosAreCached(row);
+        });
+
+        if (pendingRows.length === 0)
+        {
+            return;
+        }
+
+        const memosByRowKey = await fetchWorkorderMemos(pendingRows);
+        applyMemosResponseToRows(memosByRowKey);
+    }
+
+    async function ensureRowMemosLoaded (row)
+    {
+        if (!row || typeof row !== 'object' || rowMemosAreCached(row))
+        {
+            return row;
+        }
+
+        const rowKey = String(row.Row_Key || '').trim();
+        if (rowKey === '')
+        {
+            return row;
+        }
+
+        if (memoFetchInFlight.has(rowKey))
+        {
+            await memoFetchInFlight.get(rowKey);
+
+            return row;
+        }
+
+        const promise = fetchAndApplyWorkorderMemos([row]);
+        memoFetchInFlight.set(rowKey, promise);
+
+        try
+        {
+            await promise;
+        }
+        finally
+        {
+            memoFetchInFlight.delete(rowKey);
+        }
+
+        return row;
+    }
+
+    function buildNotesPartsForRow (row, labelFilterSet)
+    {
+        const parts = Array.isArray(row.Notes) ? row.Notes : [];
+
+        if (!labelFilterSet || !(labelFilterSet instanceof Set) || labelFilterSet.size === 0)
+        {
+            return parts;
+        }
+
+        return parts.filter(function (part)
+        {
+            const label = String((part && part.label) || '').trim();
+
+            return labelFilterSet.has(label);
+        });
+    }
+
+    function showNotesModalLoading (message)
+    {
+        if (!notesBody)
+        {
+            return;
+        }
+
+        if (notesModalTitle)
+        {
+            notesModalTitle.textContent = 'Notities';
+        }
+
+        notesBody.innerHTML = '';
+        const loading = document.createElement('div');
+        loading.className = 'notes-section-text';
+        loading.textContent = message || 'Memo laden...';
+        notesBody.appendChild(loading);
+        notesOverlay.style.display = '';
+    }
+
+    async function openNotesModalForRow (row, labelFilterSet)
+    {
+        showNotesModalLoading('Memo laden...');
+
+        try
+        {
+            await ensureRowMemosLoaded(row);
+
+            const rowKey = String(row.Row_Key || '').trim();
+            if (rowKey !== '' && rowDomByKey.has(rowKey))
+            {
+                replaceWorkorderRowTr(rowKey, row);
+            }
+
+            openNotesModal(buildNotesPartsForRow(row, labelFilterSet));
+        }
+        catch (memoError)
+        {
+            if (!notesBody)
+            {
+                return;
+            }
+
+            notesBody.innerHTML = '';
+            const error = document.createElement('div');
+            error.className = 'notes-section-text';
+            error.textContent = 'Memo laden mislukt: ' + String(memoError && memoError.message ? memoError.message : memoError);
+            notesBody.appendChild(error);
+            notesOverlay.style.display = '';
+        }
+    }
+
     function openNotesModal (parts)
     {
         if (!notesBody)
@@ -3493,15 +3902,15 @@
         rowAnimationObserver.observe(tr);
     }
 
-    function shouldContinueHistoryLoading (monthScan, month)
+    function shouldContinueHistoryLoading (monthScan, period)
     {
-        if (!month || !/^\d{4}-\d{2}$/.test(month))
+        if (!period || !/^\d{4}-W\d{2}$/.test(period))
         {
             return false;
         }
 
         const stopBefore = String((monthScan && monthScan.stop_before_month) || '').trim();
-        if (stopBefore !== '' && month < stopBefore)
+        if (stopBefore !== '' && period < stopBefore)
         {
             return false;
         }
@@ -3575,7 +3984,16 @@
             rowLoadStates.set(normalizedKey, 'loading');
         }
 
-        renderRows();
+        refreshRowLoadStatesDom(rowKeys);
+        if (!usesIncrementalRowRendering() || rowKeys.some(function (rowKey)
+        {
+            const normalizedKey = String(rowKey || '').trim();
+            return normalizedKey !== '' && pendingCachedRowKeys.has(normalizedKey) && !rowDomByKey.has(normalizedKey);
+        }))
+        {
+            renderRows();
+        }
+
         refreshStatusFilters();
     }
 
@@ -3607,7 +4025,15 @@
             return;
         }
 
-        renderRows();
+        refreshRowLoadStatesDom(normalizedKeys);
+        if (!usesIncrementalRowRendering() || normalizedKeys.some(function (normalizedKey)
+        {
+            return !rowDomByKey.has(normalizedKey);
+        }))
+        {
+            renderRows();
+        }
+
         refreshStatusFilters();
 
         setTimeout(function ()
@@ -3618,7 +4044,12 @@
                 pendingCachedRowKeys.delete(normalizedKey);
             }
 
-            renderRows();
+            refreshRowLoadStatesDom(normalizedKeys);
+            if (!usesIncrementalRowRendering())
+            {
+                renderRows();
+            }
+
             refreshStatusFilters();
         }, 620);
     }
@@ -3691,27 +4122,46 @@
         return Number(left || 0) + Number(right || 0);
     }
 
-    function replaceMonthRowIntoExisting (existing, monthRow)
+    function preserveExistingMemosOnMerge (existing, incoming)
     {
-        const rowKey = existing.Row_Key;
-        Object.assign(existing, monthRow);
-        if (rowKey)
+        if (!existing || typeof existing !== 'object' || !incoming || typeof incoming !== 'object')
         {
-            existing.Row_Key = rowKey;
+            return null;
         }
+
+        if (incoming.Memos_Loaded === true)
+        {
+            return null;
+        }
+
+        if (!rowMemosAreCached(existing))
+        {
+            return null;
+        }
+
+        return {
+            Notes: existing.Notes,
+            Notes_Search: existing.Notes_Search,
+            Memos_Loaded: existing.Memos_Loaded
+        };
     }
 
-    function mergeMonthRowIntoExisting (existing, monthRow)
+    function refreshWeekRowIntoExisting (existing, monthRow)
     {
-        existing.Actual_Costs = mergeFinanceAmount(existing.Actual_Costs, monthRow.Actual_Costs);
-        existing.Total_Revenue = mergeFinanceAmount(existing.Total_Revenue, monthRow.Total_Revenue);
-        existing.Actual_Total = existing.Total_Revenue - existing.Actual_Costs;
+        const preservedFinance = {
+            Actual_Costs: existing.Actual_Costs,
+            Total_Revenue: existing.Total_Revenue,
+            Actual_Total: existing.Actual_Total,
+            Project_Actual_Costs: existing.Project_Actual_Costs,
+            Project_Total_Revenue: existing.Project_Total_Revenue
+        };
+        const preservedMemos = preserveExistingMemosOnMerge(existing, monthRow);
 
         const copyFields = [
             'No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No',
             'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description',
-            'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'Notes', 'Notes_Search',
-            'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key', 'Invoice_Id', 'Invoice_Ids'
+            'Customer_Name', 'Cost_Center', 'Status', 'Document_Status',
+            'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key', 'Invoice_Id', 'Invoice_Ids', 'Bc_No'
         ];
 
         for (const field of copyFields)
@@ -3728,6 +4178,93 @@
             }
 
             existing[field] = value;
+        }
+
+        existing.Actual_Costs = preservedFinance.Actual_Costs;
+        existing.Total_Revenue = preservedFinance.Total_Revenue;
+        existing.Actual_Total = preservedFinance.Actual_Total;
+        existing.Project_Actual_Costs = preservedFinance.Project_Actual_Costs;
+        existing.Project_Total_Revenue = preservedFinance.Project_Total_Revenue;
+
+        if (preservedMemos)
+        {
+            existing.Notes = preservedMemos.Notes;
+            existing.Notes_Search = preservedMemos.Notes_Search;
+            existing.Memos_Loaded = preservedMemos.Memos_Loaded;
+            delete existing.__memoValues;
+        }
+        else if (monthRow.Memos_Loaded === true)
+        {
+            existing.Notes = Array.isArray(monthRow.Notes) ? monthRow.Notes : [];
+            existing.Notes_Search = String(monthRow.Notes_Search || '');
+            existing.Memos_Loaded = true;
+            delete existing.__memoValues;
+        }
+    }
+
+    function replaceMonthRowIntoExisting (existing, monthRow)
+    {
+        const rowKey = existing.Row_Key;
+        const preservedMemos = preserveExistingMemosOnMerge(existing, monthRow);
+        Object.assign(existing, monthRow);
+        if (rowKey)
+        {
+            existing.Row_Key = rowKey;
+        }
+
+        if (preservedMemos)
+        {
+            existing.Notes = preservedMemos.Notes;
+            existing.Notes_Search = preservedMemos.Notes_Search;
+            existing.Memos_Loaded = preservedMemos.Memos_Loaded;
+            delete existing.__memoValues;
+        }
+    }
+
+    function mergeMonthRowIntoExisting (existing, monthRow)
+    {
+        existing.Actual_Costs = mergeFinanceAmount(existing.Actual_Costs, monthRow.Actual_Costs);
+        existing.Total_Revenue = mergeFinanceAmount(existing.Total_Revenue, monthRow.Total_Revenue);
+        existing.Actual_Total = existing.Total_Revenue - existing.Actual_Costs;
+
+        const preservedMemos = preserveExistingMemosOnMerge(existing, monthRow);
+
+        const copyFields = [
+            'No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No',
+            'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description',
+            'Customer_Name', 'Cost_Center', 'Status', 'Document_Status',
+            'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key', 'Invoice_Id', 'Invoice_Ids', 'Bc_No'
+        ];
+
+        for (const field of copyFields)
+        {
+            const value = monthRow[field];
+            if (value === null || value === undefined)
+            {
+                continue;
+            }
+
+            if (typeof value === 'string' && value.trim() === '')
+            {
+                continue;
+            }
+
+            existing[field] = value;
+        }
+
+        if (preservedMemos)
+        {
+            existing.Notes = preservedMemos.Notes;
+            existing.Notes_Search = preservedMemos.Notes_Search;
+            existing.Memos_Loaded = preservedMemos.Memos_Loaded;
+            delete existing.__memoValues;
+        }
+        else if (monthRow.Memos_Loaded === true)
+        {
+            existing.Notes = Array.isArray(monthRow.Notes) ? monthRow.Notes : [];
+            existing.Notes_Search = String(monthRow.Notes_Search || '');
+            existing.Memos_Loaded = true;
+            delete existing.__memoValues;
         }
     }
 
@@ -3753,6 +4290,8 @@
         }
 
         const isReplace = Boolean(options && options.replace);
+        const isRefresh = Boolean(options && options.refresh);
+        const resetTotals = Boolean(options && options.resetTotals);
 
         const chunkInvoiceDetails = chunk.invoice_details_by_id;
         if (chunkInvoiceDetails && typeof chunkInvoiceDetails === 'object')
@@ -3763,7 +4302,7 @@
         mergeProjectPostenMap(projectPostenRowsByProject, chunk.projectposten_rows_by_project);
         mergeProjectPostenMap(projectPostenRowsByProjectAndWorkorder, chunk.projectposten_rows_by_project_and_workorder);
 
-        if (isReplace)
+        if (resetTotals)
         {
             for (const key of Object.keys(cumulativeProjectTotals))
             {
@@ -3771,7 +4310,10 @@
             }
         }
 
-        addCumulativeProjectTotals(chunk.project_totals_by_job);
+        if (!isRefresh)
+        {
+            addCumulativeProjectTotals(chunk.project_totals_by_job);
+        }
 
         const monthRows = Array.isArray(chunk.rows) ? chunk.rows : [];
         for (const monthRow of monthRows)
@@ -3785,7 +4327,11 @@
             const existing = rowsByKey.get(rowKey);
             if (existing)
             {
-                if (isReplace)
+                if (isRefresh)
+                {
+                    refreshWeekRowIntoExisting(existing, monthRow);
+                }
+                else if (isReplace)
                 {
                     replaceMonthRowIntoExisting(existing, monthRow);
                 }
@@ -3804,10 +4350,134 @@
         applyCumulativeProjectTotalsToRows();
         sortRowsInPlace();
         renderHeader();
-        renderRows();
-        updateSummaryCount();
+        applyChunkRowsToDom(monthRows);
         refreshStatusFilters();
         accumulateLoadStats(chunk.load_meta);
+    }
+
+    function yieldToUi ()
+    {
+        return new Promise(function (resolve)
+        {
+            requestAnimationFrame(function ()
+            {
+                requestAnimationFrame(resolve);
+            });
+        });
+    }
+
+    function previousIsoYearWeek (yearWeek)
+    {
+        const match = /^(\d{4})-W(\d{2})$/.exec(String(yearWeek || '').trim());
+        if (!match)
+        {
+            return null;
+        }
+
+        const year = Number(match[1]);
+        const week = Number(match[2]);
+        const monday = isoWeekToUtcDate(year, week);
+        if (!monday)
+        {
+            return null;
+        }
+
+        monday.setUTCDate(monday.getUTCDate() - 7);
+
+        return dateToIsoYearWeek(monday);
+    }
+
+    function isoWeekToUtcDate (year, week)
+    {
+        const jan4 = new Date(Date.UTC(year, 0, 4));
+        const dayOfWeek = jan4.getUTCDay() || 7;
+        const mondayWeek1 = new Date(jan4);
+        mondayWeek1.setUTCDate(jan4.getUTCDate() - dayOfWeek + 1);
+        const monday = new Date(mondayWeek1);
+        monday.setUTCDate(mondayWeek1.getUTCDate() + (week - 1) * 7);
+
+        return monday;
+    }
+
+    function dateToIsoYearWeek (date)
+    {
+        const utcDate = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+        const dayOfWeek = utcDate.getUTCDay() || 7;
+        utcDate.setUTCDate(utcDate.getUTCDate() + 4 - dayOfWeek);
+        const isoYear = utcDate.getUTCFullYear();
+        const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+        const week = Math.ceil((((utcDate - yearStart) / 86400000) + 1) / 7);
+
+        return String(isoYear) + '-W' + String(week).padStart(2, '0');
+    }
+
+    function countIsoWeeksInLoadRange (startWeek, stopBeforeWeek)
+    {
+        let count = 0;
+        let week = String(startWeek || '').trim();
+        let safety = 0;
+
+        while (week && safety < 400)
+        {
+            if (stopBeforeWeek && week < stopBeforeWeek)
+            {
+                break;
+            }
+
+            count++;
+            week = previousIsoYearWeek(week);
+            safety++;
+        }
+
+        return count;
+    }
+
+    function resolveHistoryWeeksTotal (monthScan)
+    {
+        const stopBefore = String((monthScan && monthScan.stop_before_month) || '').trim();
+        if (!stopBefore)
+        {
+            return historyWeeksTotal;
+        }
+
+        const currentWeek = typeof asyncLoadConfig.current_week === 'string'
+            ? asyncLoadConfig.current_week
+            : (typeof asyncLoadConfig.current_month === 'string' ? asyncLoadConfig.current_month : null);
+        if (!currentWeek)
+        {
+            return historyWeeksTotal;
+        }
+
+        const total = countIsoWeeksInLoadRange(currentWeek, stopBefore);
+
+        return total > 0 ? total : historyWeeksTotal;
+    }
+
+    function formatHistoryLoadProgressSuffix (monthScan, weeksCompleted, isFirstWeek)
+    {
+        if (isFirstWeek)
+        {
+            return '';
+        }
+
+        const totalWeeks = resolveHistoryWeeksTotal(monthScan);
+        if (!totalWeeks || totalWeeks <= 0)
+        {
+            return '';
+        }
+
+        const percent = Math.min(100, Math.round((weeksCompleted / totalWeeks) * 100));
+
+        return ' (' + String(percent) + '%)';
+    }
+
+    function buildHistoryLoadNote (weekToLoad, monthScan, weeksCompleted, isFirstWeek)
+    {
+        const prefix = isFirstWeek
+            ? ('Huidige week laden: ' + weekToLoad + '...')
+            : ('Oudere week laden: ' + weekToLoad + '...');
+
+        return prefix + formatHistoryLoadProgressSuffix(monthScan, weeksCompleted, isFirstWeek);
     }
 
     function isRetryableODataError (message)
@@ -3837,14 +4507,14 @@
         });
     }
 
-    async function fetchHistoryMonthWithRetry (yearMonth, attempt)
+    async function fetchHistoryWeekWithRetry (yearWeek, attempt)
     {
         const maxAttempts = 4;
         const currentAttempt = Number(attempt || 1);
 
         try
         {
-            return await fetchHistoryMonth(yearMonth);
+            return await fetchHistoryWeek(yearWeek);
         }
         catch (loadError)
         {
@@ -3864,17 +4534,17 @@
             );
             await waitForMs(delayMs);
 
-            return fetchHistoryMonthWithRetry(yearMonth, currentAttempt + 1);
+            return fetchHistoryWeekWithRetry(yearWeek, currentAttempt + 1);
         }
     }
 
-    function fetchHistoryMonth (yearMonth)
+    function fetchHistoryWeek (yearWeek)
     {
         const params = new URLSearchParams();
         params.set('action', 'load_month');
         params.set('company', String(payload.company || ''));
         params.set('cost_center', loadedCostCenter);
-        params.set('year_month', yearMonth);
+        params.set('year_week', yearWeek);
         params.set('invoice_filter', invoiceFilter);
 
         return fetch('index.php?' + params.toString(), {
@@ -3900,44 +4570,47 @@
 
     async function startIncrementalMonthLoading ()
     {
-        const currentMonth = typeof asyncLoadConfig.current_month === 'string' ? asyncLoadConfig.current_month : null;
-        if (!asyncLoadConfig.enabled || historyLoadRunning || !currentMonth)
+        const currentWeek = typeof asyncLoadConfig.current_week === 'string'
+            ? asyncLoadConfig.current_week
+            : (typeof asyncLoadConfig.current_month === 'string' ? asyncLoadConfig.current_month : null);
+        if (!asyncLoadConfig.enabled || historyLoadRunning || !currentWeek)
         {
             return;
         }
 
         historyLoadRunning = true;
-        const bootMonthPreloaded = asyncLoadConfig.boot_month_preloaded === true;
-        let monthToLoad = bootMonthPreloaded
-            ? (typeof asyncLoadConfig.next_month === 'string' ? asyncLoadConfig.next_month : null)
-            : currentMonth;
-        let isFirstMonth = !bootMonthPreloaded;
+        let weekToLoad = currentWeek;
+        let isFirstWeek = true;
+        let weeksCompleted = 0;
 
         try
         {
-            while (monthToLoad && (isFirstMonth || shouldContinueHistoryLoading(monthScanState, monthToLoad)))
+            while (weekToLoad && (isFirstWeek || shouldContinueHistoryLoading(monthScanState, weekToLoad)))
             {
-                const monthMeta = monthScanState.months && monthScanState.months[monthToLoad]
-                    ? monthScanState.months[monthToLoad]
+                const weekMeta = monthScanState.months && monthScanState.months[weekToLoad]
+                    ? monthScanState.months[weekToLoad]
                     : null;
-                const expectedRowKeys = monthMeta && Array.isArray(monthMeta.row_keys) ? monthMeta.row_keys : [];
+                const expectedRowKeys = weekMeta && Array.isArray(weekMeta.row_keys) ? weekMeta.row_keys : [];
                 if (expectedRowKeys.length > 0)
                 {
                     markRowsLoading(expectedRowKeys);
                 }
 
-                updateHistoryLoadNote(
-                    isFirstMonth
-                        ? ('Huidige maand laden: ' + monthToLoad + '...')
-                        : ('Oudere maand laden: ' + monthToLoad + '...')
-                );
+                updateHistoryLoadNote(buildHistoryLoadNote(weekToLoad, monthScanState, weeksCompleted, isFirstWeek));
 
-                const chunk = await fetchHistoryMonthWithRetry(monthToLoad);
+                const chunk = await fetchHistoryWeekWithRetry(weekToLoad);
                 monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
+                historyWeeksTotal = resolveHistoryWeeksTotal(monthScanState);
 
                 if (!chunk.skipped)
                 {
-                    mergeMonthChunk(chunk, { replace: isFirstMonth });
+                    const useCacheRefresh = isFirstWeek && loadStatsFromCache > 0;
+                    mergeMonthChunk(chunk, {
+                        replace: isFirstWeek && !useCacheRefresh,
+                        refresh: useCacheRefresh,
+                        resetTotals: isFirstWeek && loadStatsFromCache === 0
+                    });
+                    await yieldToUi();
                 }
 
                 const completedKeys = Array.isArray(chunk.row_keys) ? chunk.row_keys : [];
@@ -3946,19 +4619,26 @@
                     markRowsComplete(completedKeys);
                 }
 
+                weeksCompleted++;
+                if (!isFirstWeek)
+                {
+                    updateHistoryLoadNote(buildHistoryLoadNote(weekToLoad, monthScanState, weeksCompleted, false));
+                }
+
                 if (!chunk.should_continue)
                 {
                     break;
                 }
 
-                monthToLoad = chunk.next_month || null;
-                nextHistoryMonth = monthToLoad;
-                isFirstMonth = false;
+                weekToLoad = chunk.next_week || chunk.next_month || null;
+                nextHistoryMonth = weekToLoad;
+                isFirstWeek = false;
+                await yieldToUi();
             }
         }
         catch (historyError)
         {
-            updateHistoryLoadNote('Fout bij laden maanden: ' + String(historyError && historyError.message ? historyError.message : historyError));
+            updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             historyLoadRunning = false;
             return;
         }

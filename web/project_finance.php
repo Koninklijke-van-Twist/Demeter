@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/finance_calculations.php';
+require_once __DIR__ . '/bc_fetch/odata_select.php';
 
 const SAP_IMPORT_NOS = [
     '800001',
@@ -93,13 +94,13 @@ class ProjectFinanceService
             'invoice_sources' => [
                 [
                     'entity' => 'SalesInvoiceLines',
-                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No,Type',
+                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
                     'amount_field' => 'Amount',
                     'amount_incl_field' => 'Amount_Including_VAT',
                 ],
                 [
                     'entity' => 'SalesLines',
-                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No,Type',
+                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No',
                     'amount_field' => 'Line_Amount',
                     'amount_incl_field' => 'Line_Amount',
                 ],
@@ -481,22 +482,7 @@ class ProjectFinanceService
         $totalCostField = 'Total_Cost';
         $lineAmountField = 'Line_Amount';
 
-        $discoveryFields = [];
-        if (function_exists('bc_fetch_projectposten_discovery_fields')) {
-            $discoveryFields = bc_fetch_projectposten_discovery_fields();
-        }
-
-        $selectFields = array_values(array_unique(array_filter(array_merge(
-            [$projectKeyField, $workorderKeyField, $dateField, $entryTypeField, $typeField, $noField, $descriptionField, $totalCostField, $lineAmountField],
-            is_array($projectCostSource['fields'] ?? null) ? $projectCostSource['fields'] : [],
-            is_array($projectRevenueSource['fields'] ?? null) ? $projectRevenueSource['fields'] : [],
-            is_array($workorderCostSource['fields'] ?? null) ? $workorderCostSource['fields'] : [],
-            is_array($workorderRevenueSource['fields'] ?? null) ? $workorderRevenueSource['fields'] : [],
-            $discoveryFields,
-            ['Job_Task_No']
-        ), static function ($field): bool {
-            return is_string($field) && trim($field) !== '';
-        })));
+        $selectFields = bc_fetch_projectposten_finance_select_fields();
 
         $queryFilter = $dateField . ' ge ' . $fromDate . ' and ' . $dateField . ' lt ' . $toDateExclusive;
 
