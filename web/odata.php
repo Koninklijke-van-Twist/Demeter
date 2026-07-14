@@ -1750,7 +1750,19 @@ function injectTimerHtml(array $options = []): string
             async function clearCacheAll()
             {
                 const message = 'Dit verwijderd de gehele cache. Wanneer u de pagina hierna opnieuw laad, kan dat lang duren. Weet u het zeker?';
-                if (!window.confirm(message))
+                if (!window.DemeterModal)
+                {
+                    return;
+                }
+
+                const confirmed = await window.DemeterModal.confirm({
+                    title: 'Cache wissen',
+                    message: message,
+                    confirmText: 'Wissen',
+                    cancelText: 'Annuleren',
+                    danger: true
+                });
+                if (!confirmed)
                 {
                     return;
                 }

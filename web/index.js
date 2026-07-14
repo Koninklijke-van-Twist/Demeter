@@ -14,6 +14,7 @@
     const invoiceFilterSelect = document.getElementById('invoiceFilter');
     const costCenterSelect = document.getElementById('costCenterSelect');
     const loadProgressTokenInput = document.getElementById('loadProgressToken');
+    const demeterModal = window.DemeterModal;
     const payload = window.workorderOverviewData || {};
     let rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
     const invoiceDetailsById = payload && typeof payload.invoice_details_by_id === 'object' && payload.invoice_details_by_id !== null
@@ -288,7 +289,13 @@
             .catch(function (error)
             {
                 console.error(error);
-                alert('Export mislukt.');
+                if (demeterModal)
+                {
+                    demeterModal.alert({
+                        title: 'Export mislukt',
+                        message: 'Het exporteren naar Excel is mislukt.'
+                    });
+                }
             })
             .finally(function ()
             {
@@ -602,16 +609,48 @@
                         return;
                     }
 
-                    const confirmed = window.confirm(
-                        'Ververs Nu haalt alle gegevens opnieuw op uit Business Central en schrijft ze naar cache. Dit kan enkele minuten duren. Doorgaan?'
-                    );
-                    if (!confirmed)
+                    if (controlsForm.dataset.refreshConfirmed === '1')
                     {
-                        event.preventDefault();
+                        delete controlsForm.dataset.refreshConfirmed;
+                        startPageLoaderProgress('Gegevens verversen...');
                         return;
                     }
 
-                    startPageLoaderProgress('Gegevens verversen...');
+                    event.preventDefault();
+
+                    if (!demeterModal)
+                    {
+                        return;
+                    }
+
+                    demeterModal.confirm({
+                        title: 'Ververs Nu',
+                        message: 'Ververs Nu haalt alle gegevens opnieuw op uit Business Central en schrijft ze naar cache. Dit kan enkele minuten duren. Doorgaan?',
+                        confirmText: 'Doorgaan',
+                        cancelText: 'Annuleren'
+                    }).then(function (confirmed)
+                    {
+                        if (!confirmed || !controlsForm)
+                        {
+                            return;
+                        }
+
+                        controlsForm.dataset.refreshConfirmed = '1';
+                        startPageLoaderProgress('Gegevens verversen...');
+                        if (typeof controlsForm.requestSubmit === 'function' && refreshNowButton)
+                        {
+                            controlsForm.requestSubmit(refreshNowButton);
+                        }
+                        else if (refreshNowButton)
+                        {
+                            refreshNowButton.click();
+                        }
+                        else
+                        {
+                            controlsForm.submit();
+                        }
+                    });
+
                     return;
                 }
 
@@ -3048,7 +3087,13 @@
     {
         if (typeof ExcelJS === 'undefined')
         {
-            alert('Excel-export niet beschikbaar.');
+            if (demeterModal)
+            {
+                await demeterModal.alert({
+                    title: 'Export niet beschikbaar',
+                    message: 'Excel-export is niet beschikbaar.'
+                });
+            }
             return;
         }
 

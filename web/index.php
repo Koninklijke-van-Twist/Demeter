@@ -1904,6 +1904,7 @@ $initialData = [
 </head>
 
 <body>
+    <script src="demeter-modal.js?v=<?= urlencode((string) @filemtime(__DIR__ . '/demeter-modal.js')) ?>"></script>
     <div id="pageLoader" class="page-loader" aria-live="polite" aria-label="Laden">
         <div class="page-loader-content">
             <div class="page-loader-spinner" aria-hidden="true"></div>
