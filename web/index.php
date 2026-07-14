@@ -480,6 +480,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
 
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
+        odata_perf_log_reset();
         $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, null, [
             'cost_center' => $costCenter,
             'force_full' => $forceFull,
@@ -527,6 +528,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'projectposten_rows_by_project_and_workorder' => is_array($chunk['projectposten_rows_by_project_and_workorder'] ?? null) ? $chunk['projectposten_rows_by_project_and_workorder'] : [],
             'invoice_details_by_id' => is_array($chunk['invoice_details_by_id'] ?? null) ? $chunk['invoice_details_by_id'] : [],
             'load_meta' => is_array($chunk['load_meta'] ?? null) ? $chunk['load_meta'] : [],
+            'odata_perf_log' => odata_perf_log_get(),
         ]);
     } catch (Throwable $error) {
         demeter_send_json_response(odata_append_debug_to_payload([

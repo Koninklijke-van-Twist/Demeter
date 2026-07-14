@@ -18,6 +18,10 @@ if (!defined('DEMETER_ODATA_RETRY_BASE_DELAY_MS')) {
 if (!defined('DEMETER_ODATA_RETRY_MAX_DELAY_MS')) {
     define('DEMETER_ODATA_RETRY_MAX_DELAY_MS', 15000);
 }
+/** TEMP: log elke OData-call + duur voor performance-analyse (zet op false of env DEMETER_DEBUG_ODATA_PERF=0). */
+if (!defined('DEMETER_ODATA_PERF_LOG_ENABLED')) {
+    define('DEMETER_ODATA_PERF_LOG_ENABLED', true);
+}
 
 @ini_set('max_execution_time', (string) DEMETER_ODATA_MAX_EXECUTION_SECONDS);
 if (function_exists('set_time_limit')) {
@@ -140,6 +144,88 @@ function odata_append_debug_to_payload(array $payload): array
     return $payload;
 }
 
+function odata_perf_log_is_enabled(): bool
+{
+    if (!DEMETER_ODATA_PERF_LOG_ENABLED) {
+        return false;
+    }
+
+    $flag = getenv('DEMETER_DEBUG_ODATA_PERF');
+    if (is_string($flag) && in_array(strtolower(trim($flag)), ['0', 'false', 'no', 'off'], true)) {
+        return false;
+    }
+
+    return true;
+}
+
+function odata_perf_log_reset(): void
+{
+    $GLOBALS['demeter_odata_perf_log'] = [];
+}
+
+/**
+ * @return list<array{url: string, entity: string, duration_ms: int, cached: bool, rows: int}>
+ */
+function odata_perf_log_get(): array
+{
+    if (!odata_perf_log_is_enabled()) {
+        return [];
+    }
+
+    return is_array($GLOBALS['demeter_odata_perf_log'] ?? null) ? $GLOBALS['demeter_odata_perf_log'] : [];
+}
+
+function odata_perf_log_entity_from_url(string $url): string
+{
+    if (preg_match('#/ODataV4/Company\([^)]+\)/([^/?]+)#', $url, $matches) === 1) {
+        return rawurldecode($matches[1]);
+    }
+
+    return 'unknown';
+}
+
+function odata_perf_log_summarize_url(string $url): string
+{
+    if (preg_match('#/ODataV4/Company\([^)]+\)/([^?]+)\?(.+)$#', $url, $matches) === 1) {
+        return rawurldecode($matches[1]) . '?' . $matches[2];
+    }
+
+    if (preg_match('#/ODataV4/Company\([^)]+\)/([^/?]+)#', $url, $matches) === 1) {
+        return rawurldecode($matches[1]);
+    }
+
+    return strlen($url) > 240 ? substr($url, 0, 240) . '...' : $url;
+}
+
+function odata_perf_log_record(string $url, int $durationMs, bool $fromCache, int $rowCount = 0): void
+{
+    if (!odata_perf_log_is_enabled()) {
+        return;
+    }
+
+    if (!is_array($GLOBALS['demeter_odata_perf_log'] ?? null)) {
+        odata_perf_log_reset();
+    }
+
+    $entry = [
+        'url' => odata_perf_log_summarize_url($url),
+        'entity' => odata_perf_log_entity_from_url($url),
+        'duration_ms' => max(0, $durationMs),
+        'cached' => $fromCache,
+        'rows' => max(0, $rowCount),
+    ];
+    $GLOBALS['demeter_odata_perf_log'][] = $entry;
+
+    error_log(sprintf(
+        '[Demeter OData perf] %s%s %dms rows=%d url=%s',
+        $fromCache ? 'CACHE ' : '',
+        $entry['entity'],
+        $entry['duration_ms'],
+        $entry['rows'],
+        $entry['url']
+    ));
+}
+
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 {
     consolelog("Fetching $url\n");
@@ -160,6 +246,9 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
         $cached = read_cache_payload($cachePath, $ttlSeconds);
         if ($cached['valid']) {
             consolelog("Returning data.\n");
+            $cacheDurationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
+            odata_perf_log_record($url, $cacheDurationMs, true, count($cached['data']));
+
             return $cached['data'];
         }
 
@@ -187,6 +276,7 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
     consolelog("Fetched. Now caching...\n");
     $queryDurationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
     odata_stats_record_duration($url, $queryDurationMs);
+    odata_perf_log_record($url, $queryDurationMs, false, count($all));
     write_cache_json($cachePath, $all, $ttlSeconds, $url, $queryDurationMs);
     consolelog("Done, returning data.\n");
     return $all;

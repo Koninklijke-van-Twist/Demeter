@@ -4514,6 +4514,68 @@
         });
     }
 
+    function logDemeterODataPerf (chunk, contextLabel)
+    {
+        const entries = chunk && Array.isArray(chunk.odata_perf_log) ? chunk.odata_perf_log : [];
+        if (entries.length === 0)
+        {
+            return;
+        }
+
+        const label = String(contextLabel || 'week-load');
+        let networkMs = 0;
+        let cacheMs = 0;
+        let networkCalls = 0;
+        let cacheCalls = 0;
+
+        console.group('[Demeter OData perf] ' + label);
+        for (const entry of entries)
+        {
+            const durationMs = Number(entry && entry.duration_ms ? entry.duration_ms : 0);
+            const entity = entry && entry.entity ? String(entry.entity) : 'call';
+            const rowCount = entry && typeof entry.rows === 'number' ? entry.rows : null;
+            const summaryUrl = entry && entry.url ? String(entry.url) : '';
+            const fromCache = !!(entry && entry.cached);
+
+            if (fromCache)
+            {
+                cacheMs += durationMs;
+                cacheCalls++;
+            }
+            else
+            {
+                networkMs += durationMs;
+                networkCalls++;
+            }
+
+            const rowSuffix = rowCount !== null ? ' (' + String(rowCount) + ' rows)' : '';
+            console.log(
+                (fromCache ? '[cache] ' : '[network] ')
+                + entity
+                + ' — '
+                + String(durationMs)
+                + 'ms'
+                + rowSuffix,
+                summaryUrl
+            );
+        }
+
+        console.log(
+            'Totaal: '
+            + String(networkMs + cacheMs)
+            + 'ms — network: '
+            + String(networkMs)
+            + 'ms ('
+            + String(networkCalls)
+            + ' calls), cache: '
+            + String(cacheMs)
+            + 'ms ('
+            + String(cacheCalls)
+            + ' hits)'
+        );
+        console.groupEnd();
+    }
+
     function isRetryableODataError (message)
     {
         const normalized = String(message || '').toLowerCase();
@@ -4640,6 +4702,7 @@
                 updateHistoryLoadNote(buildHistoryLoadNote(weekToLoad, monthScanState, weeksCompleted, isFirstWeek));
 
                 const chunk = await fetchHistoryWeekWithRetry(weekToLoad);
+                logDemeterODataPerf(chunk, 'week ' + String(weekToLoad));
                 monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
                 historyWeeksTotal = resolveHistoryWeeksTotal(monthScanState);
 
