@@ -3237,7 +3237,9 @@
         if (!response.ok || !body || body.ok !== true)
         {
             const errorText = body && body.error ? body.error : ('HTTP ' + response.status);
-            throw new Error(errorText);
+            const apiError = createDemeterApiError(errorText, body, response.status);
+            logDemeterODataFailure('load_workorder_memos rows=' + String(refs.length), apiError);
+            throw apiError;
         }
 
         return body.memos_by_row_key && typeof body.memos_by_row_key === 'object'
@@ -3351,6 +3353,7 @@
         }
         catch (memoError)
         {
+            logDemeterODataFailure('memo modal', memoError);
             if (!notesBody)
             {
                 return;
@@ -4480,6 +4483,37 @@
         return prefix + formatHistoryLoadProgressSuffix(monthScan, weeksCompleted, isFirstWeek);
     }
 
+    function createDemeterApiError (message, body, responseStatus)
+    {
+        const error = new Error(String(message || 'Onbekende fout'));
+        if (body && typeof body.odata_debug === 'object' && body.odata_debug !== null)
+        {
+            error.odataDebug = body.odata_debug;
+        }
+
+        if (typeof responseStatus === 'number')
+        {
+            error.responseStatus = responseStatus;
+        }
+
+        return error;
+    }
+
+    function logDemeterODataFailure (contextLabel, error)
+    {
+        const debug = error && typeof error.odataDebug === 'object' && error.odataDebug !== null
+            ? error.odataDebug
+            : null;
+        const attempts = debug && Array.isArray(debug.attempts) ? debug.attempts : [];
+
+        console.error('[Demeter OData] ' + String(contextLabel || 'fout'), {
+            message: String(error && error.message ? error.message : error),
+            status: error && typeof error.responseStatus === 'number' ? error.responseStatus : null,
+            url: debug && debug.url ? debug.url : null,
+            attempts: attempts
+        });
+    }
+
     function isRetryableODataError (message)
     {
         const normalized = String(message || '').toLowerCase();
@@ -4518,6 +4552,11 @@
         }
         catch (loadError)
         {
+            logDemeterODataFailure(
+                'load_month week=' + String(yearWeek) + ' client_retry=' + String(currentAttempt),
+                loadError
+            );
+
             const errorMessage = String(loadError && loadError.message ? loadError.message : loadError);
             if (currentAttempt >= maxAttempts || !isRetryableODataError(errorMessage))
             {
@@ -4560,7 +4599,9 @@
                 if (!response.ok || !body || body.ok !== true)
                 {
                     const errorText = body && body.error ? body.error : ('HTTP ' + response.status);
-                    throw new Error(errorText);
+                    const apiError = createDemeterApiError(errorText, body, response.status);
+                    logDemeterODataFailure('load_month week=' + String(yearWeek), apiError);
+                    throw apiError;
                 }
 
                 return body;
@@ -4638,6 +4679,7 @@
         }
         catch (historyError)
         {
+            logDemeterODataFailure('load_month chain failed', historyError);
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             historyLoadRunning = false;
             return;

@@ -212,107 +212,35 @@ function bc_fetch_werkorder_row_key(array $row): string
 
 /**
  * @param list<array{job_no: string, job_task_no: string}> $pairs
- * @return array<string, list<string>>
+ * @return list<string>
  */
-function bc_fetch_group_task_nos_by_job_no(array $pairs): array
+function bc_fetch_unique_job_nos_from_pairs(array $pairs): array
 {
-    $grouped = [];
+    $jobNos = [];
     foreach ($pairs as $pair) {
         if (!is_array($pair)) {
             continue;
         }
 
         $jobNo = trim((string) ($pair['job_no'] ?? ''));
-        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
-        if ($jobNo === '' || $jobTaskNo === '') {
-            continue;
+        if ($jobNo !== '') {
+            $jobNos[$jobNo] = $jobNo;
         }
-
-        if (!isset($grouped[$jobNo])) {
-            $grouped[$jobNo] = [];
-        }
-
-        $grouped[$jobNo][$jobTaskNo] = $jobTaskNo;
     }
 
-    $normalized = [];
-    foreach ($grouped as $jobNo => $taskNos) {
-        $normalized[$jobNo] = array_values($taskNos);
-    }
-
-    return $normalized;
+    return array_values($jobNos);
 }
 
 /**
- * OData-filter voor job/task-paren: Job_No + Job_Task_No per project.
- *
- * @param list<array{job_no: string, job_task_no: string}> $pairs
+ * BC ondersteunt geen OR van samengestelde Job_No+Job_Task_No filters.
+ * Eén paar met een simpele AND-filter werkt wel.
  */
-function bc_fetch_build_odata_job_task_pairs_filter(array $pairs): string
+function bc_fetch_build_odata_single_pair_filter(string $jobNo, string $jobTaskNo): string
 {
-    $grouped = bc_fetch_group_task_nos_by_job_no($pairs);
-    if ($grouped === []) {
-        throw new InvalidArgumentException('Geen job/task-paren voor OData-filter.');
-    }
+    $escapedJobNo = str_replace("'", "''", trim($jobNo));
+    $escapedJobTaskNo = str_replace("'", "''", trim($jobTaskNo));
 
-    $jobClauses = [];
-    foreach ($grouped as $jobNo => $taskNos) {
-        $escapedJobNo = str_replace("'", "''", $jobNo);
-        if (count($taskNos) === 1) {
-            $escapedTaskNo = str_replace("'", "''", $taskNos[0]);
-            $jobClauses[] = "Job_No eq '" . $escapedJobNo . "' and Job_Task_No eq '" . $escapedTaskNo . "'";
-            continue;
-        }
-
-        $taskParts = [];
-        foreach ($taskNos as $taskNo) {
-            $escapedTaskNo = str_replace("'", "''", $taskNo);
-            $taskParts[] = "Job_Task_No eq '" . $escapedTaskNo . "'";
-        }
-
-        $jobClauses[] = "Job_No eq '" . $escapedJobNo . "' and (" . implode(' or ', $taskParts) . ')';
-    }
-
-    if (count($jobClauses) === 1) {
-        return $jobClauses[0];
-    }
-
-    return '(' . implode(' or ', $jobClauses) . ')';
-}
-
-/**
- * Chunkt job/task-paren op batches van maximaal N unieke Job_No waarden.
- *
- * @param list<array{job_no: string, job_task_no: string}> $pairs
- * @return list<list<array{job_no: string, job_task_no: string}>>
- */
-function bc_fetch_chunk_pairs_by_job_batch(array $pairs, int $maxJobNosPerChunk): array
-{
-    $maxJobNosPerChunk = max(1, $maxJobNosPerChunk);
-    $grouped = bc_fetch_group_task_nos_by_job_no($pairs);
-    if ($grouped === []) {
-        return [];
-    }
-
-    $jobNos = array_keys($grouped);
-    $chunks = [];
-    foreach (array_chunk($jobNos, $maxJobNosPerChunk) as $jobNoChunk) {
-        $batchPairs = [];
-        foreach ($jobNoChunk as $jobNo) {
-            foreach ($grouped[$jobNo] as $taskNo) {
-                $batchPairs[] = [
-                    'job_no' => $jobNo,
-                    'job_task_no' => $taskNo,
-                ];
-            }
-        }
-
-        if ($batchPairs !== []) {
-            $chunks[] = $batchPairs;
-        }
-    }
-
-    return $chunks;
+    return "Job_No eq '" . $escapedJobNo . "' and Job_Task_No eq '" . $escapedJobTaskNo . "'";
 }
 
 /**
@@ -507,8 +435,8 @@ function bc_fetch_fetch_workorder_status_by_pairs(string $company, array $pairs,
     $statusByPairKey = [];
     $select = bc_fetch_werkorders_status_select();
 
-    foreach (bc_fetch_chunk_pairs_by_job_batch($pairs, DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $pairBatch) {
-        $filter = bc_fetch_build_odata_job_task_pairs_filter($pairBatch);
+    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($pairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+        $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
         $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $select,
             '$filter' => $filter,
@@ -661,8 +589,8 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
     $allRows = [];
     $seenRowKeys = [];
 
-    foreach (bc_fetch_chunk_pairs_by_job_batch($normalizedPairs, DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $pairBatch) {
-        $filter = bc_fetch_build_odata_job_task_pairs_filter($pairBatch);
+    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($normalizedPairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+        $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
         $werkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $werkorderSelect,
             '$filter' => $filter,
@@ -690,12 +618,8 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
         }
     }
 
-    foreach (array_chunk($missingPairs, DEMETER_WORKORDER_PAIR_FALLBACK_BATCH_SIZE) as $fallbackBatch) {
-        if ($fallbackBatch === []) {
-            continue;
-        }
-
-        $filter = bc_fetch_build_odata_job_task_pairs_filter($fallbackBatch);
+    foreach ($missingPairs as $pair) {
+        $filter = bc_fetch_build_odata_single_pair_filter($pair['job_no'], $pair['job_task_no']);
         $pairWerkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $werkorderSelect,
             '$filter' => $filter,

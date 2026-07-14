@@ -55,6 +55,91 @@ function odata_get_active_load_progress_token(): string
     return trim((string) ($GLOBALS['demeter_active_load_progress_token'] ?? ''));
 }
 
+/**
+ * Houdt de laatste mislukte OData-call bij (voor API-foutresponses en logging).
+ *
+ * @return array{url: string, attempts: list<array{attempt: int, error: string, retryable: bool}>}
+ */
+function odata_error_context_get(): array
+{
+    $context = $GLOBALS['demeter_odata_error_context'] ?? null;
+    if (!is_array($context)) {
+        return [
+            'url' => '',
+            'attempts' => [],
+        ];
+    }
+
+    return [
+        'url' => trim((string) ($context['url'] ?? '')),
+        'attempts' => is_array($context['attempts'] ?? null) ? $context['attempts'] : [],
+    ];
+}
+
+function odata_error_context_begin_call(string $url): void
+{
+    $url = trim($url);
+    $context = odata_error_context_get();
+    if ($context['url'] !== $url) {
+        $GLOBALS['demeter_odata_error_context'] = [
+            'url' => $url,
+            'attempts' => [],
+        ];
+    }
+}
+
+function odata_error_context_record_attempt(string $url, Exception $error, int $attempt, bool $willRetry): void
+{
+    odata_error_context_begin_call($url);
+
+    $context = $GLOBALS['demeter_odata_error_context'];
+    if (!is_array($context)) {
+        return;
+    }
+
+    $context['attempts'][] = [
+        'attempt' => $attempt,
+        'error' => $error->getMessage(),
+        'retryable' => $willRetry,
+    ];
+    $GLOBALS['demeter_odata_error_context'] = $context;
+
+    error_log(sprintf(
+        '[Demeter OData] attempt %d url=%s error=%s%s',
+        $attempt,
+        $url,
+        $error->getMessage(),
+        $willRetry ? ' (retrying)' : ' (final)'
+    ));
+}
+
+function odata_error_context_clear_for_url(string $url): void
+{
+    $context = odata_error_context_get();
+    if ($context['url'] === trim($url)) {
+        $GLOBALS['demeter_odata_error_context'] = [
+            'url' => trim($url),
+            'attempts' => [],
+        ];
+    }
+}
+
+/**
+ * Voegt OData-debuginfo toe aan een API-foutpayload wanneer beschikbaar.
+ *
+ * @param array<string, mixed> $payload
+ * @return array<string, mixed>
+ */
+function odata_append_debug_to_payload(array $payload): array
+{
+    $context = odata_error_context_get();
+    if ($context['url'] !== '' || $context['attempts'] !== []) {
+        $payload['odata_debug'] = $context;
+    }
+
+    return $payload;
+}
+
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 {
     consolelog("Fetching $url\n");
@@ -144,18 +229,26 @@ function odata_get_json(string $url, array $auth): array
 {
     $maxAttempts = max(1, (int) DEMETER_ODATA_RETRY_MAX_ATTEMPTS);
     $lastError = null;
+    odata_error_context_begin_call($url);
 
     for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
         try {
-            return odata_get_json_once($url, $auth);
+            $result = odata_get_json_once($url, $auth);
+            odata_error_context_clear_for_url($url);
+
+            return $result;
         } catch (Exception $error) {
             $lastError = $error;
-            if ($attempt >= $maxAttempts || !odata_exception_is_retryable($error)) {
+            $willRetry = $attempt < $maxAttempts && odata_exception_is_retryable($error);
+            odata_error_context_record_attempt($url, $error, $attempt, $willRetry);
+
+            if (!$willRetry) {
+                consolelog("OData failed (final) for {$url}: {$error->getMessage()}\n");
                 throw $error;
             }
 
             $delayMs = odata_retry_delay_ms($attempt);
-            consolelog("OData retry {$attempt}/{$maxAttempts} after {$delayMs}ms for {$url}\n");
+            consolelog("OData retry {$attempt}/{$maxAttempts} after {$delayMs}ms for {$url}: {$error->getMessage()}\n");
 
             $activeProgressToken = odata_get_active_load_progress_token();
             if ($activeProgressToken !== '' && function_exists('odata_load_progress_set_current_call')) {

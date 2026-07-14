@@ -529,10 +529,10 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'load_meta' => is_array($chunk['load_meta'] ?? null) ? $chunk['load_meta'] : [],
         ]);
     } catch (Throwable $error) {
-        demeter_send_json_response([
+        demeter_send_json_response(odata_append_debug_to_payload([
             'ok' => false,
             'error' => $error->getMessage(),
-        ], 500);
+        ]), 500);
     }
 }
 
@@ -568,10 +568,10 @@ if (($_GET['action'] ?? '') === 'load_workorder_memos') {
             'memos_by_row_key' => $memosByRowKey,
         ]);
     } catch (Throwable $error) {
-        demeter_send_json_response([
+        demeter_send_json_response(odata_append_debug_to_payload([
             'ok' => false,
             'error' => $error->getMessage(),
-        ], 500);
+        ]), 500);
     }
 }
 
