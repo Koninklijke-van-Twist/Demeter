@@ -200,11 +200,6 @@
 
     initializePageLoaderHandlers();
 
-    if (cacheMeta.is_refreshing === true)
-    {
-        startPageLoaderProgress('Gegevens verversen...');
-    }
-
     if (!app)
     {
         hidePageLoader();
@@ -567,7 +562,6 @@
         }
 
         updateHistoryLoadNote('Memo\'s ophalen...');
-        showPageLoader('Memo\'s ophalen...');
         const params = new URLSearchParams();
         params.set('action', 'refresh_all_memos');
         params.set('company', company);
@@ -598,7 +592,12 @@
         const redirectParams = new URLSearchParams(window.location.search);
         redirectParams.delete('refresh_now');
         redirectParams.delete('call_time_log_session');
+        stopPageLoaderProgress();
+        hidePageLoader();
+        updateHistoryLoadNote('');
+
         const redirectUrl = 'index.php?' + redirectParams.toString();
+        window.__demeterSuppressUnloadLoader = true;
         window.location.replace(redirectUrl);
     }
 
@@ -623,7 +622,6 @@
                     if (controlsForm.dataset.refreshConfirmed === '1')
                     {
                         delete controlsForm.dataset.refreshConfirmed;
-                        startPageLoaderProgress('Gegevens verversen...');
                         return;
                     }
 
@@ -647,7 +645,7 @@
                         }
 
                         controlsForm.dataset.refreshConfirmed = '1';
-                        startPageLoaderProgress('Gegevens verversen...');
+                        window.__demeterSuppressUnloadLoader = true;
                         if (typeof controlsForm.requestSubmit === 'function' && refreshNowButton)
                         {
                             controlsForm.requestSubmit(refreshNowButton);
@@ -712,6 +710,11 @@
 
         window.addEventListener('beforeunload', function ()
         {
+            if (window.__demeterSuppressUnloadLoader === true || asyncLoadConfig.enabled)
+            {
+                return;
+            }
+
             startPageLoaderProgress('Gegevens laden...');
         });
     }
@@ -1030,8 +1033,7 @@
                 text = String(progress.error || '').trim();
             }
 
-            showPageLoader(text);
-            applyPageLoaderProgressVisuals(percent, currentCallLabel);
+            applyLoadProgressToUi(text, percent, currentCallLabel);
         }
         catch (error)
         {
@@ -1039,8 +1041,52 @@
         }
     }
 
+    function applyLoadProgressToUi (text, percent, currentCallLabel)
+    {
+        if (asyncLoadConfig.enabled)
+        {
+            let noteText = text;
+            const callText = String(currentCallLabel || '').trim();
+            if (callText !== '')
+            {
+                noteText += ' — OData: ' + callText;
+            }
+
+            updateHistoryLoadNote(noteText);
+            return;
+        }
+
+        showPageLoader(text);
+        applyPageLoaderProgressVisuals(percent, currentCallLabel);
+    }
+
+    function startBackgroundLoadProgressPolling ()
+    {
+        const token = getPendingLoadProgressToken();
+        if (token === '')
+        {
+            return;
+        }
+
+        if (pageLoaderProgressRequestToken === token && pageLoaderProgressTimerId !== 0)
+        {
+            return;
+        }
+
+        stopPageLoaderProgress();
+        pageLoaderProgressRequestToken = token;
+        updatePageLoaderProgress();
+        pageLoaderProgressTimerId = window.setInterval(updatePageLoaderProgress, 700);
+    }
+
     function startPageLoaderProgress (defaultText)
     {
+        if (asyncLoadConfig.enabled)
+        {
+            startBackgroundLoadProgressPolling();
+            return;
+        }
+
         showPageLoader(defaultText);
         applyPageLoaderProgressVisuals(0, '');
 
@@ -1272,6 +1318,16 @@
     {
         if (!pageLoader)
         {
+            return;
+        }
+
+        if (asyncLoadConfig.enabled)
+        {
+            if (typeof text === 'string' && text.trim() !== '')
+            {
+                updateHistoryLoadNote(text);
+            }
+
             return;
         }
 
@@ -5170,7 +5226,9 @@
             return;
         }
 
+        hidePageLoader();
         historyLoadRunning = true;
+        startBackgroundLoadProgressPolling();
         let weekBatch = [currentWeek];
         let isFirstBatch = true;
         let weeksCompleted = 0;
@@ -5284,11 +5342,13 @@
         {
             logDemeterODataFailure('load_month chain failed', historyError);
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
+            stopPageLoaderProgress();
             historyLoadRunning = false;
             return;
         }
 
         updateHistoryLoadNote('');
+        stopPageLoaderProgress();
         historyLoadRunning = false;
     }
 
