@@ -628,6 +628,33 @@ if (($_GET['action'] ?? '') === 'refresh_all_memos') {
     }
 }
 
+if (($_GET['action'] ?? '') === 'forget_cost_center_cache') {
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+
+    try {
+        $company = trim((string) ($_GET['company'] ?? ''));
+        $costCenter = trim((string) ($_GET['cost_center'] ?? ''));
+
+        if ($company === '' || $costCenter === '') {
+            throw new InvalidArgumentException('Ongeldige parameters voor cache wissen.');
+        }
+
+        demeter_workorder_cost_center_cache_forget($company, $costCenter);
+
+        demeter_send_json_response([
+            'ok' => true,
+            'company' => $company,
+            'cost_center' => $costCenter,
+        ]);
+    } catch (Throwable $error) {
+        demeter_send_json_response(odata_append_debug_to_payload([
+            'ok' => false,
+            'error' => $error->getMessage(),
+        ]), 500);
+    }
+}
+
 function load_cost_center_setting(string $email): string
 {
     $parsed = load_user_settings_payload($email);
@@ -824,6 +851,7 @@ try {
         }
 
         save_user_settings($currentUserEmail, null, null, null, $selectedCostCenter);
+        demeter_cost_center_activity_record_view($selectedCompany, $selectedCostCenter, $currentUserEmail);
     }
 } catch (Throwable $error) {
     $errorMessage = $error->getMessage();
@@ -885,6 +913,7 @@ $initialData = [
     'layout_style' => $layoutStyleSetting,
     'keep_project_workorders_together' => $keepProjectWorkordersTogetherSetting,
     'save_user_settings_url' => 'index.php?action=save_user_settings',
+    'forget_cost_center_cache_url' => 'index.php?action=forget_cost_center_cache',
     'load_progress_status_url' => 'odata.php?action=load_progress',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
@@ -1233,6 +1262,28 @@ $initialData = [
             border-radius: 8px;
             padding: 6px 10px;
             cursor: pointer;
+        }
+
+        .nightly-stats-forget-btn {
+            border: 1px solid #cbd5e1;
+            background: #fff;
+            color: #475569;
+            border-radius: 6px;
+            padding: 4px 8px;
+            font: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .nightly-stats-forget-btn:hover:not(:disabled) {
+            background: #f8fafc;
+            border-color: #94a3b8;
+        }
+
+        .nightly-stats-forget-btn:disabled {
+            opacity: 0.55;
+            cursor: default;
         }
 
         .summary-note {

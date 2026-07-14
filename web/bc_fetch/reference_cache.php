@@ -28,6 +28,17 @@ function demeter_nightly_stats_path(): string
     return demeter_reference_cache_directory() . '/nightly_stats.json';
 }
 
+function demeter_cost_center_activity_path(): string
+{
+    return demeter_reference_cache_directory() . '/cost_center_activity.json';
+}
+
+/** Aantal dagen zonder UI-bezoek waarna de cache uit nightly wordt gehaald. */
+function demeter_cost_center_inactive_days_limit(): int
+{
+    return 90;
+}
+
 function demeter_reference_cache_ensure_directory(): bool
 {
     $directory = demeter_reference_cache_directory();
@@ -245,4 +256,190 @@ function demeter_workorder_cost_center_cache_is_populated(string $company, strin
     $workorders = $cachedState['workorders'] ?? null;
 
     return is_array($workorders) && $workorders !== [];
+}
+
+/**
+ * @return array<string, array<string, array{last_viewed_at: string, last_viewed_by: string|null}>>
+ */
+function demeter_cost_center_activity_defaults(): array
+{
+    return [
+        'entries' => [],
+    ];
+}
+
+/**
+ * @return array<string, array<string, array{last_viewed_at: string, last_viewed_by: string|null}>>
+ */
+function demeter_cost_center_activity_load(): array
+{
+    $path = demeter_cost_center_activity_path();
+    if (!is_file($path) || !is_readable($path)) {
+        return demeter_cost_center_activity_defaults();
+    }
+
+    $decoded = json_decode((string) file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return demeter_cost_center_activity_defaults();
+    }
+
+    $entries = is_array($decoded['entries'] ?? null) ? $decoded['entries'] : [];
+
+    return [
+        'entries' => $entries,
+    ];
+}
+
+/**
+ * @param array<string, array<string, array{last_viewed_at: string, last_viewed_by: string|null}>> $entries
+ */
+function demeter_cost_center_activity_save(array $entries): bool
+{
+    if (!demeter_reference_cache_ensure_directory()) {
+        return false;
+    }
+
+    $payload = [
+        'entries' => $entries,
+        'updated_at' => gmdate('c'),
+    ];
+
+    $json = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+
+    return is_string($json)
+        && file_put_contents(demeter_cost_center_activity_path(), $json, LOCK_EX) !== false;
+}
+
+function demeter_cost_center_activity_record_view(string $company, string $costCenter, ?string $viewedBy = null): void
+{
+    $company = trim($company);
+    $costCenter = trim($costCenter);
+    if ($company === '' || $costCenter === '') {
+        return;
+    }
+
+    $activity = demeter_cost_center_activity_load();
+    $entries = is_array($activity['entries'] ?? null) ? $activity['entries'] : [];
+    if (!isset($entries[$company]) || !is_array($entries[$company])) {
+        $entries[$company] = [];
+    }
+
+    $viewedBy = trim((string) $viewedBy);
+    $entries[$company][$costCenter] = [
+        'last_viewed_at' => gmdate('c'),
+        'last_viewed_by' => $viewedBy !== '' ? $viewedBy : null,
+    ];
+
+    demeter_cost_center_activity_save($entries);
+}
+
+function demeter_cost_center_activity_last_viewed_at(string $company, string $costCenter): ?string
+{
+    $company = trim($company);
+    $costCenter = trim($costCenter);
+    if ($company === '' || $costCenter === '') {
+        return null;
+    }
+
+    $activity = demeter_cost_center_activity_load();
+    $entries = is_array($activity['entries'] ?? null) ? $activity['entries'] : [];
+    $entry = $entries[$company][$costCenter] ?? null;
+    if (!is_array($entry)) {
+        return null;
+    }
+
+    $lastViewedAt = trim((string) ($entry['last_viewed_at'] ?? ''));
+
+    return $lastViewedAt !== '' ? $lastViewedAt : null;
+}
+
+function demeter_cost_center_activity_remove(string $company, string $costCenter): void
+{
+    $company = trim($company);
+    $costCenter = trim($costCenter);
+    if ($company === '' || $costCenter === '') {
+        return;
+    }
+
+    $activity = demeter_cost_center_activity_load();
+    $entries = is_array($activity['entries'] ?? null) ? $activity['entries'] : [];
+    if (!isset($entries[$company]) || !is_array($entries[$company])) {
+        return;
+    }
+
+    unset($entries[$company][$costCenter]);
+    if ($entries[$company] === []) {
+        unset($entries[$company]);
+    }
+
+    demeter_cost_center_activity_save($entries);
+}
+
+function demeter_cost_center_activity_is_stale(string $company, string $costCenter, ?int $maxInactiveDays = null): bool
+{
+    $maxInactiveDays = $maxInactiveDays ?? demeter_cost_center_inactive_days_limit();
+    if ($maxInactiveDays <= 0) {
+        return false;
+    }
+
+    $lastViewedAt = demeter_cost_center_activity_last_viewed_at($company, $costCenter);
+    if ($lastViewedAt === null) {
+        $lastViewedAt = demeter_workorder_cost_center_cache_updated_at($company, $costCenter);
+    }
+
+    if ($lastViewedAt === null) {
+        return false;
+    }
+
+    $ageHours = demeter_cache_age_hours($lastViewedAt);
+    if ($ageHours === null) {
+        return false;
+    }
+
+    return $ageHours >= ($maxInactiveDays * 24);
+}
+
+/**
+ * Verwijdert werkorder-cache en activiteit zodat nightly deze kostenplaats overslaat.
+ */
+function demeter_workorder_cost_center_cache_forget(string $company, string $costCenter): void
+{
+    demeter_workorder_state_cache_purge($company, $costCenter);
+    demeter_cost_center_activity_remove($company, $costCenter);
+}
+
+/**
+ * @return list<array{company: string, cost_center: string, last_viewed_at: string|null, reason: string}>
+ */
+function demeter_purge_stale_cost_center_caches(?int $maxInactiveDays = null): array
+{
+    $maxInactiveDays = $maxInactiveDays ?? demeter_cost_center_inactive_days_limit();
+    $purged = [];
+
+    foreach (demeter_workorder_state_cache_list_populated_pairs() as $pair) {
+        $company = trim((string) ($pair['company'] ?? ''));
+        $costCenter = trim((string) ($pair['cost_center'] ?? ''));
+        if ($company === '' || $costCenter === '') {
+            continue;
+        }
+
+        if (!demeter_cost_center_activity_is_stale($company, $costCenter, $maxInactiveDays)) {
+            continue;
+        }
+
+        $lastViewedAt = demeter_cost_center_activity_last_viewed_at($company, $costCenter);
+        if ($lastViewedAt === null) {
+            $lastViewedAt = demeter_workorder_cost_center_cache_updated_at($company, $costCenter);
+        }
+
+        demeter_workorder_cost_center_cache_forget($company, $costCenter);
+        $purged[] = [
+            'company' => $company,
+            'cost_center' => $costCenter,
+            'last_viewed_at' => $lastViewedAt,
+            'reason' => 'inactive_' . $maxInactiveDays . '_days',
+        ];
+    }
+
+    return $purged;
 }

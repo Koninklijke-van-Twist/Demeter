@@ -93,6 +93,9 @@
     const loadedLayoutStyle = normalizeLayoutStyle(payload.layout_style);
     const loadedKeepProjectWorkordersTogether = payload.keep_project_workorders_together !== false;
     const saveUserSettingsUrl = typeof payload.save_user_settings_url === 'string' ? payload.save_user_settings_url : 'index.php?action=save_user_settings';
+    const forgetCostCenterCacheUrl = typeof payload.forget_cost_center_cache_url === 'string'
+        ? payload.forget_cost_center_cache_url
+        : 'index.php?action=forget_cost_center_cache';
     const loadProgressStatusUrl = typeof payload.load_progress_status_url === 'string' ? payload.load_progress_status_url : 'odata.php?action=load_progress';
     const selectedMemoColumnKeys = new Set();
     for (const field of memoFields)
@@ -465,9 +468,111 @@
         if (body)
         {
             body.innerHTML = buildNightlyStatsTableHtml(nightlyStats);
+            bindNightlyStatsForgetButtons(body);
         }
 
         backdrop.classList.add('is-open');
+    }
+
+    function bindNightlyStatsForgetButtons (container)
+    {
+        if (!container || container.dataset.forgetBound === '1')
+        {
+            return;
+        }
+
+        container.dataset.forgetBound = '1';
+        container.addEventListener('click', function (event)
+        {
+            const button = event.target && event.target.closest
+                ? event.target.closest('.nightly-stats-forget-btn')
+                : null;
+            if (!button || button.disabled)
+            {
+                return;
+            }
+
+            const company = String(button.dataset.company || '').trim();
+            const costCenter = String(button.dataset.costCenter || '').trim();
+            if (company === '' || costCenter === '')
+            {
+                return;
+            }
+
+            event.preventDefault();
+            forgetCostCenterCacheFromNightlyModal(button, company, costCenter);
+        });
+    }
+
+    async function forgetCostCenterCacheFromNightlyModal (button, company, costCenter)
+    {
+        if (!demeterModal)
+        {
+            return;
+        }
+
+        const confirmed = await demeterModal.confirm({
+            title: 'Cache wissen',
+            message: 'Cache voor kostenplaats ' + costCenter + ' (' + company + ') wissen? Deze kostenplaats wordt dan niet meer door nightly ververst tot iemand hem opnieuw in de UI ophaalt.',
+            confirmText: 'Wissen',
+            cancelText: 'Annuleren'
+        });
+
+        if (!confirmed)
+        {
+            return;
+        }
+
+        button.disabled = true;
+        const originalText = button.textContent;
+        button.textContent = 'Bezig...';
+
+        try
+        {
+            const params = new URLSearchParams();
+            params.set('company', company);
+            params.set('cost_center', costCenter);
+            const separator = forgetCostCenterCacheUrl.indexOf('?') === -1 ? '?' : '&';
+            const requestUrl = forgetCostCenterCacheUrl + separator + params.toString();
+
+            const response = await fetch(requestUrl, {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: {
+                    Accept: 'application/json'
+                }
+            });
+            const body = await response.json();
+            if (!response.ok || !body || body.ok !== true)
+            {
+                throw new Error(body && body.error ? body.error : ('HTTP ' + response.status));
+            }
+
+            const row = button.closest('tr');
+            if (row)
+            {
+                const statusCell = row.querySelector('.nightly-stats-status-cell');
+                if (statusCell)
+                {
+                    statusCell.textContent = 'cache gewist — niet meer in nightly';
+                }
+            }
+
+            button.textContent = 'Gewist';
+        }
+        catch (forgetError)
+        {
+            console.error(forgetError);
+            button.disabled = false;
+            button.textContent = originalText;
+            if (demeterModal)
+            {
+                demeterModal.alert({
+                    title: 'Cache wissen mislukt',
+                    message: String(forgetError && forgetError.message ? forgetError.message : forgetError)
+                });
+            }
+        }
     }
 
     function buildNightlyStatsTableHtml (stats)
@@ -533,12 +638,22 @@
                     detailParts.push(String(entry.error));
                 }
 
+                const statusText = status + (detailParts.length > 0 ? (' — ' + detailParts.join(', ')) : '');
+                const actionCell = status === 'ok'
+                    ? '<button type="button" class="nightly-stats-forget-btn" data-company="'
+                        + escapeHtml(companyName)
+                        + '" data-cost-center="'
+                        + escapeHtml(costCenterCode)
+                        + '">Cache wissen</button>'
+                    : '—';
+
                 rowsHtml.push([
                     '<tr>',
                     '<td>' + escapeHtml(companyName) + '</td>',
                     '<td>' + escapeHtml(costCenterCode) + '</td>',
                     '<td>' + escapeHtml(durationText) + '</td>',
-                    '<td>' + escapeHtml(status + (detailParts.length > 0 ? (' — ' + detailParts.join(', ')) : '')) + '</td>',
+                    '<td class="nightly-stats-status-cell">' + escapeHtml(statusText) + '</td>',
+                    '<td>' + actionCell + '</td>',
                     '</tr>'
                 ].join(''));
             }
@@ -546,7 +661,7 @@
 
         return intro + [
             '<table class="nightly-stats-table">',
-            '<thead><tr><th>Bedrijf</th><th>Kostenplaats</th><th>Duur</th><th>Status</th></tr></thead>',
+            '<thead><tr><th>Bedrijf</th><th>Kostenplaats</th><th>Duur</th><th>Status</th><th>Actie</th></tr></thead>',
             '<tbody>' + rowsHtml.join('') + '</tbody>',
             '</table>'
         ].join('');

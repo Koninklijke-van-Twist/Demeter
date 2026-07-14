@@ -392,6 +392,58 @@ function demeter_workorder_month_scan_uses_legacy_month_keys(array $monthScan): 
 }
 
 /**
+ * @return list<array{company: string, cost_center: string}>
+ */
+function demeter_workorder_state_cache_list_populated_pairs(): array
+{
+    $directory = demeter_workorder_state_cache_directory();
+    if (!is_dir($directory)) {
+        return [];
+    }
+
+    $pairs = [];
+    $paths = glob($directory . '/*.json');
+    if (!is_array($paths)) {
+        return [];
+    }
+
+    foreach ($paths as $path) {
+        if (!is_string($path) || strpos($path, '.json.display.json') !== false) {
+            continue;
+        }
+
+        if (!is_file($path) || !is_readable($path)) {
+            continue;
+        }
+
+        $decoded = json_decode((string) file_get_contents($path), true);
+        if (!is_array($decoded)) {
+            continue;
+        }
+
+        $company = trim((string) ($decoded['company'] ?? ''));
+        $costCenter = trim((string) ($decoded['cost_center'] ?? ''));
+        if ($company === '' || $costCenter === '') {
+            continue;
+        }
+
+        $workorders = $decoded['workorders'] ?? null;
+        $hasWorkorders = is_array($workorders) && $workorders !== [];
+        $hasDisplayRows = demeter_workorder_state_cache_load_display_rows($company, $costCenter) !== [];
+        if (!$hasWorkorders && !$hasDisplayRows) {
+            continue;
+        }
+
+        $pairs[] = [
+            'company' => $company,
+            'cost_center' => $costCenter,
+        ];
+    }
+
+    return $pairs;
+}
+
+/**
  * Verwijdert werkorder-state en display-cache voor bedrijf/kostenplaats.
  */
 function demeter_workorder_state_cache_purge(string $company, string $costCenter): void

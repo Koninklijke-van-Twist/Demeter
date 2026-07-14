@@ -94,6 +94,24 @@ demeter_nightly_stats_save($stats);
 
 demeter_nightly_log('[' . gmdate('Y-m-d H:i:s') . "] Nightly gestart\n");
 
+$purgedStaleCaches = demeter_purge_stale_cost_center_caches();
+if ($purgedStaleCaches !== []) {
+    $stats['purged_stale_caches'] = $purgedStaleCaches;
+    demeter_nightly_stats_save($stats);
+    demeter_nightly_log(sprintf("Verouderde caches verwijderd: %d kostenplaats(en)\n", count($purgedStaleCaches)));
+    foreach ($purgedStaleCaches as $purgedEntry) {
+        $purgedCompany = trim((string) ($purgedEntry['company'] ?? ''));
+        $purgedCostCenter = trim((string) ($purgedEntry['cost_center'] ?? ''));
+        $purgedLastViewed = trim((string) ($purgedEntry['last_viewed_at'] ?? ''));
+        demeter_nightly_log(sprintf(
+            "  %s / %s (laatst bekeken: %s)\n",
+            $purgedCompany,
+            $purgedCostCenter,
+            $purgedLastViewed !== '' ? $purgedLastViewed : 'onbekend'
+        ));
+    }
+}
+
 try {
     $discovery = demeter_discover_and_cache_companies($ttl);
     $companies = is_array($discovery['companies'] ?? null) ? $discovery['companies'] : [];
