@@ -652,7 +652,15 @@ $companiesCacheUpdatedAt = is_string($companiesCache['updated_at'] ?? null) ? $c
 $GLOBALS['demeter_company_environment_map'] = $companyEnvironmentMap;
 
 if ($companies === []) {
-    $companyDiscoveryErrorMessage = 'Bedrijvenlijst nog niet beschikbaar. Wacht op de nachtelijke verversing of gebruik Ververs Nu.';
+    try {
+        $discovery = demeter_discover_and_cache_companies($ttl);
+        $companies = is_array($discovery['companies'] ?? null) ? $discovery['companies'] : [];
+        $companyEnvironmentMap = is_array($discovery['map'] ?? null) ? $discovery['map'] : [];
+        $GLOBALS['demeter_company_environment_map'] = $companyEnvironmentMap;
+        $companiesCacheUpdatedAt = gmdate('c');
+    } catch (Throwable $discoveryError) {
+        $companyDiscoveryErrorMessage = $discoveryError->getMessage();
+    }
 }
 
 $selectedCompany = trim((string) ($_GET['company'] ?? ''));
@@ -712,7 +720,7 @@ $totalProgressSteps = 4;
 $departmentCostCenterOptions = [];
 if ($selectedCompany !== '') {
     $departmentCostCenterOptions = demeter_cost_center_options_cache_load($selectedCompany);
-    if ($refreshNowRequested && $departmentCostCenterOptions === []) {
+    if ($departmentCostCenterOptions === []) {
         try {
             $costCenterCompanyAuth = auth_get_auth_for_company($selectedCompany, 300);
             $departmentCostCenterOptions = demeter_fetch_and_cache_cost_center_options($selectedCompany, $costCenterCompanyAuth, $ttl);
@@ -741,13 +749,6 @@ $errorMessage = $companyDiscoveryErrorMessage;
 try {
     if ($shouldReadCacheData && $selectedCompany === '') {
         throw new RuntimeException('Geen bedrijven beschikbaar voor de geselecteerde actieve environments.');
-    }
-
-    if ($refreshNowRequested && $selectedCompany !== '' && $companies === []) {
-        $discovery = demeter_discover_and_cache_companies($ttl);
-        $companies = is_array($discovery['companies'] ?? null) ? $discovery['companies'] : [];
-        $companyEnvironmentMap = is_array($discovery['map'] ?? null) ? $discovery['map'] : [];
-        $GLOBALS['demeter_company_environment_map'] = $companyEnvironmentMap;
     }
 
     if ($shouldReadCacheData) {
