@@ -147,6 +147,8 @@ require_once __DIR__ . "/odata.php";
 require_once __DIR__ . "/project_finance.php";
 require_once __DIR__ . "/bc_fetch/month_loader.php";
 require_once __DIR__ . "/bc_fetch/cost_centers.php";
+require_once __DIR__ . "/bc_fetch/reference_cache.php";
+require_once __DIR__ . "/bc_fetch/nightly_runner.php";
 require_once __DIR__ . "/workorder_rows.php";
 
 function current_user_email_or_fallback(): string
@@ -581,6 +583,34 @@ if (($_GET['action'] ?? '') === 'load_workorder_memos') {
     }
 }
 
+if (($_GET['action'] ?? '') === 'refresh_all_memos') {
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+
+    try {
+        $company = trim((string) ($_GET['company'] ?? ''));
+        $costCenter = trim((string) ($_GET['cost_center'] ?? ''));
+
+        if ($company === '' || $costCenter === '') {
+            throw new InvalidArgumentException('Ongeldige parameters voor memo-verversing.');
+        }
+
+        auth_set_current_company_context($company, 300);
+        $auth = auth_get_auth_for_company($company, 300);
+        $memoCount = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+
+        demeter_send_json_response([
+            'ok' => true,
+            'memos_refreshed' => $memoCount,
+        ]);
+    } catch (Throwable $error) {
+        demeter_send_json_response(odata_append_debug_to_payload([
+            'ok' => false,
+            'error' => $error->getMessage(),
+        ]), 500);
+    }
+}
+
 function load_cost_center_setting(string $email): string
 {
     $parsed = load_user_settings_payload($email);
@@ -610,33 +640,28 @@ $knownCostCentersSetting = load_known_cost_centers_setting($currentUserEmail);
 
 demeter_release_session_lock_if_active();
 
-$allCompaniesOptionValue = '__all_companies__';
-$allCompaniesOptionLabel = 'Alle bedrijven';
 $companies = [];
 $companyEnvironmentMap = [];
 $companyDiscoveryErrorMessage = null;
+$companiesCacheUpdatedAt = null;
 
-try {
-    $companyDiscovery = auth_discover_companies_across_active_environments(300);
-    $companies = is_array($companyDiscovery['companies'] ?? null) ? $companyDiscovery['companies'] : [];
-    $companyEnvironmentMap = is_array($companyDiscovery['map'] ?? null) ? $companyDiscovery['map'] : [];
-} catch (Throwable $error) {
-    $companyDiscoveryErrorMessage = $error->getMessage();
+$companiesCache = demeter_companies_cache_load();
+$companies = is_array($companiesCache['companies'] ?? null) ? $companiesCache['companies'] : [];
+$companyEnvironmentMap = is_array($companiesCache['map'] ?? null) ? $companiesCache['map'] : [];
+$companiesCacheUpdatedAt = is_string($companiesCache['updated_at'] ?? null) ? $companiesCache['updated_at'] : null;
+$GLOBALS['demeter_company_environment_map'] = $companyEnvironmentMap;
+
+if ($companies === []) {
+    $companyDiscoveryErrorMessage = 'Bedrijvenlijst nog niet beschikbaar. Wacht op de nachtelijke verversing of gebruik Ververs Nu.';
 }
 
-$companyOptions = $companies;
-if ($companyOptions !== []) {
-    array_unshift($companyOptions, $allCompaniesOptionValue);
-}
-
-$defaultCompanySelection = '';
 $selectedCompany = trim((string) ($_GET['company'] ?? ''));
-if ($selectedCompany !== '' && !in_array($selectedCompany, $companyOptions, true)) {
+if ($selectedCompany !== '' && !in_array($selectedCompany, $companies, true)) {
     $selectedCompany = '';
 }
 
 $selectedEnvironment = '';
-if ($selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue) {
+if ($selectedCompany !== '') {
     try {
         $selectedEnvironment = auth_get_environment_for_company($selectedCompany, 300);
         auth_set_current_company_context($selectedCompany, 300);
@@ -644,9 +669,6 @@ if ($selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue) {
     } catch (Throwable $error) {
         $companyDiscoveryErrorMessage = $error->getMessage();
     }
-} elseif ($selectedCompany === $allCompaniesOptionValue) {
-    $selectedEnvironment = auth_get_primary_environment();
-    demeter_store_selected_company_context($selectedCompany, $selectedEnvironment);
 }
 
 $invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? '')));
@@ -666,11 +688,11 @@ if ($selectedCostCenter === '' && $defaultCostCenterSetting !== '') {
     $selectedCostCenter = $defaultCostCenterSetting;
 }
 
-$forceFullReload = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
-$dataLoadRequested = array_key_exists('show', $_GET) || $forceFullReload;
+$refreshNowRequested = strtolower(trim((string) ($_GET['refresh_now'] ?? ''))) === '1';
+$forceFullReload = $refreshNowRequested;
 
 $callTimeLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
-if ($dataLoadRequested && $callTimeLogSession === '' && odata_call_time_log_is_localhost()) {
+if ($refreshNowRequested && $callTimeLogSession === '' && odata_call_time_log_is_localhost()) {
     $callTimeLogSession = odata_call_time_log_create_session_id();
 }
 if ($callTimeLogSession !== '') {
@@ -688,47 +710,21 @@ $syncLoadWeek = demeter_current_iso_year_week();
 $totalProgressSteps = 4;
 
 $departmentCostCenterOptions = [];
-if ($selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue) {
-    try {
-        $costCenterCompanyAuth = auth_get_auth_for_company($selectedCompany, 300);
-        $departmentCostCenterOptions = bc_fetch_department_cost_center_options($selectedCompany, $costCenterCompanyAuth, $ttl);
-    } catch (Throwable $costCenterOptionsError) {
-        if ($companyDiscoveryErrorMessage === null) {
-            $companyDiscoveryErrorMessage = $costCenterOptionsError->getMessage();
+if ($selectedCompany !== '') {
+    $departmentCostCenterOptions = demeter_cost_center_options_cache_load($selectedCompany);
+    if ($refreshNowRequested && $departmentCostCenterOptions === []) {
+        try {
+            $costCenterCompanyAuth = auth_get_auth_for_company($selectedCompany, 300);
+            $departmentCostCenterOptions = demeter_fetch_and_cache_cost_center_options($selectedCompany, $costCenterCompanyAuth, $ttl);
+        } catch (Throwable $costCenterOptionsError) {
+            if ($companyDiscoveryErrorMessage === null) {
+                $companyDiscoveryErrorMessage = $costCenterOptionsError->getMessage();
+            }
         }
     }
 }
 
-$shouldLoadData = $selectedCompany !== '' && $selectedCostCenter !== '' && $dataLoadRequested;
-$asyncLoadEnabledForBoot = $selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue;
-$isBootRequest = trim((string) ($_GET['boot'] ?? '')) === '1';
-if ($shouldLoadData && !$isBootRequest && !$asyncLoadEnabledForBoot) {
-    odata_load_progress_begin($activeLoadProgressToken, $totalProgressSteps);
-
-    $bootQuery = $_GET;
-    if (!is_array($bootQuery)) {
-        $bootQuery = [];
-    }
-    $bootQuery['boot'] = '1';
-    $bootQuery['load_token'] = $activeLoadProgressToken;
-    if ($callTimeLogSession !== '') {
-        $bootQuery['call_time_log_session'] = $callTimeLogSession;
-    }
-    $bootUrl = 'index.php?' . http_build_query($bootQuery, '', '&', PHP_QUERY_RFC3986);
-    $bootStatusUrl = 'odata.php?action=load_progress&token=' . rawurlencode($activeLoadProgressToken);
-
-    header('Content-Type: text/html; charset=utf-8');
-    echo demeter_render_progress_screen_html(
-        'Gegevens laden',
-        $bootStatusUrl,
-        'Gegevens laden...',
-        'Huidige OData-call: ',
-        $bootUrl,
-        10,
-        ''
-    );
-    exit;
-}
+$shouldReadCacheData = $selectedCompany !== '' && $selectedCostCenter !== '';
 
 $rows = [];
 $invoiceDetailsById = [];
@@ -743,106 +739,63 @@ $bootMonthPreloaded = false;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
-    if ($shouldLoadData && $selectedCompany === '') {
+    if ($shouldReadCacheData && $selectedCompany === '') {
         throw new RuntimeException('Geen bedrijven beschikbaar voor de geselecteerde actieve environments.');
     }
 
-    if ($shouldLoadData) {
-    $overviewData = [
-        'workorders' => [],
-        'project_totals_by_job' => [],
-        'invoice_details_by_id' => [],
-        'project_invoice_ids_by_job' => [],
-        'project_invoiced_total_by_job' => [],
-        'workorder_totals_by_number' => [],
-        'workorder_totals_by_project_and_number' => [],
-        'projectposten_rows_by_project' => [],
-        'projectposten_rows_by_project_and_workorder' => [],
-        'finance_key_by_pair' => [],
-        'load_meta' => [],
-    ];
-
-    $asyncLoadEnabled = $selectedCompany !== '' && $selectedCompany !== $allCompaniesOptionValue && $dataLoadRequested;
-    $cachedState = null;
-
-    if ($asyncLoadEnabled) {
-        $purgedLegacyCache = false;
-        $cachedState = $forceFullReload
-            ? null
-            : demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter, $purgedLegacyCache);
-        if ($purgedLegacyCache) {
-            $forceFullReload = true;
-        }
-
-        if (is_array($cachedState)) {
-            $monthScan = is_array($cachedState['month_scan'] ?? null)
-                ? $cachedState['month_scan']
-                : demeter_workorder_month_scan_defaults();
-            $pendingRowKeys = demeter_pending_refresh_row_keys_from_cache($cachedState, $forceFullReload);
-        }
-    } else {
-        $loaderOptions = [
-            'cost_center' => $selectedCostCenter,
-            'force_full' => $forceFullReload,
-            'partial_to_today' => true,
-            'skip_if_cached' => false,
-            'load_session_id' => $callTimeLogSession,
-        ];
-
-        $companiesToLoad = $selectedCompany === $allCompaniesOptionValue ? $companies : [$selectedCompany];
-
-        foreach ($companiesToLoad as $companyToLoad) {
-            $companyAuth = auth_get_auth_for_company($companyToLoad, 300);
-            $companyOverviewData = bc_fetch_load_workorder_week_chunk(
-                $companyToLoad,
-                $syncLoadWeek,
-                $companyAuth,
-                $ttl,
-                $activeLoadProgressToken,
-                $loaderOptions
-            );
-
-            $overviewData = demeter_merge_overview_chunks($overviewData, $companyOverviewData);
-
-            if (is_array($companyOverviewData['month_scan'] ?? null)) {
-                $monthScan = $companyOverviewData['month_scan'];
-            }
-
-            if (is_array($companyOverviewData['load_meta'] ?? null) && $overviewData['load_meta'] === []) {
-                $overviewData['load_meta'] = $companyOverviewData['load_meta'];
-            }
-        }
+    if ($refreshNowRequested && $selectedCompany !== '' && $companies === []) {
+        $discovery = demeter_discover_and_cache_companies($ttl);
+        $companies = is_array($discovery['companies'] ?? null) ? $discovery['companies'] : [];
+        $companyEnvironmentMap = is_array($discovery['map'] ?? null) ? $discovery['map'] : [];
+        $GLOBALS['demeter_company_environment_map'] = $companyEnvironmentMap;
     }
 
-    $projectTotalsByJob = is_array($overviewData['project_totals_by_job'] ?? null) ? $overviewData['project_totals_by_job'] : [];
-    $invoiceDetailsById = is_array($overviewData['invoice_details_by_id'] ?? null) ? $overviewData['invoice_details_by_id'] : [];
-    $projectpostenRowsByProject = is_array($overviewData['projectposten_rows_by_project'] ?? null) ? $overviewData['projectposten_rows_by_project'] : [];
-    $projectpostenRowsByProjectAndWorkorder = is_array($overviewData['projectposten_rows_by_project_and_workorder'] ?? null)
-        ? $overviewData['projectposten_rows_by_project_and_workorder']
-        : [];
-    $loadMeta = is_array($overviewData['load_meta'] ?? null) ? $overviewData['load_meta'] : [];
+    if ($shouldReadCacheData) {
+        $asyncLoadEnabled = $refreshNowRequested;
+        $cachedState = null;
 
-    $builtRows = ['rows' => [], 'row_keys' => []];
-    if ($asyncLoadEnabled) {
-        $displayRowsByKey = $forceFullReload
-            ? []
-            : demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
-        if ($displayRowsByKey !== []) {
-            $cacheUsedForFirstPaint = true;
-            $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, $invoiceFilter);
+        if ($asyncLoadEnabled) {
+            if ($forceFullReload) {
+                demeter_workorder_state_cache_purge($selectedCompany, $selectedCostCenter);
+            }
+
+            $purgedLegacyCache = false;
+            $cachedState = $forceFullReload
+                ? null
+                : demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter, $purgedLegacyCache);
+            if ($purgedLegacyCache) {
+                $forceFullReload = true;
+            }
+
+            if (is_array($cachedState)) {
+                $monthScan = is_array($cachedState['month_scan'] ?? null)
+                    ? $cachedState['month_scan']
+                    : demeter_workorder_month_scan_defaults();
+            }
         } else {
-            $rows = [];
+            $purgedLegacyCache = false;
+            $cachedState = demeter_workorder_state_cache_load($selectedCompany, $selectedCostCenter, $purgedLegacyCache);
+            if (is_array($cachedState)) {
+                $monthScan = is_array($cachedState['month_scan'] ?? null)
+                    ? $cachedState['month_scan']
+                    : demeter_workorder_month_scan_defaults();
+            }
         }
-    } else {
-        $builtRows = demeter_build_workorder_rows_from_overview($overviewData, $invoiceFilter);
-        $rows = $builtRows['rows'];
-    }
 
-    save_user_settings($currentUserEmail, null, null, null, $selectedCostCenter);
+        $builtRows = ['rows' => [], 'row_keys' => []];
+        if ($asyncLoadEnabled) {
+            $rows = [];
+        } else {
+            $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
+            if ($displayRowsByKey !== []) {
+                $cacheUsedForFirstPaint = true;
+                $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, $invoiceFilter);
+            } else {
+                $rows = [];
+            }
+        }
 
-    if (!$asyncLoadEnabled) {
-        odata_load_progress_complete($activeLoadProgressToken, $totalProgressSteps);
-    }
+        save_user_settings($currentUserEmail, null, null, null, $selectedCostCenter);
     }
 } catch (Throwable $error) {
     $errorMessage = $error->getMessage();
@@ -855,31 +808,46 @@ try {
     );
 }
 
+$cacheUpdatedAt = ($selectedCompany !== '' && $selectedCostCenter !== '')
+    ? demeter_workorder_cost_center_cache_updated_at($selectedCompany, $selectedCostCenter)
+    : null;
+$cacheAgeHours = demeter_cache_age_hours($cacheUpdatedAt);
+$nightlyStats = demeter_nightly_stats_load();
+
 $initialData = [
     'company' => $selectedCompany,
     'sync_load_week' => $syncLoadWeek,
     'sync_load_month' => $syncLoadWeek,
     'cost_center' => $selectedCostCenter,
     'load_meta' => $loadMeta ?? [],
+    'cache_meta' => [
+        'updated_at' => $cacheUpdatedAt,
+        'age_hours' => $cacheAgeHours,
+        'has_data' => $cacheUsedForFirstPaint,
+        'is_refreshing' => $refreshNowRequested,
+    ],
+    'nightly_stats' => $nightlyStats,
     'initial_load_stats' => [
         'from_cache_count' => $cacheUsedForFirstPaint ? count($rows) : 0,
-        'updated_from_bc_count' => $bootMonthPreloaded ? count($builtRows['rows']) : 0,
+        'updated_from_bc_count' => $refreshNowRequested ? 0 : 0,
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
+        'force_full' => $forceFullReload,
         'chunk_unit' => 'week',
         'current_week' => $syncLoadWeek,
         'current_month' => $syncLoadWeek,
         'next_week' => demeter_previous_iso_year_week($syncLoadWeek),
         'next_month' => demeter_previous_iso_year_week($syncLoadWeek),
-        'boot_week_preloaded' => $bootMonthPreloaded,
-        'boot_month_preloaded' => $bootMonthPreloaded,
+        'boot_week_preloaded' => false,
+        'boot_month_preloaded' => false,
         'month_scan' => $monthScan,
         'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_iso_year_week($syncLoadWeek)),
         'empty_stop_count' => DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT,
         'history_weeks_total' => demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek),
         'parallel_week_loads' => 2,
         'load_month_url' => 'index.php?action=load_month',
+        'refresh_all_memos_url' => 'index.php?action=refresh_all_memos',
         'load_workorder_memos_url' => 'index.php?action=load_workorder_memos',
     ],
     'invoice_filter' => $invoiceFilter,
@@ -890,7 +858,7 @@ $initialData = [
     'load_progress_status_url' => 'odata.php?action=load_progress',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
-    'pending_row_keys' => $pendingRowKeys,
+    'pending_row_keys' => [],
     'invoice_details_by_id' => $invoiceDetailsById,
     'projectposten_rows_by_project' => $projectpostenRowsByProject,
     'projectposten_rows_by_project_and_workorder' => $projectpostenRowsByProjectAndWorkorder,
@@ -1143,11 +1111,98 @@ $initialData = [
 
         .summary-row {
             display: flex;
-            align-items: center;
-            justify-content: flex-start;
-            gap: 10px;
-            margin-bottom: 12px;
             flex-wrap: wrap;
+            align-items: center;
+            gap: 10px 16px;
+            margin-bottom: 12px;
+        }
+
+        .cache-age-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 14px;
+            padding: 10px 14px;
+            border: 1px solid #c8d3e1;
+            border-radius: 10px;
+            background: #f8fbff;
+            color: #334155;
+            font-size: 14px;
+        }
+
+        .cache-age-banner button {
+            border: none;
+            background: transparent;
+            color: #1f4ea6;
+            font: inherit;
+            font-weight: 600;
+            cursor: pointer;
+            text-align: left;
+            padding: 0;
+        }
+
+        .cache-age-banner button:hover {
+            text-decoration: underline;
+        }
+
+        .nightly-stats-modal-backdrop {
+            position: fixed;
+            inset: 0;
+            z-index: 3000;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.45);
+            padding: 20px;
+        }
+
+        .nightly-stats-modal-backdrop.is-open {
+            display: flex;
+        }
+
+        .nightly-stats-modal {
+            width: min(920px, 100%);
+            max-height: min(80vh, 720px);
+            overflow: auto;
+            background: #fff;
+            border-radius: 12px;
+            border: 1px solid #dbe3ee;
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18);
+            padding: 18px 20px;
+        }
+
+        .nightly-stats-modal h2 {
+            margin: 0 0 12px 0;
+            font-size: 20px;
+        }
+
+        .nightly-stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .nightly-stats-table th,
+        .nightly-stats-table td {
+            border-bottom: 1px solid #e5ebf3;
+            padding: 8px 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        .nightly-stats-table th {
+            background: #f1f5fb;
+            color: #203a63;
+        }
+
+        .nightly-stats-close {
+            float: right;
+            border: 1px solid #c8d3e1;
+            background: #fff;
+            border-radius: 8px;
+            padding: 6px 10px;
+            cursor: pointer;
         }
 
         .summary-note {
@@ -1873,11 +1928,6 @@ $initialData = [
             <option value="" <?= $selectedCompany === '' ? 'selected' : '' ?>>
                 Kies een bedrijf...
             </option>
-            <?php if ($companies !== []): ?>
-                <option value="<?= htmlspecialchars($allCompaniesOptionValue) ?>" <?= $selectedCompany === $allCompaniesOptionValue ? 'selected' : '' ?>>
-                    <?= htmlspecialchars($allCompaniesOptionLabel) ?>
-                </option>
-            <?php endif; ?>
             <?php foreach ($companies as $company): ?>
                 <option value="<?= htmlspecialchars($company) ?>" <?= $company === $selectedCompany ? 'selected' : '' ?>>
                     <?= htmlspecialchars($company) ?>
@@ -1885,7 +1935,7 @@ $initialData = [
             <?php endforeach; ?>
         </select>
         <label for="costCenterSelect">Kostenplaats</label>
-        <select id="costCenterSelect" name="cost_center" <?= $selectedCompany === '' ? 'disabled' : '' ?>>
+        <select id="costCenterSelect" name="cost_center" <?= $selectedCompany === '' ? 'disabled' : '' ?> onchange="this.form.submit()">
             <option value="" <?= $selectedCostCenter === '' ? 'selected' : '' ?>>
                 <?= $selectedCompany === '' ? 'Kies eerst een bedrijf...' : 'Kies een kostenplaats...' ?>
             </option>
@@ -1910,10 +1960,8 @@ $initialData = [
         </select>
         <input type="hidden" name="load_token" id="loadProgressToken"
             value="<?= htmlspecialchars($nextLoadProgressToken) ?>">
-        <button type="submit" name="show" value="1">Toon</button>
-        <?php if ($selectedCompany !== '' && $selectedCostCenter !== ''): ?>
-            <button type="submit" name="force_full" value="1" class="secondary-button">Volledig herladen</button>
-        <?php endif; ?>
+        <button type="submit" name="refresh_now" value="1" class="secondary-button" id="refreshNowButton"
+            <?= ($selectedCompany === '' || $selectedCostCenter === '') ? 'disabled' : '' ?>>Ververs Nu</button>
         <div class="memo-menu-wrap" id="memoMenuWrap">
             <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Voorkeuren</button>
             <div class="memo-menu-panel" id="memoMenuPanel">
@@ -1946,7 +1994,7 @@ $initialData = [
                 </div>
             </div>
         </div>
-        <noscript><button type="submit">Toon</button></noscript>
+        <noscript><button type="submit" name="refresh_now" value="1">Ververs Nu</button></noscript>
     </form>
 
     <div id="app"></div>

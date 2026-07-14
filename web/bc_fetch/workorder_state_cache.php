@@ -113,22 +113,71 @@ function demeter_workorder_state_record_status_checked_pairs(array $loadSession,
 }
 
 /**
- * Bepaalt of een werkorderstatus als afgesloten telt.
+ * Bepaalt of een werkorderstatus permanent in cache telt (niet meer verversen).
+ * Geannuleerd wordt behandeld als afgesloten.
  */
 function demeter_workorder_status_is_closed(string $status): bool
 {
     $normalized = strtolower(trim($status));
     $aliases = [
         'afgesloten' => 'closed',
-        'geannuleerd' => 'cancelled',
+        'geannuleerd' => 'closed',
         'uitgevoerd' => 'completed',
+        'gecancelled' => 'closed',
+        'cancelled' => 'closed',
     ];
 
     if (isset($aliases[$normalized])) {
         $normalized = $aliases[$normalized];
     }
 
-    return in_array($normalized, ['closed', 'cancelled', 'completed'], true);
+    return in_array($normalized, ['closed', 'completed'], true);
+}
+
+/**
+ * Zet is_closed op bestaande cache-entries wanneer de status permanent is (o.a. geannuleerd).
+ */
+function demeter_workorder_state_cache_reconcile_closed_entries(array $cachedState): array
+{
+    if (!is_array($cachedState['workorders'] ?? null)) {
+        return $cachedState;
+    }
+
+    $changed = false;
+    foreach ($cachedState['workorders'] as $pairKey => $entry) {
+        if (!is_string($pairKey) || !is_array($entry)) {
+            continue;
+        }
+
+        $status = trim((string) ($entry['status'] ?? ''));
+        if ($status === '' && is_array($entry['row'] ?? null)) {
+            $status = trim((string) ($entry['row']['Status'] ?? ''));
+        }
+
+        if ($status === '' || !empty($entry['is_closed'])) {
+            continue;
+        }
+
+        if (!demeter_workorder_status_is_closed($status)) {
+            continue;
+        }
+
+        $cachedState['workorders'][$pairKey]['is_closed'] = true;
+        $cachedState['workorders'][$pairKey]['status'] = $status;
+        $changed = true;
+    }
+
+    if ($changed) {
+        demeter_workorder_state_cache_save(
+            (string) ($cachedState['company'] ?? ''),
+            (string) ($cachedState['cost_center'] ?? ''),
+            $cachedState['workorders'],
+            is_array($cachedState['month_scan'] ?? null) ? $cachedState['month_scan'] : demeter_workorder_month_scan_defaults(),
+            is_array($cachedState['load_session'] ?? null) ? $cachedState['load_session'] : null
+        );
+    }
+
+    return $cachedState;
 }
 
 /**
@@ -424,7 +473,7 @@ function demeter_workorder_state_cache_load(string $company, string $costCenter,
         return null;
     }
 
-    return $decoded;
+    return demeter_workorder_state_cache_reconcile_closed_entries($decoded);
 }
 
 /**

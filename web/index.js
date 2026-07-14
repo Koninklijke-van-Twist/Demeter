@@ -28,6 +28,12 @@
     const loadMeta = payload && typeof payload.load_meta === 'object' && payload.load_meta !== null
         ? payload.load_meta
         : {};
+    const cacheMeta = payload && typeof payload.cache_meta === 'object' && payload.cache_meta !== null
+        ? payload.cache_meta
+        : {};
+    const nightlyStats = payload && typeof payload.nightly_stats === 'object' && payload.nightly_stats !== null
+        ? payload.nightly_stats
+        : {};
     const loadedCostCenter = typeof payload.cost_center === 'string' ? payload.cost_center.trim() : '';
     const asyncLoadConfig = payload && typeof payload.async_load === 'object' && payload.async_load !== null
         ? payload.async_load
@@ -108,6 +114,9 @@
     const loadWorkorderMemosUrl = typeof asyncLoadConfig.load_workorder_memos_url === 'string'
         ? asyncLoadConfig.load_workorder_memos_url
         : 'index.php?action=load_workorder_memos';
+    const refreshAllMemosUrl = typeof asyncLoadConfig.refresh_all_memos_url === 'string'
+        ? asyncLoadConfig.refresh_all_memos_url
+        : 'index.php?action=refresh_all_memos';
     const callTimeLogSession = typeof payload.call_time_log_session === 'string'
         ? payload.call_time_log_session.trim()
         : '';
@@ -189,6 +198,11 @@
 
     initializePageLoaderHandlers();
 
+    if (cacheMeta.is_refreshing === true)
+    {
+        startPageLoaderProgress('Gegevens verversen...');
+    }
+
     if (!app)
     {
         hidePageLoader();
@@ -215,6 +229,8 @@
         hidePageLoader();
         return;
     }
+
+    renderCacheAgeBanner();
 
     const summaryRow = document.createElement('div');
     summaryRow.className = 'summary-row';
@@ -291,7 +307,9 @@
     {
         const empty = document.createElement('div');
         empty.className = 'empty';
-        empty.textContent = 'Geen open werkorders gevonden.';
+        empty.textContent = loadedCostCenter !== ''
+            ? 'Geen cachegegevens voor deze kostenplaats. Gebruik Ververs Nu om gegevens op te halen en naar cache te schrijven.'
+            : 'Kies een bedrijf en kostenplaats om gecachte gegevens te bekijken.';
         app.appendChild(empty);
         hidePageLoader();
         return;
@@ -358,7 +376,212 @@
     hidePageLoader();
     if (asyncLoadConfig.enabled)
     {
-        startIncrementalMonthLoading();
+        startIncrementalMonthLoading()
+            .then(function ()
+            {
+                return finalizeRefreshAfterLoad();
+            })
+            .catch(function (refreshError)
+            {
+                console.error(refreshError);
+            });
+    }
+
+    function renderCacheAgeBanner ()
+    {
+        if (loadedCostCenter === '')
+        {
+            return;
+        }
+
+        const banner = document.createElement('div');
+        banner.className = 'cache-age-banner';
+
+        const ageHours = Number(cacheMeta.age_hours);
+        let ageText = 'Onbekend';
+        if (Number.isFinite(ageHours))
+        {
+            if (ageHours < 1)
+            {
+                ageText = 'minder dan 1 uur';
+            }
+            else
+            {
+                ageText = ageHours.toFixed(1).replace('.', ',') + ' uur';
+            }
+        }
+        else if (cacheMeta.has_data === false)
+        {
+            ageText = 'geen cache';
+        }
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = 'Huidige gegevens zijn ' + ageText + ' oud (klik voor nightly-details)';
+        button.addEventListener('click', openNightlyStatsModal);
+        banner.appendChild(button);
+        app.appendChild(banner);
+    }
+
+    function openNightlyStatsModal ()
+    {
+        let backdrop = document.getElementById('nightlyStatsModalBackdrop');
+        if (!backdrop)
+        {
+            backdrop = document.createElement('div');
+            backdrop.id = 'nightlyStatsModalBackdrop';
+            backdrop.className = 'nightly-stats-modal-backdrop';
+            backdrop.innerHTML = [
+                '<div class="nightly-stats-modal" role="dialog" aria-modal="true" aria-labelledby="nightlyStatsModalTitle">',
+                '<button type="button" class="nightly-stats-close" id="nightlyStatsModalClose">Sluiten</button>',
+                '<h2 id="nightlyStatsModalTitle">Nightly laadtijden</h2>',
+                '<div id="nightlyStatsModalBody"></div>',
+                '</div>'
+            ].join('');
+            document.body.appendChild(backdrop);
+
+            backdrop.addEventListener('click', function (event)
+            {
+                if (event.target === backdrop)
+                {
+                    backdrop.classList.remove('is-open');
+                }
+            });
+
+            const closeButton = backdrop.querySelector('#nightlyStatsModalClose');
+            if (closeButton)
+            {
+                closeButton.addEventListener('click', function ()
+                {
+                    backdrop.classList.remove('is-open');
+                });
+            }
+        }
+
+        const body = backdrop.querySelector('#nightlyStatsModalBody');
+        if (body)
+        {
+            body.innerHTML = buildNightlyStatsTableHtml(nightlyStats);
+        }
+
+        backdrop.classList.add('is-open');
+    }
+
+    function buildNightlyStatsTableHtml (stats)
+    {
+        const startedAt = stats && stats.last_run_started_at ? String(stats.last_run_started_at) : '';
+        const finishedAt = stats && stats.last_run_finished_at ? String(stats.last_run_finished_at) : '';
+        const intro = '<p>Laatste nightly: '
+            + escapeHtml(startedAt !== '' ? startedAt : 'onbekend')
+            + (finishedAt !== '' ? (' → ' + escapeHtml(finishedAt)) : '')
+            + '</p>';
+
+        const companies = stats && typeof stats.companies === 'object' && stats.companies !== null
+            ? stats.companies
+            : {};
+        const companyNames = Object.keys(companies).sort(function (left, right)
+        {
+            return left.localeCompare(right, 'nl', { sensitivity: 'base' });
+        });
+
+        if (companyNames.length === 0)
+        {
+            return intro + '<p>Nog geen nightly-statistieken beschikbaar.</p>';
+        }
+
+        const rowsHtml = [];
+        for (const companyName of companyNames)
+        {
+            const companyEntry = companies[companyName];
+            const costCenters = companyEntry && typeof companyEntry.cost_centers === 'object' && companyEntry.cost_centers !== null
+                ? companyEntry.cost_centers
+                : {};
+            const costCenterCodes = Object.keys(costCenters).sort(function (left, right)
+            {
+                return left.localeCompare(right, 'nl', { numeric: true, sensitivity: 'base' });
+            });
+
+            if (costCenterCodes.length === 0)
+            {
+                const companyError = companyEntry && companyEntry.error ? String(companyEntry.error) : 'Geen kostenplaatsen';
+                rowsHtml.push('<tr><td>' + escapeHtml(companyName) + '</td><td colspan="3">' + escapeHtml(companyError) + '</td></tr>');
+                continue;
+            }
+
+            for (const costCenterCode of costCenterCodes)
+            {
+                const entry = costCenters[costCenterCode];
+                const durationSeconds = entry && entry.duration_seconds !== undefined ? Number(entry.duration_seconds) : null;
+                const status = entry && entry.status ? String(entry.status) : 'onbekend';
+                const durationText = Number.isFinite(durationSeconds)
+                    ? (durationSeconds.toFixed(1).replace('.', ',') + ' s')
+                    : '—';
+                const detailParts = [];
+                if (entry && entry.weeks_processed !== undefined)
+                {
+                    detailParts.push(String(entry.weeks_processed) + ' weken');
+                }
+                if (entry && entry.memos_refreshed !== undefined)
+                {
+                    detailParts.push(String(entry.memos_refreshed) + ' memo\'s');
+                }
+                if (entry && entry.error)
+                {
+                    detailParts.push(String(entry.error));
+                }
+
+                rowsHtml.push([
+                    '<tr>',
+                    '<td>' + escapeHtml(companyName) + '</td>',
+                    '<td>' + escapeHtml(costCenterCode) + '</td>',
+                    '<td>' + escapeHtml(durationText) + '</td>',
+                    '<td>' + escapeHtml(status + (detailParts.length > 0 ? (' — ' + detailParts.join(', ')) : '')) + '</td>',
+                    '</tr>'
+                ].join(''));
+            }
+        }
+
+        return intro + [
+            '<table class="nightly-stats-table">',
+            '<thead><tr><th>Bedrijf</th><th>Kostenplaats</th><th>Duur</th><th>Status</th></tr></thead>',
+            '<tbody>' + rowsHtml.join('') + '</tbody>',
+            '</table>'
+        ].join('');
+    }
+
+    async function finalizeRefreshAfterLoad ()
+    {
+        const company = String(payload.company || '').trim();
+        const costCenter = loadedCostCenter;
+        if (company === '' || costCenter === '')
+        {
+            return;
+        }
+
+        updateHistoryLoadNote('Memo\'s ophalen...');
+        const params = new URLSearchParams();
+        params.set('action', 'refresh_all_memos');
+        params.set('company', company);
+        params.set('cost_center', costCenter);
+
+        const response = await fetch('index.php?' + params.toString(), {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: {
+                Accept: 'application/json'
+            }
+        });
+        const body = await response.json();
+        if (!response.ok || !body || body.ok !== true)
+        {
+            throw new Error(body && body.error ? body.error : ('HTTP ' + response.status));
+        }
+
+        const redirectParams = new URLSearchParams(window.location.search);
+        redirectParams.delete('refresh_now');
+        redirectParams.delete('call_time_log_session');
+        const redirectUrl = 'index.php?' + redirectParams.toString();
+        window.location.replace(redirectUrl);
     }
 
     function initializePageLoaderHandlers ()
@@ -368,22 +591,47 @@
             controlsForm.addEventListener('submit', function (event)
             {
                 const submitter = event.submitter;
-                const isDataLoadRequest = submitter
-                    && (submitter.name === 'show' || submitter.name === 'force_full');
+                const isRefreshRequest = submitter && submitter.name === 'refresh_now';
 
-                if (!isDataLoadRequest)
+                if (isRefreshRequest)
                 {
+                    if (costCenterSelect && String(costCenterSelect.value || '').trim() === '')
+                    {
+                        event.preventDefault();
+                        costCenterSelect.focus();
+                        return;
+                    }
+
+                    const confirmed = window.confirm(
+                        'Ververs Nu haalt alle gegevens opnieuw op uit Business Central en schrijft ze naar cache. Dit kan enkele minuten duren. Doorgaan?'
+                    );
+                    if (!confirmed)
+                    {
+                        event.preventDefault();
+                        return;
+                    }
+
+                    startPageLoaderProgress('Gegevens verversen...');
                     return;
                 }
 
+                if (submitter && submitter.name === 'refresh_now')
+                {
+                    return;
+                }
+            });
+        }
+
+        const refreshNowButton = document.getElementById('refreshNowButton');
+        if (refreshNowButton)
+        {
+            refreshNowButton.addEventListener('click', function (event)
+            {
                 if (costCenterSelect && String(costCenterSelect.value || '').trim() === '')
                 {
                     event.preventDefault();
                     costCenterSelect.focus();
-                    return;
                 }
-
-                startPageLoaderProgress('Gegevens laden...');
             });
         }
 
@@ -4780,6 +5028,10 @@
         params.set('cost_center', loadedCostCenter);
         params.set('year_week', yearWeek);
         params.set('invoice_filter', invoiceFilter);
+        if (asyncLoadConfig.force_full === true)
+        {
+            params.set('force_full', '1');
+        }
         if (callTimeLogSession !== '')
         {
             params.set('call_time_log_session', callTimeLogSession);

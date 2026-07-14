@@ -124,7 +124,7 @@ function finance_is_closed_project_status(string $status): bool
 {
     $normalized = strtolower(trim($status));
 
-    return in_array($normalized, ['completed', 'closed', 'afgesloten', 'gereed'], true);
+    return in_array($normalized, ['completed', 'closed', 'afgesloten', 'gereed', 'geannuleerd', 'cancelled'], true);
 }
 
 /**
