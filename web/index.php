@@ -142,6 +142,7 @@ register_shutdown_function(function () {
 require __DIR__ . "/auth.php";
 require_once __DIR__ . "/auth_helper.php";
 require_once __DIR__ . "/logincheck.php";
+demeter_release_session_lock_if_active();
 require_once __DIR__ . "/odata.php";
 require_once __DIR__ . "/project_finance.php";
 require_once __DIR__ . "/bc_fetch/month_loader.php";
@@ -480,12 +481,16 @@ if (($_GET['action'] ?? '') === 'load_month') {
 
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
-        odata_perf_log_reset();
+        $perfLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
+        if ($perfLogSession !== '') {
+            odata_call_time_log_activate_session($perfLogSession);
+        }
         $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, null, [
             'cost_center' => $costCenter,
             'force_full' => $forceFull,
             'skip_if_cached' => true,
             'partial_to_today' => $yearWeek === demeter_current_iso_year_week(),
+            'load_session_id' => $perfLogSession,
         ]);
 
         $built = [
@@ -528,7 +533,6 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'projectposten_rows_by_project_and_workorder' => is_array($chunk['projectposten_rows_by_project_and_workorder'] ?? null) ? $chunk['projectposten_rows_by_project_and_workorder'] : [],
             'invoice_details_by_id' => is_array($chunk['invoice_details_by_id'] ?? null) ? $chunk['invoice_details_by_id'] : [],
             'load_meta' => is_array($chunk['load_meta'] ?? null) ? $chunk['load_meta'] : [],
-            'odata_perf_log' => odata_perf_log_get(),
         ]);
     } catch (Throwable $error) {
         demeter_send_json_response(odata_append_debug_to_payload([
@@ -665,6 +669,14 @@ if ($selectedCostCenter === '' && $defaultCostCenterSetting !== '') {
 $forceFullReload = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
 $dataLoadRequested = array_key_exists('show', $_GET) || $forceFullReload;
 
+$callTimeLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
+if ($dataLoadRequested && $callTimeLogSession === '' && odata_call_time_log_is_localhost()) {
+    $callTimeLogSession = odata_call_time_log_create_session_id();
+}
+if ($callTimeLogSession !== '') {
+    odata_call_time_log_activate_session($callTimeLogSession);
+}
+
 $activeLoadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
 $activeLoadProgressToken = odata_load_progress_is_valid_token($activeLoadProgressTokenRaw)
     ? $activeLoadProgressTokenRaw
@@ -699,6 +711,9 @@ if ($shouldLoadData && !$isBootRequest && !$asyncLoadEnabledForBoot) {
     }
     $bootQuery['boot'] = '1';
     $bootQuery['load_token'] = $activeLoadProgressToken;
+    if ($callTimeLogSession !== '') {
+        $bootQuery['call_time_log_session'] = $callTimeLogSession;
+    }
     $bootUrl = 'index.php?' . http_build_query($bootQuery, '', '&', PHP_QUERY_RFC3986);
     $bootStatusUrl = 'odata.php?action=load_progress&token=' . rawurlencode($activeLoadProgressToken);
 
@@ -728,11 +743,7 @@ $bootMonthPreloaded = false;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
-    if (!$shouldLoadData) {
-        if ($selectedCompany === '') {
-            throw new RuntimeException('Kies eerst een bedrijf om gegevens op te halen.');
-        }
-    } elseif ($selectedCompany === '') {
+    if ($shouldLoadData && $selectedCompany === '') {
         throw new RuntimeException('Geen bedrijven beschikbaar voor de geselecteerde actieve environments.');
     }
 
@@ -775,6 +786,7 @@ try {
             'force_full' => $forceFullReload,
             'partial_to_today' => true,
             'skip_if_cached' => false,
+            'load_session_id' => $callTimeLogSession,
         ];
 
         $companiesToLoad = $selectedCompany === $allCompaniesOptionValue ? $companies : [$selectedCompany];
@@ -866,6 +878,7 @@ $initialData = [
         'should_continue' => $asyncLoadEnabled && demeter_month_scan_should_continue($monthScan, demeter_previous_iso_year_week($syncLoadWeek)),
         'empty_stop_count' => DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT,
         'history_weeks_total' => demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek),
+        'parallel_week_loads' => 2,
         'load_month_url' => 'index.php?action=load_month',
         'load_workorder_memos_url' => 'index.php?action=load_workorder_memos',
     ],
@@ -882,6 +895,7 @@ $initialData = [
     'projectposten_rows_by_project' => $projectpostenRowsByProject,
     'projectposten_rows_by_project_and_workorder' => $projectpostenRowsByProjectAndWorkorder,
     'error' => $errorMessage,
+    'call_time_log_session' => $callTimeLogSession,
 ];
 ?>
 <!doctype html>
@@ -1834,7 +1848,7 @@ $initialData = [
 </head>
 
 <body>
-    <div id="pageLoader" class="page-loader is-visible" aria-live="polite" aria-label="Laden">
+    <div id="pageLoader" class="page-loader" aria-live="polite" aria-label="Laden">
         <div class="page-loader-content">
             <div class="page-loader-spinner" aria-hidden="true"></div>
             <div id="pageLoaderPercent" class="page-loader-percent">0%</div>

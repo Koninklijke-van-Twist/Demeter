@@ -2,5 +2,6 @@
 web/auth.php
 
 web/cache/
+web/cache/call_time_logs/
 
 BC Webservices.txt

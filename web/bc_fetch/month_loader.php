@@ -52,7 +52,7 @@ function bc_fetch_month_date_range(string $yearMonth, bool $partialToToday = fal
 /**
  * Laadt één week-chunk voor het werkorderoverzicht.
  *
- * @param array{cost_center?: string, force_full?: bool, partial_to_today?: bool, skip_if_cached?: bool} $options
+ * @param array{cost_center?: string, force_full?: bool, partial_to_today?: bool, skip_if_cached?: bool, load_session_id?: string} $options
  */
 function bc_fetch_load_workorder_week_chunk(
     string $company,
@@ -70,21 +70,28 @@ function bc_fetch_load_workorder_week_chunk(
     $forceFull = !empty($options['force_full']);
     $partialToToday = !empty($options['partial_to_today']);
     $skipIfCached = array_key_exists('skip_if_cached', $options) ? (bool) $options['skip_if_cached'] : true;
+    $loadSessionId = trim((string) ($options['load_session_id'] ?? ''));
 
     $weekRange = bc_fetch_week_date_range($yearWeek, $partialToToday);
     $rangeStart = $weekRange['from'];
     $rangeEndExclusive = $weekRange['to'];
     $normalizedYearWeek = $weekRange['year_week'];
     $currentCalendarWeek = demeter_current_iso_year_week();
-    if ($normalizedYearWeek === $currentCalendarWeek) {
-        $skipIfCached = false;
-    }
 
     $cachedState = $forceFull ? null : demeter_workorder_state_cache_load($company, $costCenter);
     $monthScan = is_array($cachedState['month_scan'] ?? null) ? $cachedState['month_scan'] : demeter_workorder_month_scan_defaults();
     $isIncrementalRun = $cachedState !== null;
+    $displayRowsByKey = $isIncrementalRun
+        ? demeter_workorder_state_cache_load_display_rows($company, $costCenter)
+        : [];
 
-    if ($skipIfCached && !$forceFull && demeter_month_scan_can_skip($normalizedYearWeek, $monthScan)) {
+    if ($skipIfCached && !$forceFull && demeter_month_scan_can_skip_reload(
+        $normalizedYearWeek,
+        $monthScan,
+        $currentCalendarWeek,
+        false,
+        $displayRowsByKey
+    )) {
         $monthMeta = is_array($monthScan['months'][$normalizedYearWeek] ?? null) ? $monthScan['months'][$normalizedYearWeek] : [];
         $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
 
@@ -116,9 +123,16 @@ function bc_fetch_load_workorder_week_chunk(
                 'year_month' => $normalizedYearWeek,
                 'incremental' => $cachedState !== null,
                 'skipped_cached' => true,
+                'week_load_mode' => 'skip',
             ],
         ];
     }
+
+    $weekLoadMode = $forceFull
+        ? 'full'
+        : (demeter_month_scan_should_use_lightweight_refresh($normalizedYearWeek, $monthScan, $currentCalendarWeek, $forceFull)
+            ? 'lightweight'
+            : 'full');
 
     $totalProgressSteps = 4;
     $progressStep = 0;
@@ -130,6 +144,9 @@ function bc_fetch_load_workorder_week_chunk(
     };
 
     $cachedWorkorders = is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
+    $loadSession = is_array($cachedState)
+        ? demeter_workorder_state_normalize_load_session($cachedState['load_session'] ?? null)
+        : demeter_workorder_load_session_defaults();
 
     $advanceProgress('ProjectPosten');
     $financeService = new ProjectFinanceService($company);
@@ -190,7 +207,7 @@ function bc_fetch_load_workorder_week_chunk(
             []
         );
 
-        demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan);
+        demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan, $loadSession);
         demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
 
         $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
@@ -226,15 +243,17 @@ function bc_fetch_load_workorder_week_chunk(
                 'from_cache_count' => 0,
                 'updated_from_bc_count' => 0,
                 'skipped_cached' => false,
+                'week_load_mode' => 'lightweight',
             ],
         ];
     }
 
-    $fetchPlan = bc_fetch_resolve_workorder_fetch_plan($pairs, $pairKeysInPosten, $cachedState, $forceFull);
+    $fetchPlan = bc_fetch_resolve_workorder_fetch_plan($pairs, $pairKeysInPosten, $cachedState, $forceFull, $loadSessionId);
     $fetchPairs = $fetchPlan['fetch_pairs'];
     $cachedWorkorderRows = $fetchPlan['use_cached_rows'];
     $statusCheckCount = 0;
     $statusClosedCount = 0;
+    $statusRefreshCount = 0;
 
     if (!$forceFull && $fetchPlan['status_check_pairs'] !== []) {
         $advanceProgress('Open werkorders controleren');
@@ -244,6 +263,25 @@ function bc_fetch_load_workorder_week_chunk(
             $cachedWorkorders,
             $auth,
             $ttl
+        );
+        $statusCheckedPairKeys = [];
+        foreach ($fetchPlan['status_check_pairs'] as $statusCheckPair) {
+            if (!is_array($statusCheckPair)) {
+                continue;
+            }
+
+            $jobNo = trim((string) ($statusCheckPair['job_no'] ?? ''));
+            $jobTaskNo = trim((string) ($statusCheckPair['job_task_no'] ?? ''));
+            if ($jobNo === '' || $jobTaskNo === '') {
+                continue;
+            }
+
+            $statusCheckedPairKeys[] = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+        }
+        $loadSession = demeter_workorder_state_record_status_checked_pairs(
+            $loadSession,
+            $loadSessionId,
+            $statusCheckedPairKeys
         );
         $fetchPairs = array_merge($fetchPairs, $staleResult['fetch_pairs']);
         $cachedWorkorderRows = array_merge(
@@ -255,8 +293,51 @@ function bc_fetch_load_workorder_week_chunk(
         $statusClosedCount = count($staleResult['status_updated_rows']);
     }
 
-    $advanceProgress($isIncrementalRun ? 'Werkorders (open)' : 'Werkorders');
-    $fetchedWorkorders = bc_fetch_workorders_by_job_task_pairs($company, $fetchPairs, $auth, $ttl);
+    if ($weekLoadMode === 'lightweight' || $normalizedYearWeek === $currentCalendarWeek) {
+        $statusRefreshPairs = [];
+        foreach ($pairs as $pair) {
+            if (!is_array($pair)) {
+                continue;
+            }
+
+            $jobNo = trim((string) ($pair['job_no'] ?? ''));
+            $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+            if ($jobNo === '' || $jobTaskNo === '') {
+                continue;
+            }
+
+            $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+            if (!isset($pairKeysInPosten[$pairKey])) {
+                continue;
+            }
+
+            $cachedEntry = $cachedWorkorders[$pairKey] ?? null;
+            if (!is_array($cachedEntry) || !empty($cachedEntry['is_closed']) || !is_array($cachedEntry['row'] ?? null)) {
+                continue;
+            }
+
+            $statusRefreshPairs[] = [
+                'job_no' => $jobNo,
+                'job_task_no' => $jobTaskNo,
+            ];
+        }
+
+        if ($statusRefreshPairs !== []) {
+            $statusSnapshots = bc_fetch_fetch_workorder_status_by_pairs($company, $statusRefreshPairs, $auth, $ttl);
+            $cachedWorkorderRows = bc_fetch_apply_status_snapshots_to_workorder_rows($cachedWorkorderRows, $statusSnapshots);
+            $statusRefreshCount = count($statusRefreshPairs);
+            $statusCheckCount += $statusRefreshCount;
+        }
+    }
+
+    if ($fetchPairs === [] && !$forceFull && $cachedWorkorderRows !== []) {
+        $weekLoadMode = 'lightweight';
+    }
+
+    $advanceProgress($weekLoadMode === 'lightweight' ? 'Werkorders (cache)' : ($isIncrementalRun ? 'Werkorders (open)' : 'Werkorders'));
+    $fetchedWorkorders = $fetchPairs !== []
+        ? bc_fetch_workorders_by_job_task_pairs($company, $fetchPairs, $auth, $ttl)
+        : [];
     $workorders = bc_fetch_merge_workorder_rows($cachedWorkorderRows, $fetchedWorkorders);
 
     if ($costCenter !== '') {
@@ -346,7 +427,9 @@ function bc_fetch_load_workorder_week_chunk(
         $monthScan
     );
 
-    $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
+    $displayRowsByKey = $displayRowsByKey !== []
+        ? $displayRowsByKey
+        : demeter_workorder_state_cache_load_display_rows($company, $costCenter);
     $displayRowsByKey = demeter_merge_display_rows_for_month_chunk(
         $displayRowsByKey,
         $builtRows['rows'],
@@ -354,7 +437,7 @@ function bc_fetch_load_workorder_week_chunk(
         is_array($rangeFinance['project_totals_by_job'] ?? null) ? $rangeFinance['project_totals_by_job'] : []
     );
 
-    demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan);
+    demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan, $loadSession);
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
 
     $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
@@ -394,6 +477,8 @@ function bc_fetch_load_workorder_week_chunk(
             'invoice_from_cache_count' => (int) ($invoiceLoadMeta['from_cache_count'] ?? 0),
             'invoice_fetched_count' => (int) ($invoiceLoadMeta['fetched_count'] ?? 0),
             'skipped_cached' => false,
+            'week_load_mode' => $weekLoadMode,
+            'status_refresh_count' => $statusRefreshCount,
         ],
     ];
 }

@@ -103,10 +103,14 @@
     const rowLoadStates = new Map();
     const rowDomByKey = new Map();
     const monthScanEmptyStopCount = Number(asyncLoadConfig.empty_stop_count || 12);
+    const historyParallelWeekLoads = Math.max(1, Number(asyncLoadConfig.parallel_week_loads || 2));
     let historyWeeksTotal = Number(asyncLoadConfig.history_weeks_total || 0) || null;
     const loadWorkorderMemosUrl = typeof asyncLoadConfig.load_workorder_memos_url === 'string'
         ? asyncLoadConfig.load_workorder_memos_url
         : 'index.php?action=load_workorder_memos';
+    const callTimeLogSession = typeof payload.call_time_log_session === 'string'
+        ? payload.call_time_log_session.trim()
+        : '';
     const memoFetchInFlight = new Map();
     let monthScanState = asyncLoadConfig.month_scan && typeof asyncLoadConfig.month_scan === 'object'
         ? asyncLoadConfig.month_scan
@@ -4205,6 +4209,54 @@
         }
     }
 
+    function refreshFinanceRowIntoExisting (existing, monthRow)
+    {
+        const preservedMemos = preserveExistingMemosOnMerge(existing, monthRow);
+        const financeFields = [
+            'Actual_Costs',
+            'Total_Revenue',
+            'Actual_Total',
+            'Project_Actual_Costs',
+            'Project_Total_Revenue',
+            'Invoiced_Total'
+        ];
+
+        for (const field of financeFields)
+        {
+            if (monthRow[field] === null || monthRow[field] === undefined)
+            {
+                continue;
+            }
+
+            existing[field] = monthRow[field];
+        }
+
+        const statusFields = ['Status', 'Document_Status', 'Invoice_Id', 'Invoice_Ids'];
+        for (const field of statusFields)
+        {
+            const value = monthRow[field];
+            if (value === null || value === undefined)
+            {
+                continue;
+            }
+
+            if (typeof value === 'string' && value.trim() === '')
+            {
+                continue;
+            }
+
+            existing[field] = value;
+        }
+
+        if (preservedMemos)
+        {
+            existing.Notes = preservedMemos.Notes;
+            existing.Notes_Search = preservedMemos.Notes_Search;
+            existing.Memos_Loaded = preservedMemos.Memos_Loaded;
+            delete existing.__memoValues;
+        }
+    }
+
     function replaceMonthRowIntoExisting (existing, monthRow)
     {
         const rowKey = existing.Row_Key;
@@ -4294,6 +4346,7 @@
 
         const isReplace = Boolean(options && options.replace);
         const isRefresh = Boolean(options && options.refresh);
+        const isRefreshFinance = Boolean(options && options.refreshFinance);
         const resetTotals = Boolean(options && options.resetTotals);
 
         const chunkInvoiceDetails = chunk.invoice_details_by_id;
@@ -4330,7 +4383,11 @@
             const existing = rowsByKey.get(rowKey);
             if (existing)
             {
-                if (isRefresh)
+                if (isRefreshFinance)
+                {
+                    refreshFinanceRowIntoExisting(existing, monthRow);
+                }
+                else if (isRefresh)
                 {
                     refreshWeekRowIntoExisting(existing, monthRow);
                 }
@@ -4514,68 +4571,6 @@
         });
     }
 
-    function logDemeterODataPerf (chunk, contextLabel)
-    {
-        const entries = chunk && Array.isArray(chunk.odata_perf_log) ? chunk.odata_perf_log : [];
-        if (entries.length === 0)
-        {
-            return;
-        }
-
-        const label = String(contextLabel || 'week-load');
-        let networkMs = 0;
-        let cacheMs = 0;
-        let networkCalls = 0;
-        let cacheCalls = 0;
-
-        console.group('[Demeter OData perf] ' + label);
-        for (const entry of entries)
-        {
-            const durationMs = Number(entry && entry.duration_ms ? entry.duration_ms : 0);
-            const entity = entry && entry.entity ? String(entry.entity) : 'call';
-            const rowCount = entry && typeof entry.rows === 'number' ? entry.rows : null;
-            const summaryUrl = entry && entry.url ? String(entry.url) : '';
-            const fromCache = !!(entry && entry.cached);
-
-            if (fromCache)
-            {
-                cacheMs += durationMs;
-                cacheCalls++;
-            }
-            else
-            {
-                networkMs += durationMs;
-                networkCalls++;
-            }
-
-            const rowSuffix = rowCount !== null ? ' (' + String(rowCount) + ' rows)' : '';
-            console.log(
-                (fromCache ? '[cache] ' : '[network] ')
-                + entity
-                + ' — '
-                + String(durationMs)
-                + 'ms'
-                + rowSuffix,
-                summaryUrl
-            );
-        }
-
-        console.log(
-            'Totaal: '
-            + String(networkMs + cacheMs)
-            + 'ms — network: '
-            + String(networkMs)
-            + 'ms ('
-            + String(networkCalls)
-            + ' calls), cache: '
-            + String(cacheMs)
-            + 'ms ('
-            + String(cacheCalls)
-            + ' hits)'
-        );
-        console.groupEnd();
-    }
-
     function isRetryableODataError (message)
     {
         const normalized = String(message || '').toLowerCase();
@@ -4647,6 +4642,10 @@
         params.set('cost_center', loadedCostCenter);
         params.set('year_week', yearWeek);
         params.set('invoice_filter', invoiceFilter);
+        if (callTimeLogSession !== '')
+        {
+            params.set('call_time_log_session', callTimeLogSession);
+        }
 
         return fetch('index.php?' + params.toString(), {
             method: 'GET',
@@ -4682,62 +4681,111 @@
         }
 
         historyLoadRunning = true;
-        let weekToLoad = currentWeek;
-        let isFirstWeek = true;
+        let weekBatch = [currentWeek];
+        let isFirstBatch = true;
         let weeksCompleted = 0;
 
         try
         {
-            while (weekToLoad && (isFirstWeek || shouldContinueHistoryLoading(monthScanState, weekToLoad)))
+            while (weekBatch.length > 0)
             {
-                const weekMeta = monthScanState.months && monthScanState.months[weekToLoad]
-                    ? monthScanState.months[weekToLoad]
-                    : null;
-                const expectedRowKeys = weekMeta && Array.isArray(weekMeta.row_keys) ? weekMeta.row_keys : [];
-                if (expectedRowKeys.length > 0)
+                const batch = weekBatch.slice(0, historyParallelWeekLoads);
+                weekBatch = weekBatch.slice(batch.length);
+
+                for (const yearWeek of batch)
                 {
-                    markRowsLoading(expectedRowKeys);
+                    const weekMeta = monthScanState.months && monthScanState.months[yearWeek]
+                        ? monthScanState.months[yearWeek]
+                        : null;
+                    const expectedRowKeys = weekMeta && Array.isArray(weekMeta.row_keys) ? weekMeta.row_keys : [];
+                    if (expectedRowKeys.length > 0)
+                    {
+                        markRowsLoading(expectedRowKeys);
+                    }
                 }
 
-                updateHistoryLoadNote(buildHistoryLoadNote(weekToLoad, monthScanState, weeksCompleted, isFirstWeek));
+                updateHistoryLoadNote(buildHistoryLoadNote(batch[0], monthScanState, weeksCompleted, isFirstBatch));
 
-                const chunk = await fetchHistoryWeekWithRetry(weekToLoad);
-                logDemeterODataPerf(chunk, 'week ' + String(weekToLoad));
-                monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
-                historyWeeksTotal = resolveHistoryWeeksTotal(monthScanState);
-
-                if (!chunk.skipped)
+                const chunks = await Promise.all(batch.map(function (yearWeek)
                 {
-                    const useCacheRefresh = isFirstWeek && loadStatsFromCache > 0;
-                    mergeMonthChunk(chunk, {
-                        replace: isFirstWeek && !useCacheRefresh,
-                        refresh: useCacheRefresh,
-                        resetTotals: isFirstWeek && loadStatsFromCache === 0
-                    });
-                    await yieldToUi();
+                    return fetchHistoryWeekWithRetry(yearWeek);
+                }));
+
+                let shouldContinue = false;
+                const nextWeeks = [];
+
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex++)
+                {
+                    const chunk = chunks[chunkIndex];
+                    const yearWeek = batch[chunkIndex];
+                    monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
+                    historyWeeksTotal = resolveHistoryWeeksTotal(monthScanState);
+
+                    if (!chunk.skipped)
+                    {
+                        const weekLoadMode = chunk.load_meta && typeof chunk.load_meta.week_load_mode === 'string'
+                            ? chunk.load_meta.week_load_mode
+                            : 'full';
+                        const useCacheRefresh = isFirstBatch && chunkIndex === 0 && loadStatsFromCache > 0;
+                        const isLightweight = weekLoadMode === 'lightweight';
+
+                        mergeMonthChunk(chunk, {
+                            replace: isFirstBatch && chunkIndex === 0 && !useCacheRefresh && !isLightweight,
+                            refresh: useCacheRefresh && !isLightweight,
+                            refreshFinance: isLightweight,
+                            resetTotals: isFirstBatch && chunkIndex === 0 && loadStatsFromCache === 0
+                        });
+                    }
+
+                    const completedKeys = Array.isArray(chunk.row_keys) ? chunk.row_keys : [];
+                    if (completedKeys.length > 0)
+                    {
+                        markRowsComplete(completedKeys);
+                    }
+
+                    weeksCompleted++;
+                    if (chunk.should_continue)
+                    {
+                        shouldContinue = true;
+                    }
+
+                    const nextWeek = chunk.next_week || chunk.next_month || null;
+                    if (nextWeek && shouldContinueHistoryLoading(monthScanState, nextWeek))
+                    {
+                        nextWeeks.push(nextWeek);
+                    }
                 }
 
-                const completedKeys = Array.isArray(chunk.row_keys) ? chunk.row_keys : [];
-                if (completedKeys.length > 0)
+                if (!isFirstBatch)
                 {
-                    markRowsComplete(completedKeys);
+                    updateHistoryLoadNote(buildHistoryLoadNote(batch[batch.length - 1], monthScanState, weeksCompleted, false));
                 }
 
-                weeksCompleted++;
-                if (!isFirstWeek)
-                {
-                    updateHistoryLoadNote(buildHistoryLoadNote(weekToLoad, monthScanState, weeksCompleted, false));
-                }
+                isFirstBatch = false;
+                await yieldToUi();
 
-                if (!chunk.should_continue)
+                if (!shouldContinue)
                 {
                     break;
                 }
 
-                weekToLoad = chunk.next_week || chunk.next_month || null;
-                nextHistoryMonth = weekToLoad;
-                isFirstWeek = false;
-                await yieldToUi();
+                const seenWeeks = new Set();
+                weekBatch = [];
+                for (const nextWeek of nextWeeks)
+                {
+                    if (!nextWeek || seenWeeks.has(nextWeek))
+                    {
+                        continue;
+                    }
+
+                    seenWeeks.add(nextWeek);
+                    weekBatch.push(nextWeek);
+                }
+
+                if (weekBatch.length > 0)
+                {
+                    nextHistoryMonth = weekBatch[0];
+                }
             }
         }
         catch (historyError)

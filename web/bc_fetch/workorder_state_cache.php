@@ -12,9 +12,105 @@ const DEMETER_WORKORDER_STATE_CACHE_VERSION = 6;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */
-const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 7;
+const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 14;
+/** Huidige ISO-week overslaan bij herladen als scan jonger is dan dit aantal uren. */
+const DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS = 2;
+/** Per Job_No: bij hoogstens dit aantal paren eerst gerichte AND-filter i.p.v. volledige job-batch. */
+const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 3;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */
 const DEMETER_WORKORDER_JOB_NO_BATCH_SIZE = 15;
+
+/**
+ * Standaard load_session metadata (status-check dedup per Toon-sessie).
+ */
+function demeter_workorder_load_session_defaults(): array
+{
+    return [
+        'session_id' => '',
+        'status_checked_pair_keys' => [],
+    ];
+}
+
+/**
+ * Normaliseert load_session uit de werkorder-state cache.
+ */
+function demeter_workorder_state_normalize_load_session(?array $loadSession): array
+{
+    $normalized = demeter_workorder_load_session_defaults();
+    if (!is_array($loadSession)) {
+        return $normalized;
+    }
+
+    $normalized['session_id'] = trim((string) ($loadSession['session_id'] ?? ''));
+    $pairKeys = $loadSession['status_checked_pair_keys'] ?? null;
+    if (is_array($pairKeys)) {
+        foreach ($pairKeys as $pairKey => $checked) {
+            if (!is_string($pairKey) || trim($pairKey) === '') {
+                continue;
+            }
+
+            if ($checked) {
+                $normalized['status_checked_pair_keys'][trim($pairKey)] = true;
+            }
+        }
+    }
+
+    return $normalized;
+}
+
+/**
+ * Bepaalt of een pair al een lichte status-check kreeg in deze load-sessie.
+ */
+function demeter_workorder_state_is_pair_status_checked_this_session(?array $cachedState, string $loadSessionId, string $pairKey): bool
+{
+    $loadSessionId = trim($loadSessionId);
+    $pairKey = trim($pairKey);
+    if ($loadSessionId === '' || $pairKey === '') {
+        return false;
+    }
+
+    $loadSession = is_array($cachedState)
+        ? demeter_workorder_state_normalize_load_session($cachedState['load_session'] ?? null)
+        : demeter_workorder_load_session_defaults();
+
+    if ($loadSession['session_id'] !== $loadSessionId) {
+        return false;
+    }
+
+    return !empty($loadSession['status_checked_pair_keys'][$pairKey]);
+}
+
+/**
+ * Registreert pair-keys waarvoor een status-check is uitgevoerd in deze sessie.
+ *
+ * @param list<string> $pairKeys
+ */
+function demeter_workorder_state_record_status_checked_pairs(array $loadSession, string $loadSessionId, array $pairKeys): array
+{
+    $loadSessionId = trim($loadSessionId);
+    if ($loadSessionId === '' || $pairKeys === []) {
+        return demeter_workorder_state_normalize_load_session($loadSession);
+    }
+
+    $normalized = demeter_workorder_state_normalize_load_session($loadSession);
+    if ($normalized['session_id'] !== $loadSessionId) {
+        $normalized = demeter_workorder_load_session_defaults();
+        $normalized['session_id'] = $loadSessionId;
+    }
+
+    foreach ($pairKeys as $pairKey) {
+        if (!is_string($pairKey)) {
+            continue;
+        }
+
+        $trimmed = trim($pairKey);
+        if ($trimmed !== '') {
+            $normalized['status_checked_pair_keys'][$trimmed] = true;
+        }
+    }
+
+    return $normalized;
+}
 
 /**
  * Bepaalt of een werkorderstatus als afgesloten telt.
@@ -317,6 +413,8 @@ function demeter_workorder_state_cache_load(string $company, string $costCenter,
         $decoded['display_rows'] = [];
     }
 
+    $decoded['load_session'] = demeter_workorder_state_normalize_load_session($decoded['load_session'] ?? null);
+
     if (demeter_workorder_month_scan_uses_legacy_month_keys($monthScan)) {
         demeter_workorder_state_cache_purge($company, $costCenter);
         if ($purgedLegacy !== null) {
@@ -336,7 +434,8 @@ function demeter_workorder_state_cache_save(
     string $company,
     string $costCenter,
     array $workordersByPairKey,
-    array $monthScan
+    array $monthScan,
+    ?array $loadSession = null
 ): bool {
     $directory = demeter_workorder_state_cache_directory();
     if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
@@ -351,6 +450,10 @@ function demeter_workorder_state_cache_save(
         'workorders' => $workordersByPairKey,
         'month_scan' => $monthScan,
     ];
+
+    if (is_array($loadSession)) {
+        $payload['load_session'] = demeter_workorder_state_normalize_load_session($loadSession);
+    }
 
     $json = demeter_workorder_state_cache_json_encode($payload);
     if (!is_string($json)) {
@@ -489,6 +592,113 @@ function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
     }
 
     return !empty($monthMeta['only_closed_cached']) && !empty($monthMeta['scanned_at']);
+}
+
+/**
+ * Bepaalt of een week-scan recent genoeg is (op basis van scanned_at).
+ */
+function demeter_month_scan_week_scanned_within_hours(string $yearWeek, array $monthScan, int $maxAgeHours): bool
+{
+    if ($maxAgeHours <= 0) {
+        return false;
+    }
+
+    $monthMeta = $monthScan['months'][$yearWeek] ?? null;
+    if (!is_array($monthMeta)) {
+        return false;
+    }
+
+    $scannedAt = trim((string) ($monthMeta['scanned_at'] ?? ''));
+    if ($scannedAt === '') {
+        return false;
+    }
+
+    $parsed = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $scannedAt);
+    if (!$parsed instanceof DateTimeImmutable) {
+        $parsed = DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $scannedAt);
+    }
+    if (!$parsed instanceof DateTimeImmutable) {
+        return false;
+    }
+
+    $ageSeconds = time() - $parsed->getTimestamp();
+
+    return $ageSeconds >= 0 && $ageSeconds <= ($maxAgeHours * 3600);
+}
+
+/**
+ * Slaat een eerder gescande week over bij herladen (display-cache + scan-metadata).
+ *
+ * Open werkorders blijven in cache; kosten/status/facturen voor de huidige week worden via
+ * lightweight refresh of verse scan bijgewerkt.
+ *
+ * @param array<string, array> $displayRowsByKey
+ */
+function demeter_month_scan_can_skip_reload(
+    string $yearWeek,
+    array $monthScan,
+    string $currentWeek,
+    bool $forceFull,
+    array $displayRowsByKey = []
+): bool {
+    if ($forceFull) {
+        return false;
+    }
+
+    if (demeter_month_scan_can_skip($yearWeek, $monthScan)) {
+        return true;
+    }
+
+    $monthMeta = $monthScan['months'][$yearWeek] ?? null;
+    if (!is_array($monthMeta) || trim((string) ($monthMeta['scanned_at'] ?? '')) === '') {
+        return false;
+    }
+
+    if ($yearWeek === $currentWeek) {
+        return demeter_month_scan_week_scanned_within_hours(
+            $yearWeek,
+            $monthScan,
+            DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS
+        );
+    }
+
+    if (!empty($monthMeta['empty'])) {
+        return true;
+    }
+
+    $rowKeys = demeter_month_scan_expected_row_keys($monthScan, $yearWeek);
+    if ($rowKeys === []) {
+        return false;
+    }
+
+    foreach ($rowKeys as $rowKey) {
+        if (!isset($displayRowsByKey[$rowKey])) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/**
+ * Bepaalt of een week een lichte refresh krijgt (ProjectPosten + status/facturen, gecachte WO-metadata).
+ */
+function demeter_month_scan_should_use_lightweight_refresh(
+    string $yearWeek,
+    array $monthScan,
+    string $currentWeek,
+    bool $forceFull
+): bool {
+    if ($forceFull) {
+        return false;
+    }
+
+    $monthMeta = $monthScan['months'][$yearWeek] ?? null;
+    if (!is_array($monthMeta) || trim((string) ($monthMeta['scanned_at'] ?? '')) === '') {
+        return $yearWeek === $currentWeek;
+    }
+
+    return true;
 }
 
 /**

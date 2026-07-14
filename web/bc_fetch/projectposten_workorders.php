@@ -68,9 +68,9 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
 /**
  * Bepaalt welke job/task-paren opgehaald moeten worden (incrementeel of volledig).
  *
- * - fetch_pairs: volledige BC-refresh (nieuw, open+in posten, stale+oud genoeg)
- * - status_check_pairs: lichte status-check (open, niet in posten)
- * - use_cached_rows: gesloten of nog vers genoeg zonder refresh
+ * - fetch_pairs: volledige BC-refresh (alleen nieuw ontbrekend in cache)
+ * - status_check_pairs: lichte status-check (open, niet in posten, nog niet deze sessie)
+ * - use_cached_rows: gesloten of open met behouden metadata (finance/status via ProjectPosten + status-check)
  *
  * @param array<string, bool> $pairKeysInPosten
  * @return array{
@@ -79,8 +79,13 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
  *   use_cached_rows: list<array>
  * }
  */
-function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPosten, ?array $cachedState, bool $forceFull): array
-{
+function bc_fetch_resolve_workorder_fetch_plan(
+    array $pairs,
+    array $pairKeysInPosten,
+    ?array $cachedState,
+    bool $forceFull,
+    string $loadSessionId = ''
+): array {
     $fetchPairs = [];
     $statusCheckPairs = [];
     $useCachedRows = [];
@@ -123,12 +128,8 @@ function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPo
             continue;
         }
 
-        // Open + in ProjectPosten: altijd volledig verversen (#1).
-        $seenFetch[$pairKey] = true;
-        $fetchPairs[] = [
-            'job_no' => $jobNo,
-            'job_task_no' => $jobTaskNo,
-        ];
+        // Open + in ProjectPosten: metadata uit cache; finance/status via ProjectPosten + status-check.
+        $useCachedRows[] = $cachedEntry['row'];
     }
 
     foreach ($cachedWorkorders as $pairKey => $cachedEntry) {
@@ -151,6 +152,13 @@ function bc_fetch_resolve_workorder_fetch_plan(array $pairs, array $pairKeysInPo
         }
 
         if (isset($seenFetch[$pairKey])) {
+            continue;
+        }
+
+        if (demeter_workorder_state_is_pair_status_checked_this_session($cachedState, $loadSessionId, $pairKey)) {
+            if (is_array($cachedEntry['row'] ?? null)) {
+                $useCachedRows[] = $cachedEntry['row'];
+            }
             continue;
         }
 
@@ -244,114 +252,13 @@ function bc_fetch_build_odata_single_pair_filter(string $jobNo, string $jobTaskN
 }
 
 /**
- * Zet Component_Description op basis van Sub_Entity_Description.
+ * Zet Component_Description op basis van Sub_Entity_Description (AppWerkorders niet nodig).
  */
 function bc_fetch_apply_sub_entity_component_description(array $row): array
 {
     $row['Component_Description'] = trim((string) ($row['Sub_Entity_Description'] ?? ''));
 
     return $row;
-}
-
-/**
- * @param list<string> $jobNos
- * @return array{by_row_key: array<string, string>, by_task_no: array<string, string>}
- */
-function bc_fetch_fetch_app_component_description_maps(string $company, array $jobNos, array $auth, int $ttl): array
-{
-    $componentDescriptionByRowKey = [];
-    $componentDescriptionByTaskNo = [];
-    $appSelect = bc_fetch_app_werkorders_select();
-
-    foreach (bc_fetch_chunk_string_values($jobNos, DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
-        $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
-        $appWorkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'AppWerkorders', [
-            '$select' => $appSelect,
-            '$filter' => $filter,
-        ]);
-        $appWorkorderRows = odata_get_all($appWorkordersUrl, $auth, $ttl);
-
-        foreach ($appWorkorderRows as $appWorkorderRow) {
-            if (!is_array($appWorkorderRow)) {
-                continue;
-            }
-
-            $componentDescription = trim((string) ($appWorkorderRow['Component_Description'] ?? ''));
-            if ($componentDescription === '') {
-                continue;
-            }
-
-            $rowKey = bc_fetch_werkorder_row_key($appWorkorderRow);
-            if ($rowKey !== '|||') {
-                $componentDescriptionByRowKey[$rowKey] = $componentDescription;
-            }
-
-            $taskNo = trim((string) ($appWorkorderRow['Job_Task_No'] ?? ''));
-            if ($taskNo !== '' && !isset($componentDescriptionByTaskNo[$taskNo])) {
-                $componentDescriptionByTaskNo[$taskNo] = $componentDescription;
-            }
-        }
-    }
-
-    return [
-        'by_row_key' => $componentDescriptionByRowKey,
-        'by_task_no' => $componentDescriptionByTaskNo,
-    ];
-}
-
-/**
- * Vult lege Component_Description aan via AppWerkorders (alleen waar nodig).
- *
- * @param list<array> $rows
- */
-function bc_fetch_enrich_workorder_rows_with_app_descriptions(string $company, array $rows, array $auth, int $ttl): array
-{
-    $jobNosNeedingApp = [];
-    foreach ($rows as $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-
-        if (trim((string) ($row['Component_Description'] ?? '')) !== '') {
-            continue;
-        }
-
-        $jobNo = trim((string) ($row['Job_No'] ?? ''));
-        if ($jobNo !== '') {
-            $jobNosNeedingApp[$jobNo] = true;
-        }
-    }
-
-    if ($jobNosNeedingApp === []) {
-        return $rows;
-    }
-
-    $maps = bc_fetch_fetch_app_component_description_maps($company, array_keys($jobNosNeedingApp), $auth, $ttl);
-    $componentDescriptionByRowKey = $maps['by_row_key'];
-    $componentDescriptionByTaskNo = $maps['by_task_no'];
-
-    foreach ($rows as $index => $row) {
-        if (!is_array($row)) {
-            continue;
-        }
-
-        if (trim((string) ($row['Component_Description'] ?? '')) !== '') {
-            continue;
-        }
-
-        $rowKey = bc_fetch_werkorder_row_key($row);
-        $taskNo = trim((string) ($row['Job_Task_No'] ?? ''));
-
-        if (isset($componentDescriptionByRowKey[$rowKey])) {
-            $row['Component_Description'] = $componentDescriptionByRowKey[$rowKey];
-        } elseif ($taskNo !== '' && isset($componentDescriptionByTaskNo[$taskNo])) {
-            $row['Component_Description'] = $componentDescriptionByTaskNo[$taskNo];
-        }
-
-        $rows[$index] = $row;
-    }
-
-    return $rows;
 }
 
 /**
@@ -402,6 +309,111 @@ function bc_fetch_chunk_string_values(array $jobNos, int $chunkSize): array
 }
 
 /**
+ * Groepeert paren per Job_No.
+ *
+ * @param list<array{job_no: string, job_task_no: string}> $pairs
+ * @return array<string, list<array{job_no: string, job_task_no: string}>>
+ */
+function bc_fetch_group_pairs_by_job_no(array $pairs): array
+{
+    $grouped = [];
+    foreach ($pairs as $pair) {
+        if (!is_array($pair)) {
+            continue;
+        }
+
+        $jobNo = trim((string) ($pair['job_no'] ?? ''));
+        if ($jobNo === '') {
+            continue;
+        }
+
+        $grouped[$jobNo][] = [
+            'job_no' => $jobNo,
+            'job_task_no' => trim((string) ($pair['job_task_no'] ?? '')),
+        ];
+    }
+
+    return $grouped;
+}
+
+/**
+ * Haalt Werkorders op via gerichte Job_No + Job_Task_No AND-filters.
+ *
+ * @param list<array{job_no: string, job_task_no: string}> $pairs
+ */
+function bc_fetch_workorders_by_pair_and_filters(
+    string $company,
+    array $pairs,
+    string $select,
+    array $wantedPairKeys,
+    array &$seenRowKeys,
+    array &$allRows,
+    array $auth,
+    int $ttl
+): void {
+    foreach ($pairs as $pair) {
+        if (!is_array($pair)) {
+            continue;
+        }
+
+        $jobNo = trim((string) ($pair['job_no'] ?? ''));
+        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+
+        $filter = bc_fetch_build_odata_single_pair_filter($jobNo, $jobTaskNo);
+        $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => $select,
+            '$filter' => $filter,
+        ]);
+        $rows = odata_get_all($url, $auth, $ttl);
+        bc_fetch_collect_matching_werkorder_rows($rows, $wantedPairKeys, $seenRowKeys, $allRows);
+    }
+}
+
+/**
+ * Past lichte status-updates toe op gecachte werkorderrijen.
+ *
+ * @param list<array> $rows
+ * @return list<array>
+ */
+function bc_fetch_apply_status_snapshots_to_workorder_rows(array $rows, array $statusByPairKey): array
+{
+    if ($statusByPairKey === []) {
+        return $rows;
+    }
+
+    $updated = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $pairKey = demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), (string) ($row['Job_Task_No'] ?? ''));
+        $snapshot = $statusByPairKey[$pairKey] ?? null;
+        if (!is_array($snapshot)) {
+            $updated[] = $row;
+            continue;
+        }
+
+        $status = trim((string) ($snapshot['Status'] ?? ''));
+        if ($status !== '') {
+            $row['Status'] = $status;
+        }
+
+        $documentStatus = trim((string) ($snapshot['KVT_Document_Status'] ?? ''));
+        if ($documentStatus !== '') {
+            $row['KVT_Document_Status'] = $documentStatus;
+        }
+
+        $updated[] = $row;
+    }
+
+    return $updated;
+}
+
+/**
  * Lichtgewicht status-check voor open stale paren (#4), met batch Job_No (#3).
  *
  * @param list<array{job_no: string, job_task_no: string}> $pairs
@@ -434,8 +446,69 @@ function bc_fetch_fetch_workorder_status_by_pairs(string $company, array $pairs,
 
     $statusByPairKey = [];
     $select = bc_fetch_werkorders_status_select();
+    $pairsByJob = bc_fetch_group_pairs_by_job_no($pairs);
+    $pairFirstPairs = [];
+    $batchPairs = [];
 
-    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($pairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+    foreach ($pairsByJob as $jobNo => $jobPairs) {
+        $validPairs = [];
+        foreach ($jobPairs as $pair) {
+            $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+            if ($jobTaskNo === '') {
+                continue;
+            }
+
+            $validPairs[] = $pair;
+        }
+
+        if ($validPairs === []) {
+            continue;
+        }
+
+        if (count($validPairs) <= DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB) {
+            foreach ($validPairs as $pair) {
+                $pairFirstPairs[] = $pair;
+            }
+            continue;
+        }
+
+        foreach ($validPairs as $pair) {
+            $batchPairs[] = $pair;
+        }
+    }
+
+    foreach ($pairFirstPairs as $pair) {
+        $jobNo = trim((string) ($pair['job_no'] ?? ''));
+        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+
+        $filter = bc_fetch_build_odata_single_pair_filter($jobNo, $jobTaskNo);
+        $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => $select,
+            '$filter' => $filter,
+        ]);
+        $rows = odata_get_all($url, $auth, $ttl);
+
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+
+            $pairKey = demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), (string) ($row['Job_Task_No'] ?? ''));
+            if (!isset($wantedPairKeys[$pairKey])) {
+                continue;
+            }
+
+            $statusByPairKey[$pairKey] = [
+                'Status' => trim((string) ($row['Status'] ?? '')),
+                'KVT_Document_Status' => trim((string) ($row['KVT_Document_Status'] ?? '')),
+            ];
+        }
+    }
+
+    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($batchPairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
         $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
         $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $select,
@@ -552,7 +625,7 @@ function bc_fetch_process_stale_workorders_via_status_check(
 }
 
 /**
- * Haalt Werkorders op voor job/task-paren (AppWerkorders alleen indien nodig).
+ * Haalt Werkorders op voor job/task-paren.
  */
 function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, array $auth, int $ttl): array
 {
@@ -588,8 +661,49 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
 
     $allRows = [];
     $seenRowKeys = [];
+    $pairsByJob = bc_fetch_group_pairs_by_job_no($normalizedPairs);
+    $pairFirstPairs = [];
+    $batchPairs = [];
 
-    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($normalizedPairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+    foreach ($pairsByJob as $jobNo => $jobPairs) {
+        $validPairs = [];
+        foreach ($jobPairs as $pair) {
+            $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
+            if ($jobTaskNo === '') {
+                continue;
+            }
+
+            $validPairs[] = $pair;
+        }
+
+        if ($validPairs === []) {
+            continue;
+        }
+
+        if (count($validPairs) <= DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB) {
+            foreach ($validPairs as $pair) {
+                $pairFirstPairs[] = $pair;
+            }
+            continue;
+        }
+
+        foreach ($validPairs as $pair) {
+            $batchPairs[] = $pair;
+        }
+    }
+
+    bc_fetch_workorders_by_pair_and_filters(
+        $company,
+        $pairFirstPairs,
+        $werkorderSelect,
+        $wantedPairKeys,
+        $seenRowKeys,
+        $allRows,
+        $auth,
+        $ttl
+    );
+
+    foreach (bc_fetch_chunk_string_values(bc_fetch_unique_job_nos_from_pairs($batchPairs), DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
         $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
         $werkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
             '$select' => $werkorderSelect,
@@ -598,8 +712,6 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
         $werkorderRows = odata_get_all($werkordersUrl, $auth, $ttl);
         bc_fetch_collect_matching_werkorder_rows($werkorderRows, $wantedPairKeys, $seenRowKeys, $allRows);
     }
-
-    $allRows = bc_fetch_enrich_workorder_rows_with_app_descriptions($company, $allRows, $auth, $ttl);
 
     $foundPairKeys = [];
     foreach ($allRows as $row) {
@@ -634,10 +746,6 @@ function bc_fetch_workorders_by_job_task_pairs(string $company, array $pairs, ar
 
             $foundPairKeys[demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), (string) ($row['Job_Task_No'] ?? ''))] = true;
         }
-    }
-
-    if ($missingPairs !== []) {
-        $allRows = bc_fetch_enrich_workorder_rows_with_app_descriptions($company, $allRows, $auth, $ttl);
     }
 
     return $allRows;
