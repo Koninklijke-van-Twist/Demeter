@@ -47,12 +47,19 @@ function demeter_nightly_exit(int $code): void
     exit($code);
 }
 
+define('DEMETER_SKIP_LOGINCHECK_AUTO', true);
+
+require __DIR__ . '/auth.php';
+
 if (PHP_SAPI !== 'cli') {
     header('Content-Type: text/plain; charset=utf-8');
     require_once __DIR__ . '/logincheck.php';
+    if (!is_trusted_requester()) {
+        demeter_nightly_log("Toegang geweigerd: nightly mag alleen via CLI of localhost worden aangeroepen.\n", true);
+        demeter_nightly_exit(403);
+    }
 }
 
-require __DIR__ . '/auth.php';
 require_once __DIR__ . '/auth_helper.php';
 require_once __DIR__ . '/odata.php';
 require_once __DIR__ . '/project_finance.php';
