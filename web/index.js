@@ -112,6 +112,7 @@
     const monthScanEmptyStopCount = Number(asyncLoadConfig.empty_stop_count || 12);
     const historyParallelWeekLoads = Math.max(1, Number(asyncLoadConfig.parallel_week_loads || 2));
     let historyWeeksTotal = Number(asyncLoadConfig.history_weeks_total || 0) || null;
+    const refreshProgressTotalSteps = Math.max(0, Number(asyncLoadConfig.progress_total_steps || 0));
     const loadWorkorderMemosUrl = typeof asyncLoadConfig.load_workorder_memos_url === 'string'
         ? asyncLoadConfig.load_workorder_memos_url
         : 'index.php?action=load_workorder_memos';
@@ -566,10 +567,20 @@
         }
 
         updateHistoryLoadNote('Memo\'s ophalen...');
+        showPageLoader('Memo\'s ophalen...');
         const params = new URLSearchParams();
         params.set('action', 'refresh_all_memos');
         params.set('company', company);
         params.set('cost_center', costCenter);
+        const loadToken = getPendingLoadProgressToken();
+        if (loadToken !== '')
+        {
+            params.set('load_token', loadToken);
+        }
+        if (refreshProgressTotalSteps > 0)
+        {
+            params.set('progress_total_steps', String(refreshProgressTotalSteps));
+        }
 
         const response = await fetch('index.php?' + params.toString(), {
             method: 'GET',
@@ -705,14 +716,36 @@
         });
     }
 
-    function getPendingLoadProgressToken ()
+    function getRefreshWeekProgressTotal (monthScan)
     {
-        if (!loadProgressTokenInput)
+        const resolved = resolveHistoryWeeksTotal(monthScan);
+        if (resolved && resolved > 0)
         {
-            return '';
+            return resolved;
         }
 
-        return String(loadProgressTokenInput.value || '').trim();
+        if (historyWeeksTotal && historyWeeksTotal > 0)
+        {
+            return historyWeeksTotal;
+        }
+
+        return monthScanEmptyStopCount;
+    }
+
+    function getPendingLoadProgressToken ()
+    {
+        if (loadProgressTokenInput)
+        {
+            const inputToken = String(loadProgressTokenInput.value || '').trim();
+            if (inputToken !== '')
+            {
+                return inputToken;
+            }
+        }
+
+        return typeof asyncLoadConfig.load_progress_token === 'string'
+            ? asyncLoadConfig.load_progress_token.trim()
+            : '';
     }
 
     function stopPageLoaderProgress ()
@@ -981,6 +1014,15 @@
             else if (text === '')
             {
                 text = 'Gegevens laden...';
+            }
+
+            if (status === 'completed')
+            {
+                percent = 100;
+                if (text === '')
+                {
+                    text = 'Laden afgerond';
+                }
             }
 
             if (status === 'error' && String(progress.error || '').trim() !== '')
@@ -5029,14 +5071,14 @@
         });
     }
 
-    async function fetchHistoryWeekWithRetry (yearWeek, attempt)
+    async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt)
     {
         const maxAttempts = 4;
         const currentAttempt = Number(attempt || 1);
 
         try
         {
-            return await fetchHistoryWeek(yearWeek);
+            return await fetchHistoryWeek(yearWeek, weekProgressIndex, weekProgressTotal);
         }
         catch (loadError)
         {
@@ -5061,11 +5103,11 @@
             );
             await waitForMs(delayMs);
 
-            return fetchHistoryWeekWithRetry(yearWeek, currentAttempt + 1);
+            return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt + 1);
         }
     }
 
-    function fetchHistoryWeek (yearWeek)
+    function fetchHistoryWeek (yearWeek, weekProgressIndex, weekProgressTotal)
     {
         const params = new URLSearchParams();
         params.set('action', 'load_month');
@@ -5076,6 +5118,19 @@
         if (asyncLoadConfig.force_full === true)
         {
             params.set('force_full', '1');
+        }
+        const loadToken = getPendingLoadProgressToken();
+        if (loadToken !== '')
+        {
+            params.set('load_token', loadToken);
+        }
+        if (weekProgressIndex > 0)
+        {
+            params.set('week_progress_index', String(weekProgressIndex));
+        }
+        if (weekProgressTotal > 0)
+        {
+            params.set('week_progress_total', String(weekProgressTotal));
         }
         if (callTimeLogSession !== '')
         {
@@ -5126,6 +5181,7 @@
             {
                 const batch = weekBatch.slice(0, historyParallelWeekLoads);
                 weekBatch = weekBatch.slice(batch.length);
+                const batchWeekProgressTotal = getRefreshWeekProgressTotal(monthScanState);
 
                 for (const yearWeek of batch)
                 {
@@ -5141,9 +5197,10 @@
 
                 updateHistoryLoadNote(buildHistoryLoadNote(batch[0], monthScanState, weeksCompleted, isFirstBatch));
 
-                const chunks = await Promise.all(batch.map(function (yearWeek)
+                const chunks = await Promise.all(batch.map(function (yearWeek, batchIndex)
                 {
-                    return fetchHistoryWeekWithRetry(yearWeek);
+                    const weekProgressIndex = weeksCompleted + batchIndex + 1;
+                    return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, batchWeekProgressTotal);
                 }));
 
                 let shouldContinue = false;

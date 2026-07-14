@@ -52,7 +52,7 @@ function bc_fetch_month_date_range(string $yearMonth, bool $partialToToday = fal
 /**
  * Laadt één week-chunk voor het werkorderoverzicht.
  *
- * @param array{cost_center?: string, force_full?: bool, partial_to_today?: bool, skip_if_cached?: bool, load_session_id?: string} $options
+ * @param array{cost_center?: string, force_full?: bool, partial_to_today?: bool, skip_if_cached?: bool, load_session_id?: string, progress_week_index?: int, progress_week_total?: int} $options
  */
 function bc_fetch_load_workorder_week_chunk(
     string $company,
@@ -95,6 +95,21 @@ function bc_fetch_load_workorder_week_chunk(
         $monthMeta = is_array($monthScan['months'][$normalizedYearWeek] ?? null) ? $monthScan['months'][$normalizedYearWeek] : [];
         $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
 
+        $progressWeekIndex = max(0, (int) ($options['progress_week_index'] ?? 0));
+        $progressWeekTotal = max(0, (int) ($options['progress_week_total'] ?? 0));
+        if (
+            is_string($progressToken) && $progressToken !== ''
+            && $progressWeekIndex > 0 && $progressWeekTotal > 0
+            && function_exists('odata_load_progress_advance_month')
+        ) {
+            odata_load_progress_advance_month(
+                $progressToken,
+                min($progressWeekTotal * 4, $progressWeekIndex * 4),
+                $progressWeekTotal * 4,
+                $normalizedYearWeek . ' (cache)'
+            );
+        }
+
         return [
             'skipped' => true,
             'year_week' => $normalizedYearWeek,
@@ -136,11 +151,38 @@ function bc_fetch_load_workorder_week_chunk(
 
     $totalProgressSteps = 4;
     $progressStep = 0;
-    $advanceProgress = static function (string $label) use (&$progressStep, $progressToken, $totalProgressSteps): void {
+    $progressWeekIndex = max(0, (int) ($options['progress_week_index'] ?? 0));
+    $progressWeekTotal = max(0, (int) ($options['progress_week_total'] ?? 0));
+    if ($progressWeekTotal > 0 && $progressWeekIndex > 0) {
+        $totalProgressSteps = $progressWeekTotal * 4;
+    }
+
+    $advanceProgress = static function (string $label) use (
+        &$progressStep,
+        $progressToken,
+        &$totalProgressSteps,
+        $progressWeekIndex,
+        $progressWeekTotal,
+        $normalizedYearWeek
+    ): void {
         $progressStep++;
-        if (is_string($progressToken) && $progressToken !== '' && function_exists('odata_load_progress_advance_month')) {
-            odata_load_progress_advance_month($progressToken, $progressStep, $totalProgressSteps, $label);
+        if (!is_string($progressToken) || $progressToken === '' || !function_exists('odata_load_progress_advance_month')) {
+            return;
         }
+
+        if ($progressWeekTotal > 0 && $progressWeekIndex > 0) {
+            $overallStep = min($totalProgressSteps, (($progressWeekIndex - 1) * 4) + $progressStep);
+            odata_load_progress_advance_month(
+                $progressToken,
+                $overallStep,
+                $totalProgressSteps,
+                $normalizedYearWeek . ': ' . $label
+            );
+
+            return;
+        }
+
+        odata_load_progress_advance_month($progressToken, $progressStep, 4, $label);
     };
 
     $cachedWorkorders = is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];

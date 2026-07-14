@@ -481,18 +481,29 @@ if (($_GET['action'] ?? '') === 'load_month') {
             throw new InvalidArgumentException('Ongeldige parameters voor week-laden.');
         }
 
+        $loadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
+        $progressWeekIndex = max(0, (int) ($_GET['week_progress_index'] ?? 0));
+        $progressWeekTotal = max(0, (int) ($_GET['week_progress_total'] ?? 0));
+        $chunkProgressToken = null;
+        if ($loadProgressTokenRaw !== '' && odata_load_progress_is_valid_token($loadProgressTokenRaw)) {
+            odata_set_active_load_progress_token($loadProgressTokenRaw);
+            $chunkProgressToken = $loadProgressTokenRaw;
+        }
+
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
         $perfLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
         if ($perfLogSession !== '') {
             odata_call_time_log_activate_session($perfLogSession);
         }
-        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, null, [
+        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, $chunkProgressToken, [
             'cost_center' => $costCenter,
             'force_full' => $forceFull,
             'skip_if_cached' => true,
             'partial_to_today' => $yearWeek === demeter_current_iso_year_week(),
             'load_session_id' => $perfLogSession,
+            'progress_week_index' => $progressWeekIndex,
+            'progress_week_total' => $progressWeekTotal,
         ]);
 
         $built = [
@@ -598,6 +609,12 @@ if (($_GET['action'] ?? '') === 'refresh_all_memos') {
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
         $memoCount = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+
+        $loadProgressToken = trim((string) ($_GET['load_token'] ?? ''));
+        $progressTotalSteps = max(0, (int) ($_GET['progress_total_steps'] ?? 0));
+        if ($loadProgressToken !== '' && odata_load_progress_is_valid_token($loadProgressToken)) {
+            odata_load_progress_complete($loadProgressToken, $progressTotalSteps > 0 ? $progressTotalSteps : 1);
+        }
 
         demeter_send_json_response([
             'ok' => true,
@@ -744,6 +761,8 @@ $asyncLoadEnabled = false;
 $pendingRowKeys = [];
 $cacheUsedForFirstPaint = false;
 $bootMonthPreloaded = false;
+$refreshProgressTotalSteps = 0;
+$clientLoadProgressToken = $nextLoadProgressToken;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -759,6 +778,14 @@ try {
             if ($forceFullReload) {
                 demeter_workorder_state_cache_purge($selectedCompany, $selectedCostCenter);
             }
+
+            $estimatedWeeks = demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek);
+            if ($estimatedWeeks === null || $estimatedWeeks <= 0) {
+                $estimatedWeeks = DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT;
+            }
+            $refreshProgressTotalSteps = $estimatedWeeks * 4;
+            $clientLoadProgressToken = $activeLoadProgressToken;
+            odata_load_progress_begin($activeLoadProgressToken, $refreshProgressTotalSteps);
 
             $purgedLegacyCache = false;
             $cachedState = $forceFullReload
@@ -847,6 +874,8 @@ $initialData = [
         'empty_stop_count' => DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT,
         'history_weeks_total' => demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek),
         'parallel_week_loads' => 2,
+        'progress_total_steps' => $refreshProgressTotalSteps,
+        'load_progress_token' => $clientLoadProgressToken,
         'load_month_url' => 'index.php?action=load_month',
         'refresh_all_memos_url' => 'index.php?action=refresh_all_memos',
         'load_workorder_memos_url' => 'index.php?action=load_workorder_memos',
@@ -1961,7 +1990,7 @@ $initialData = [
             <option value="invoiced" <?= $invoiceFilter === 'invoiced' ? 'selected' : '' ?>>Gefactureerd</option>
         </select>
         <input type="hidden" name="load_token" id="loadProgressToken"
-            value="<?= htmlspecialchars($nextLoadProgressToken) ?>">
+            value="<?= htmlspecialchars($clientLoadProgressToken) ?>">
         <button type="submit" name="refresh_now" value="1" class="secondary-button" id="refreshNowButton"
             <?= ($selectedCompany === '' || $selectedCostCenter === '') ? 'disabled' : '' ?>>Ververs Nu</button>
         <div class="memo-menu-wrap" id="memoMenuWrap">
