@@ -2,7 +2,7 @@
 
 /**
  * Nachtelijke cache-verversing (cron om 02:00).
- * Geen UI — alleen stdout/logging.
+ * Geen UI — alleen stdout/logging (CLI of HTTP via cron).
  */
 
 if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
@@ -13,6 +13,43 @@ if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
 @ini_set('max_execution_time', '0');
 if (function_exists('set_time_limit')) {
     @set_time_limit(0);
+}
+
+function demeter_nightly_log(string $message, bool $isError = false): void
+{
+    if (PHP_SAPI === 'cli') {
+        $stream = $isError
+            ? (defined('STDERR') ? STDERR : fopen('php://stderr', 'w'))
+            : (defined('STDOUT') ? STDOUT : fopen('php://stdout', 'w'));
+        if (is_resource($stream)) {
+            fwrite($stream, $message);
+        }
+
+        return;
+    }
+
+    if ($isError) {
+        error_log(rtrim($message));
+    }
+
+    echo $message;
+    if (function_exists('flush')) {
+        @flush();
+    }
+}
+
+function demeter_nightly_exit(int $code): void
+{
+    if (PHP_SAPI !== 'cli') {
+        http_response_code($code === 0 ? 200 : 500);
+    }
+
+    exit($code);
+}
+
+if (PHP_SAPI !== 'cli') {
+    header('Content-Type: text/plain; charset=utf-8');
+    require_once __DIR__ . '/logincheck.php';
 }
 
 require __DIR__ . '/auth.php';
@@ -29,19 +66,19 @@ $ttl = $hour * 12;
 
 $lockPath = __DIR__ . '/cache/reference/nightly.lock';
 if (!is_dir(dirname($lockPath)) && !mkdir(dirname($lockPath), 0775, true) && !is_dir(dirname($lockPath))) {
-    fwrite(STDERR, "Kan lock-directory niet aanmaken.\n");
-    exit(1);
+    demeter_nightly_log("Kan lock-directory niet aanmaken.\n", true);
+    demeter_nightly_exit(1);
 }
 
 $lockHandle = fopen($lockPath, 'c+');
 if ($lockHandle === false) {
-    fwrite(STDERR, "Kan lockbestand niet openen.\n");
-    exit(1);
+    demeter_nightly_log("Kan lockbestand niet openen.\n", true);
+    demeter_nightly_exit(1);
 }
 
 if (!flock($lockHandle, LOCK_EX | LOCK_NB)) {
-    fwrite(STDOUT, "Nightly draait al — overslaan.\n");
-    exit(0);
+    demeter_nightly_log("Nightly draait al — overslaan.\n");
+    demeter_nightly_exit(0);
 }
 
 $stats = demeter_nightly_stats_defaults();
@@ -49,7 +86,7 @@ $stats['last_run_started_at'] = gmdate('c');
 $stats['companies'] = [];
 demeter_nightly_stats_save($stats);
 
-fwrite(STDOUT, '[' . gmdate('Y-m-d H:i:s') . "] Nightly gestart\n");
+demeter_nightly_log('[' . gmdate('Y-m-d H:i:s') . "] Nightly gestart\n");
 
 try {
     $discovery = demeter_discover_and_cache_companies($ttl);
@@ -61,7 +98,7 @@ try {
         }
 
         $company = trim($company);
-        fwrite(STDOUT, "Bedrijf: {$company}\n");
+        demeter_nightly_log("Bedrijf: {$company}\n");
 
         try {
             auth_set_current_company_context($company, 300);
@@ -73,7 +110,7 @@ try {
                 'cost_centers' => [],
             ];
             demeter_nightly_stats_save($stats);
-            fwrite(STDERR, "  Fout bij bedrijf {$company}: " . $companyError->getMessage() . "\n");
+            demeter_nightly_log("  Fout bij bedrijf {$company}: " . $companyError->getMessage() . "\n", true);
             continue;
         }
 
@@ -100,7 +137,7 @@ try {
                     'memos_refreshed' => 0,
                 ];
                 demeter_nightly_stats_save($stats);
-                fwrite(STDOUT, "  Kostenplaats {$costCenter}: overgeslagen (lege cache)\n");
+                demeter_nightly_log("  Kostenplaats {$costCenter}: overgeslagen (lege cache)\n");
                 continue;
             }
 
@@ -124,7 +161,7 @@ try {
             } catch (Throwable $costCenterError) {
                 $entry['status'] = 'error';
                 $entry['error'] = $costCenterError->getMessage();
-                fwrite(STDERR, "  Fout bij kostenplaats {$costCenter}: " . $costCenterError->getMessage() . "\n");
+                demeter_nightly_log("  Fout bij kostenplaats {$costCenter}: " . $costCenterError->getMessage() . "\n", true);
             }
 
             $entry['duration_seconds'] = round(microtime(true) - $startedAt, 2);
@@ -132,7 +169,7 @@ try {
             $stats['companies'][$company]['cost_centers'][$costCenter] = $entry;
             demeter_nightly_stats_save($stats);
 
-            fwrite(STDOUT, sprintf(
+            demeter_nightly_log(sprintf(
                 "  Kostenplaats %s: %s (%.1fs, %d weken, %d memo's)\n",
                 $costCenter,
                 $entry['status'],
@@ -145,17 +182,17 @@ try {
 
     $stats['last_run_finished_at'] = gmdate('c');
     demeter_nightly_stats_save($stats);
-    fwrite(STDOUT, '[' . gmdate('Y-m-d H:i:s') . "] Nightly voltooid\n");
+    demeter_nightly_log('[' . gmdate('Y-m-d H:i:s') . "] Nightly voltooid\n");
 } catch (Throwable $fatalError) {
     $stats['last_run_finished_at'] = gmdate('c');
     $stats['fatal_error'] = $fatalError->getMessage();
     demeter_nightly_stats_save($stats);
-    fwrite(STDERR, 'Nightly mislukt: ' . $fatalError->getMessage() . "\n");
+    demeter_nightly_log('Nightly mislukt: ' . $fatalError->getMessage() . "\n", true);
     flock($lockHandle, LOCK_UN);
     fclose($lockHandle);
-    exit(1);
+    demeter_nightly_exit(1);
 }
 
 flock($lockHandle, LOCK_UN);
 fclose($lockHandle);
-exit(0);
+demeter_nightly_exit(0);
