@@ -417,7 +417,7 @@
 
         const button = document.createElement('button');
         button.type = 'button';
-        button.textContent = 'Huidige gegevens zijn ' + ageText + ' oud (klik voor nightly-details)';
+        button.textContent = 'Huidige gegevens zijn ' + ageText + ' oud.';
         button.addEventListener('click', openNightlyStatsModal);
         banner.appendChild(button);
         app.appendChild(banner);
