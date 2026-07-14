@@ -55,8 +55,7 @@ if (PHP_SAPI !== 'cli') {
     header('Content-Type: text/plain; charset=utf-8');
     require_once __DIR__ . '/logincheck.php';
     if (!is_trusted_requester()) {
-        demeter_nightly_log("Toegang geweigerd: nightly mag alleen via CLI of localhost worden aangeroepen.\n", true);
-        demeter_nightly_exit(403);
+        demeter_require_web_login_unless_trusted();
     }
 }
 

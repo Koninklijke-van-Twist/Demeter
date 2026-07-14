@@ -15,6 +15,30 @@ function is_trusted_requester(): bool
     return false;
 }
 
+function demeter_is_allowed_logged_in_user(): bool
+{
+    $allowedUsersList = isset($GLOBALS['allowedUsers']) && is_array($GLOBALS['allowedUsers'])
+        ? $GLOBALS['allowedUsers']
+        : (isset($allowedUsers) && is_array($allowedUsers) ? $allowedUsers : []);
+
+    if ($allowedUsersList === []) {
+        return false;
+    }
+
+    $sessionEmail = strtolower(trim((string) ($_SESSION['user']['email'] ?? '')));
+    if ($sessionEmail === '') {
+        return false;
+    }
+
+    foreach ($allowedUsersList as $email) {
+        if (strtolower(trim((string) $email)) === $sessionEmail) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function demeter_require_web_login_unless_trusted(): void
 {
     if (is_trusted_requester()) {
@@ -25,11 +49,7 @@ function demeter_require_web_login_unless_trusted(): void
 
     $allowedUsersList = isset($allowedUsers) && is_array($allowedUsers) ? $allowedUsers : [];
 
-    if (
-        !array_any($allowedUsersList, function ($email) {
-            return strtolower((string) $email) === strtolower((string) ($_SESSION['user']['email'] ?? ''));
-        })
-    ) {
+    if (!demeter_is_allowed_logged_in_user()) {
         require __DIR__ . '/../login/403.php';
         die();
     }
