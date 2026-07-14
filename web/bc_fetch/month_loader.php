@@ -3,7 +3,7 @@
 /**
  * Includes/requires
  */
-require_once __DIR__ . '/registry.php';
+require_once __DIR__ . '/invoice_cache.php';
 require_once __DIR__ . '/cost_center.php';
 require_once __DIR__ . '/workorder_state_cache.php';
 require_once __DIR__ . '/projectposten_workorders.php';
@@ -282,34 +282,29 @@ function bc_fetch_load_workorder_week_chunk(
     $invoiceDetailsById = [];
     $projectInvoiceIdsByJob = [];
     $projectInvoicedTotalByJob = [];
+    $invoiceLoadMeta = [
+        'from_cache_count' => 0,
+        'fetched_count' => 0,
+    ];
 
     if ($projectNumbers !== []) {
-        $invoiceData = bc_fetch_run_column('invoices', $company, $normalizedYearWeek, $projectNumbers, $auth, $ttl);
-        $invoiceDetails = is_array($invoiceData['invoice_details_by_id'] ?? null)
+        $invoiceData = bc_fetch_resolve_invoices_for_projects(
+            $company,
+            $projectNumbers,
+            $auth,
+            $ttl,
+            false
+        );
+        $invoiceDetailsById = is_array($invoiceData['invoice_details_by_id'] ?? null)
             ? $invoiceData['invoice_details_by_id']
             : [];
-        foreach ($invoiceDetails as $invoiceId => $details) {
-            if (!is_string($invoiceId) || $invoiceId === '' || !is_array($details)) {
-                continue;
-            }
-
-            if (!isset($invoiceDetailsById[$invoiceId])) {
-                $invoiceDetailsById[$invoiceId] = $details;
-            }
-        }
-
-        $invoiceProjects = is_array($invoiceData['by_project'] ?? null) ? $invoiceData['by_project'] : [];
-        foreach ($invoiceProjects as $normalizedProjectNo => $values) {
-            if (!is_array($values)) {
-                continue;
-            }
-
-            $invoiceIds = is_array($values['invoice_ids'] ?? null) ? $values['invoice_ids'] : [];
-            $projectInvoiceIdsByJob[$normalizedProjectNo] = array_values(array_unique(array_filter(array_map('strval', $invoiceIds), static function (string $invoiceId): bool {
-                return trim($invoiceId) !== '';
-            })));
-            $projectInvoicedTotalByJob[$normalizedProjectNo] = finance_to_float($values['invoiced_total'] ?? 0.0);
-        }
+        $projectInvoiceIdsByJob = is_array($invoiceData['project_invoice_ids_by_job'] ?? null)
+            ? $invoiceData['project_invoice_ids_by_job']
+            : [];
+        $projectInvoicedTotalByJob = is_array($invoiceData['project_invoiced_total_by_job'] ?? null)
+            ? $invoiceData['project_invoiced_total_by_job']
+            : [];
+        $invoiceLoadMeta = is_array($invoiceData['load_meta'] ?? null) ? $invoiceData['load_meta'] : $invoiceLoadMeta;
     }
 
     $advanceProgress('Facturen');
@@ -396,6 +391,8 @@ function bc_fetch_load_workorder_week_chunk(
             'updated_from_bc_count' => count($fetchedWorkorders),
             'status_check_count' => $statusCheckCount,
             'status_closed_via_check_count' => $statusClosedCount,
+            'invoice_from_cache_count' => (int) ($invoiceLoadMeta['from_cache_count'] ?? 0),
+            'invoice_fetched_count' => (int) ($invoiceLoadMeta['fetched_count'] ?? 0),
             'skipped_cached' => false,
         ],
     ];

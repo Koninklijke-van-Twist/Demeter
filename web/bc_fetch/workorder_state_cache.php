@@ -15,6 +15,8 @@ const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 7;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */
 const DEMETER_WORKORDER_JOB_NO_BATCH_SIZE = 15;
+/** Aantal job/task-paren per fallback OData-call. */
+const DEMETER_WORKORDER_PAIR_FALLBACK_BATCH_SIZE = 10;
 
 /**
  * Bepaalt of een werkorderstatus als afgesloten telt.
