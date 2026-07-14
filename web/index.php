@@ -1954,6 +1954,7 @@ $initialData = [
     <script>
         window.workorderOverviewData = <?= json_encode($initialData, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
     </script>
+    <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
     <script src="index.js?v=<?= urlencode((string) @filemtime(__DIR__ . '/index.js')) ?>"></script>
 </body>
 

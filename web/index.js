@@ -265,7 +265,20 @@
     exportButton.type = 'button';
     exportButton.className = 'export-btn';
     exportButton.textContent = 'Export';
-    exportButton.addEventListener('click', exportVisibleRowsToCsv);
+    exportButton.addEventListener('click', function ()
+    {
+        exportButton.disabled = true;
+        exportVisibleRowsToXlsx()
+            .catch(function (error)
+            {
+                console.error(error);
+                alert('Export mislukt.');
+            })
+            .finally(function ()
+            {
+                exportButton.disabled = false;
+            });
+    });
     summaryRow.appendChild(exportButton);
     app.appendChild(summaryRow);
 
@@ -2770,54 +2783,187 @@
         return flattenedRows;
     }
 
-    function exportVisibleRowsToCsv ()
+    const EXPORT_STATUS_FILL_ARGB = {
+        'open': 'FFFFFFFF',
+        'signed': 'FFF6F9E9',
+        'completed': 'FFE9F9EE',
+        'checked': 'FFFFF1DD',
+        'cancelled': 'FFFFA7A7',
+        'closed': 'FFC5C5C5',
+        'planned': 'FFDDEFFF',
+        'in-progress': 'FFFFE9E9'
+    };
+
+    const EXPORT_SIGNED_AMOUNT_KEYS = new Set(['Actual_Total', 'Project_Total']);
+
+    async function exportVisibleRowsToXlsx ()
     {
-        const visibleRows = getVisibleSortedRows();
-        const delimiter = ';';
-        const headers = exportColumns.map(function (column)
+        if (typeof ExcelJS === 'undefined')
         {
-            return formatDisplayLabel(column.label);
-        });
-
-        const csvLines = [headers.map(escapeCsvValue).join(delimiter)];
-        const seenProjectsForCsv = new Set();
-        for (const row of visibleRows)
-        {
-            const csvProjectKey = normalizeSortValue(String(row.Job_No || ''));
-            const isFirstProjectRowForCsv = csvProjectKey === '' || !seenProjectsForCsv.has(csvProjectKey);
-            if (csvProjectKey !== '')
-            {
-                seenProjectsForCsv.add(csvProjectKey);
-            }
-
-            const values = exportColumns.map(function (column)
-            {
-                if (projectFinancialColumnKeys.has(column.key) && !isFirstProjectRowForCsv)
-                {
-                    return '';
-                }
-                return getExportValue(row, column.key);
-            });
-            csvLines.push(values.map(escapeCsvValue).join(delimiter));
+            alert('Excel-export niet beschikbaar.');
+            return;
         }
 
-        const csvContent = '\uFEFF' + csvLines.join('\r\n');
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const visibleRows = getVisibleSortedRows();
+        const columns = exportColumns;
+        const headerLabels = buildUniqueExportTableColumnNames(columns.map(function (column)
+        {
+            return formatDisplayLabel(column.label);
+        }));
+
+        const workbook = new ExcelJS.Workbook();
+        workbook.creator = 'Demeter';
+        const worksheet = workbook.addWorksheet('Werkorders', {
+            views: [{ state: 'frozen', ySplit: 1 }]
+        });
+
+        const tableRows = [];
+        const rowStatusKeys = [];
+        const seenProjectsForExport = new Set();
+
+        for (const row of visibleRows)
+        {
+            const exportProjectKey = normalizeSortValue(String(row.Job_No || ''));
+            const isFirstProjectRowForExport = exportProjectKey === '' || !seenProjectsForExport.has(exportProjectKey);
+            if (exportProjectKey !== '')
+            {
+                seenProjectsForExport.add(exportProjectKey);
+            }
+
+            tableRows.push(columns.map(function (column)
+            {
+                return getExportCellValue(row, column.key, isFirstProjectRowForExport);
+            }));
+            rowStatusKeys.push(normalizeStatus(row.Status || ''));
+        }
+
+        worksheet.addTable({
+            name: 'DemeterWerkorders',
+            ref: 'A1',
+            headerRow: true,
+            totalsRow: false,
+            style: {
+                theme: 'TableStyleLight1',
+                showRowStripes: false
+            },
+            columns: headerLabels.map(function (name)
+            {
+                return { name: name, filterButton: true };
+            }),
+            rows: tableRows
+        });
+
+        const headerRow = worksheet.getRow(1);
+        headerRow.font = { bold: true, color: { argb: 'FF203A63' } };
+        headerRow.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: 'FFF1F5FB' }
+        };
+        headerRow.alignment = { vertical: 'middle', wrapText: true };
+
+        for (let rowIndex = 0; rowIndex < rowStatusKeys.length; rowIndex += 1)
+        {
+            const excelRow = worksheet.getRow(rowIndex + 2);
+            const statusKey = rowStatusKeys[rowIndex];
+            const fillArgb = EXPORT_STATUS_FILL_ARGB[statusKey] || 'FFFFFFFF';
+            const dataRow = visibleRows[rowIndex];
+
+            excelRow.eachCell({ includeEmpty: true }, function (cell, colNumber)
+            {
+                const column = columns[colNumber - 1];
+                if (!column)
+                {
+                    return;
+                }
+
+                cell.fill = {
+                    type: 'pattern',
+                    pattern: 'solid',
+                    fgColor: { argb: fillArgb }
+                };
+
+                if (numericSortKeys.has(column.key) && typeof cell.value === 'number')
+                {
+                    cell.numFmt = '#,##0.00';
+                }
+
+                if (EXPORT_SIGNED_AMOUNT_KEYS.has(column.key))
+                {
+                    const amount = Number(getColumnValueForSorting(dataRow, column.key) || 0);
+                    if (amount !== 0)
+                    {
+                        cell.font = {
+                            bold: true,
+                            color: { argb: amount > 0 ? 'FF0B6B2F' : 'FFB42318' }
+                        };
+                    }
+                }
+            });
+        }
+
+        worksheet.columns.forEach(function (column, columnIndex)
+        {
+            let maxLength = headerLabels[columnIndex].length;
+            for (let rowIndex = 0; rowIndex < tableRows.length; rowIndex += 1)
+            {
+                const value = tableRows[rowIndex][columnIndex];
+                if (value === null || value === undefined)
+                {
+                    continue;
+                }
+
+                const textLength = String(value).length;
+                if (textLength > maxLength)
+                {
+                    maxLength = textLength;
+                }
+            }
+
+            column.width = Math.min(42, Math.max(12, maxLength + 2));
+        });
+
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        });
         const url = URL.createObjectURL(blob);
         const link = document.createElement('a');
         link.href = url;
-        link.download = 'demeter_export.csv';
+        link.download = 'demeter_export.xlsx';
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
     }
 
-    function getExportValue (row, key)
+    function buildUniqueExportTableColumnNames (labels)
     {
+        const seenCounts = new Map();
+        return labels.map(function (label)
+        {
+            const count = seenCounts.get(label) || 0;
+            seenCounts.set(label, count + 1);
+            if (count === 0)
+            {
+                return label;
+            }
+
+            return label + ' (' + (count + 1) + ')';
+        });
+    }
+
+    function getExportCellValue (row, key, isFirstProjectRow)
+    {
+        if (projectFinancialColumnKeys.has(key) && !isFirstProjectRow)
+        {
+            return null;
+        }
+
         if (isMemoFieldKey(key))
         {
-            return getMemoFieldValue(row, key);
+            const memoValue = getMemoFieldValue(row, key);
+            return memoValue === '' ? null : memoValue;
         }
 
         if (key === 'Notes')
@@ -2826,7 +2972,7 @@
             const lines = [];
             for (const part of parts)
             {
-                const label = String((part && part.label) || '').trim().replaceAll("_", " ");
+                const label = String((part && part.label) || '').trim().replaceAll('_', ' ');
                 const value = String((part && part.value) || '').trim();
                 if (value === '')
                 {
@@ -2834,37 +2980,29 @@
                 }
                 lines.push(label + ': ' + value);
             }
-            return lines.join(' | ');
+
+            return lines.length === 0 ? null : lines.join(' | ');
         }
 
         if (key === 'Component_No')
         {
-            return getEquipmentDisplayValue(row);
+            const equipmentValue = getEquipmentDisplayValue(row);
+            return equipmentValue === '' ? null : equipmentValue;
         }
 
-        if (key === 'Actual_Total' || key === 'Project_Total')
+        if (numericSortKeys.has(key))
         {
-            return formatCurrencyForCsv(getColumnValueForSorting(row, key));
+            const amount = Number(getColumnValueForSorting(row, key) || 0);
+            if (EXPORT_SIGNED_AMOUNT_KEYS.has(key) && amount === 0)
+            {
+                return null;
+            }
+
+            return amount;
         }
 
-        if (key === 'Actual_Costs' || key === 'Total_Revenue' || key === 'Project_Actual_Costs' || key === 'Project_Total_Revenue')
-        {
-            return formatCurrencyForCsv(getColumnValueForSorting(row, key));
-        }
-
-        return String(row[key] || '');
-    }
-
-    function formatCurrencyForCsv (value)
-    {
-        const amount = Number(value || 0);
-        return amount.toFixed(2);
-    }
-
-    function escapeCsvValue (value)
-    {
-        const text = String(value || '');
-        return '"' + text.replace(/"/g, '""') + '"';
+        const textValue = String(row[key] || '').trim();
+        return textValue === '' ? null : textValue;
     }
 
     function compareRowsForGlobalOrder (a, b)
