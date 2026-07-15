@@ -182,6 +182,7 @@ try {
                 ]);
                 $entry['weeks_processed'] = (int) ($refreshResult['weeks_processed'] ?? 0);
                 $entry['memos_refreshed'] = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+                demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
             } catch (Throwable $costCenterError) {
                 $entry['status'] = 'error';
                 $entry['error'] = $costCenterError->getMessage();

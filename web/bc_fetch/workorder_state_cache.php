@@ -567,6 +567,25 @@ function demeter_workorder_state_cache_save(
 }
 
 /**
+ * Werkt updated_at bij zonder overige cache-inhoud te wijzigen (bijv. na nightly met cache-hits).
+ */
+function demeter_workorder_state_cache_touch_updated_at(string $company, string $costCenter): bool
+{
+    $cachedState = demeter_workorder_state_cache_load($company, $costCenter);
+    if (!is_array($cachedState)) {
+        return false;
+    }
+
+    $workorders = is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
+    $monthScan = is_array($cachedState['month_scan'] ?? null)
+        ? $cachedState['month_scan']
+        : demeter_workorder_month_scan_defaults();
+    $loadSession = is_array($cachedState['load_session'] ?? null) ? $cachedState['load_session'] : null;
+
+    return demeter_workorder_state_cache_save($company, $costCenter, $workorders, $monthScan, $loadSession);
+}
+
+/**
  * JSON-encode met UTF-8 fallback voor cache en API-responses.
  *
  * @return string|false

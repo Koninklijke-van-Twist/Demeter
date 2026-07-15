@@ -609,6 +609,7 @@ if (($_GET['action'] ?? '') === 'refresh_all_memos') {
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
         $memoCount = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+        demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
 
         $loadProgressToken = trim((string) ($_GET['load_token'] ?? ''));
         $progressTotalSteps = max(0, (int) ($_GET['progress_total_steps'] ?? 0));
