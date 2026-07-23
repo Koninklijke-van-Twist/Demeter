@@ -31,6 +31,7 @@ function bc_fetch_department_cost_center_options(string $company, array $auth, i
 {
     $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'DimensionValueList', [
         '$select' => 'Dimension_Code,Code,Name,Blocked',
+        '$filter' => 'Blocked eq false',
     ]);
     $rows = odata_get_all($url, $auth, $ttl);
 

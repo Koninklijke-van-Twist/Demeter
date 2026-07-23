@@ -413,11 +413,24 @@ function demeter_build_single_workorder_row(
 
 /**
  * Werkt bestaande rijen bij met nieuwe maanddata (finance wordt opgeteld).
+ * Zoekt eerst op project + werkordernummer zodat wisselende finance-keys niet tot dubbele rijen leiden.
  *
  * @param array<string, array> $rowsByKey
  */
 function demeter_merge_month_rows_into_existing(array $rowsByKey, array $monthRows, array $projectTotalsByJob): array
 {
+    $rowKeyByBusinessKey = [];
+    foreach ($rowsByKey as $existingRowKey => $existingRow) {
+        if (!is_array($existingRow)) {
+            continue;
+        }
+
+        $businessKey = demeter_workorder_business_key($existingRow);
+        if ($businessKey !== '' && !isset($rowKeyByBusinessKey[$businessKey])) {
+            $rowKeyByBusinessKey[$businessKey] = (string) $existingRowKey;
+        }
+    }
+
     foreach ($monthRows as $monthRow) {
         if (!is_array($monthRow)) {
             continue;
@@ -428,17 +441,27 @@ function demeter_merge_month_rows_into_existing(array $rowsByKey, array $monthRo
             continue;
         }
 
-        if (!isset($rowsByKey[$rowKey]) || !is_array($rowsByKey[$rowKey])) {
-            $rowsByKey[$rowKey] = $monthRow;
+        $businessKey = demeter_workorder_business_key($monthRow);
+        $targetRowKey = $rowKey;
+        if ($businessKey !== '' && isset($rowKeyByBusinessKey[$businessKey])) {
+            $targetRowKey = $rowKeyByBusinessKey[$businessKey];
+        }
+
+        if (!isset($rowsByKey[$targetRowKey]) || !is_array($rowsByKey[$targetRowKey])) {
+            $rowsByKey[$targetRowKey] = $monthRow;
+            $rowsByKey[$targetRowKey]['Row_Key'] = $targetRowKey;
+            if ($businessKey !== '') {
+                $rowKeyByBusinessKey[$businessKey] = $targetRowKey;
+            }
             continue;
         }
 
-        $existing = $rowsByKey[$rowKey];
+        $existing = $rowsByKey[$targetRowKey];
         $existing['Actual_Costs'] = finance_add_amount((float) ($existing['Actual_Costs'] ?? 0.0), (float) ($monthRow['Actual_Costs'] ?? 0.0));
         $existing['Total_Revenue'] = finance_add_amount((float) ($existing['Total_Revenue'] ?? 0.0), (float) ($monthRow['Total_Revenue'] ?? 0.0));
         $existing['Actual_Total'] = finance_calculate_result((float) $existing['Total_Revenue'], (float) $existing['Actual_Costs']);
 
-        foreach (['No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No', 'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description', 'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key'] as $field) {
+        foreach (['No', 'Bc_No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No', 'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description', 'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key'] as $field) {
             if (array_key_exists($field, $monthRow) && trim((string) $monthRow[$field]) !== '') {
                 $existing[$field] = $monthRow[$field];
             }
@@ -450,13 +473,176 @@ function demeter_merge_month_rows_into_existing(array $rowsByKey, array $monthRo
             $existing['Memos_Loaded'] = true;
         }
 
-        $normalizedJobNo = strtolower(trim((string) ($existing['Job_No'] ?? '')));
-        if ($normalizedJobNo !== '' && isset($projectTotalsByJob[$normalizedJobNo]) && is_array($projectTotalsByJob[$normalizedJobNo])) {
-            $existing['Project_Actual_Costs'] = (float) ($projectTotalsByJob[$normalizedJobNo]['costs'] ?? 0.0);
-            $existing['Project_Total_Revenue'] = (float) ($projectTotalsByJob[$normalizedJobNo]['revenue'] ?? 0.0);
+        // Project_* wordt na de week-merge gezet via cumulatieve month_scan-totalen.
+
+        $existing['Row_Key'] = $targetRowKey;
+        $rowsByKey[$targetRowKey] = $existing;
+        if ($businessKey !== '') {
+            $rowKeyByBusinessKey[$businessKey] = $targetRowKey;
         }
 
-        $rowsByKey[$rowKey] = $existing;
+        if ($targetRowKey !== $rowKey && isset($rowsByKey[$rowKey])) {
+            unset($rowsByKey[$rowKey]);
+        }
+    }
+
+    return demeter_coalesce_display_rows_by_business_key($rowsByKey);
+}
+
+/**
+ * Voegt bestaande display-rijen samen die hetzelfde project + werkordernummer delen.
+ *
+ * @param array<string, array> $rowsByKey
+ * @return array<string, array>
+ */
+function demeter_coalesce_display_rows_by_business_key(array $rowsByKey, array $projectTotalsByJob = []): array
+{
+    $canonicalByBusinessKey = [];
+    $orphanRows = [];
+
+    foreach ($rowsByKey as $rowKey => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $businessKey = demeter_workorder_business_key($row);
+        if ($businessKey === '') {
+            $orphanRows[(string) $rowKey] = $row;
+            continue;
+        }
+
+        if (!isset($canonicalByBusinessKey[$businessKey])) {
+            $canonicalKey = trim((string) ($row['Row_Key'] ?? $rowKey));
+            if ($canonicalKey === '') {
+                $canonicalKey = (string) $rowKey;
+            }
+            $row['Row_Key'] = $canonicalKey;
+            $canonicalByBusinessKey[$businessKey] = $row;
+            continue;
+        }
+
+        $existing = $canonicalByBusinessKey[$businessKey];
+        $existing['Actual_Costs'] = finance_add_amount((float) ($existing['Actual_Costs'] ?? 0.0), (float) ($row['Actual_Costs'] ?? 0.0));
+        $existing['Total_Revenue'] = finance_add_amount((float) ($existing['Total_Revenue'] ?? 0.0), (float) ($row['Total_Revenue'] ?? 0.0));
+        $existing['Actual_Total'] = finance_calculate_result((float) $existing['Total_Revenue'], (float) $existing['Actual_Costs']);
+
+        foreach (['No', 'Bc_No', 'Order_Type', 'Contract_No', 'Customer_Id', 'Start_Date', 'Component_No', 'Component_Description', 'Equipment_Number', 'Equipment_Name', 'Description', 'Customer_Name', 'Cost_Center', 'Status', 'Document_Status', 'End_Date', 'Job_No', 'Job_Task_No', 'Workorder_Source_Key', 'Invoice_Id'] as $field) {
+            if (array_key_exists($field, $row) && trim((string) $row[$field]) !== '') {
+                $existing[$field] = $row[$field];
+            }
+        }
+
+        if (is_array($row['Invoice_Ids'] ?? null) && $row['Invoice_Ids'] !== []) {
+            $existingIds = is_array($existing['Invoice_Ids'] ?? null) ? $existing['Invoice_Ids'] : [];
+            $existing['Invoice_Ids'] = array_values(array_unique(array_merge($existingIds, $row['Invoice_Ids'])));
+            $existing['Invoice_Id'] = implode(', ', $existing['Invoice_Ids']);
+        }
+
+        if (!empty($row['Memos_Loaded']) && empty($existing['Memos_Loaded'])) {
+            $existing['Notes'] = is_array($row['Notes'] ?? null) ? $row['Notes'] : [];
+            $existing['Notes_Search'] = (string) ($row['Notes_Search'] ?? '');
+            $existing['Memos_Loaded'] = true;
+        }
+
+        $canonicalByBusinessKey[$businessKey] = $existing;
+    }
+
+    $coalesced = [];
+    foreach ($canonicalByBusinessKey as $row) {
+        $rowKey = trim((string) ($row['Row_Key'] ?? ''));
+        if ($rowKey === '') {
+            continue;
+        }
+        $coalesced[$rowKey] = $row;
+    }
+
+    foreach ($orphanRows as $rowKey => $row) {
+        if (!isset($coalesced[$rowKey])) {
+            $coalesced[$rowKey] = $row;
+        }
+    }
+
+    return demeter_apply_project_totals_to_display_rows($coalesced, $projectTotalsByJob);
+}
+
+/**
+ * Zet Project_* op display-rijen vanuit (cumulatieve) projecttotalen.
+ *
+ * @param array<string, array> $rowsByKey
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $projectTotalsByJob
+ * @return array<string, array>
+ */
+function demeter_apply_project_totals_to_display_rows(array $rowsByKey, array $projectTotalsByJob): array
+{
+    if ($projectTotalsByJob === []) {
+        return $rowsByKey;
+    }
+
+    foreach ($rowsByKey as $rowKey => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $normalizedJobNo = strtolower(trim((string) ($row['Job_No'] ?? '')));
+        if ($normalizedJobNo === '' || !isset($projectTotalsByJob[$normalizedJobNo]) || !is_array($projectTotalsByJob[$normalizedJobNo])) {
+            continue;
+        }
+
+        $rowsByKey[$rowKey]['Project_Actual_Costs'] = (float) ($projectTotalsByJob[$normalizedJobNo]['costs'] ?? 0.0);
+        $rowsByKey[$rowKey]['Project_Total_Revenue'] = (float) ($projectTotalsByJob[$normalizedJobNo]['revenue'] ?? 0.0);
+    }
+
+    return $rowsByKey;
+}
+
+/**
+ * Past week-delta toe op Project_* (nieuw - oud), zodat herladen van dezelfde week niet dubbeltelt.
+ *
+ * @param array<string, array> $rowsByKey
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $previousWeekTotals
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $newWeekTotals
+ * @return array<string, array>
+ */
+function demeter_adjust_project_totals_on_display_rows_by_week_delta(
+    array $rowsByKey,
+    array $previousWeekTotals,
+    array $newWeekTotals
+): array {
+    $jobKeys = [];
+    foreach (array_keys($previousWeekTotals) as $jobKey) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob !== '') {
+            $jobKeys[$normalizedJob] = true;
+        }
+    }
+    foreach (array_keys($newWeekTotals) as $jobKey) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob !== '') {
+            $jobKeys[$normalizedJob] = true;
+        }
+    }
+
+    if ($jobKeys === []) {
+        return $rowsByKey;
+    }
+
+    foreach ($rowsByKey as $rowKey => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $normalizedJobNo = strtolower(trim((string) ($row['Job_No'] ?? '')));
+        if ($normalizedJobNo === '' || !isset($jobKeys[$normalizedJobNo])) {
+            continue;
+        }
+
+        $previous = is_array($previousWeekTotals[$normalizedJobNo] ?? null) ? $previousWeekTotals[$normalizedJobNo] : [];
+        $next = is_array($newWeekTotals[$normalizedJobNo] ?? null) ? $newWeekTotals[$normalizedJobNo] : [];
+        $costDelta = (float) ($next['costs'] ?? 0.0) - (float) ($previous['costs'] ?? 0.0);
+        $revenueDelta = (float) ($next['revenue'] ?? 0.0) - (float) ($previous['revenue'] ?? 0.0);
+
+        $rowsByKey[$rowKey]['Project_Actual_Costs'] = (float) ($row['Project_Actual_Costs'] ?? 0.0) + $costDelta;
+        $rowsByKey[$rowKey]['Project_Total_Revenue'] = (float) ($row['Project_Total_Revenue'] ?? 0.0) + $revenueDelta;
     }
 
     return $rowsByKey;
@@ -517,6 +703,18 @@ function demeter_merge_display_rows_for_month_chunk(
     array $projectTotalsByJob
 ): array {
     if ($replaceCurrentMonth) {
+        $rowKeyByBusinessKey = [];
+        foreach ($displayRowsByKey as $existingRowKey => $existingRow) {
+            if (!is_array($existingRow)) {
+                continue;
+            }
+
+            $businessKey = demeter_workorder_business_key($existingRow);
+            if ($businessKey !== '' && !isset($rowKeyByBusinessKey[$businessKey])) {
+                $rowKeyByBusinessKey[$businessKey] = (string) $existingRowKey;
+            }
+        }
+
         foreach ($monthBuiltRows as $monthRow) {
             if (!is_array($monthRow)) {
                 continue;
@@ -527,10 +725,37 @@ function demeter_merge_display_rows_for_month_chunk(
                 continue;
             }
 
-            $displayRowsByKey[$rowKey] = $monthRow;
+            $businessKey = demeter_workorder_business_key($monthRow);
+            $targetRowKey = $rowKey;
+            if ($businessKey !== '' && isset($rowKeyByBusinessKey[$businessKey])) {
+                $targetRowKey = $rowKeyByBusinessKey[$businessKey];
+            }
+
+            $preservedProjectCosts = null;
+            $preservedProjectRevenue = null;
+            if (isset($displayRowsByKey[$targetRowKey]) && is_array($displayRowsByKey[$targetRowKey])) {
+                $preservedProjectCosts = $displayRowsByKey[$targetRowKey]['Project_Actual_Costs'] ?? null;
+                $preservedProjectRevenue = $displayRowsByKey[$targetRowKey]['Project_Total_Revenue'] ?? null;
+            }
+
+            $monthRow['Row_Key'] = $targetRowKey;
+            if ($preservedProjectCosts !== null) {
+                $monthRow['Project_Actual_Costs'] = $preservedProjectCosts;
+            }
+            if ($preservedProjectRevenue !== null) {
+                $monthRow['Project_Total_Revenue'] = $preservedProjectRevenue;
+            }
+            $displayRowsByKey[$targetRowKey] = $monthRow;
+            if ($businessKey !== '') {
+                $rowKeyByBusinessKey[$businessKey] = $targetRowKey;
+            }
+
+            if ($targetRowKey !== $rowKey && isset($displayRowsByKey[$rowKey])) {
+                unset($displayRowsByKey[$rowKey]);
+            }
         }
 
-        return $displayRowsByKey;
+        return demeter_coalesce_display_rows_by_business_key($displayRowsByKey);
     }
 
     return demeter_merge_month_rows_into_existing($displayRowsByKey, $monthBuiltRows, $projectTotalsByJob);

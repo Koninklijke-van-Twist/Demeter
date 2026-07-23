@@ -150,6 +150,7 @@
             }
         }
     }
+    coalesceDuplicateRowsByBusinessKey();
 
     const pendingRowKeys = Array.isArray(payload.pending_row_keys) ? payload.pending_row_keys : [];
     const pendingCachedRowKeys = new Set();
@@ -4967,6 +4968,111 @@
         }
     }
 
+    function workorderBusinessKey (row)
+    {
+        const jobNo = String((row && row.Job_No) || '').trim().toLowerCase();
+        if (jobNo === '')
+        {
+            return '';
+        }
+
+        let workorderNo = String((row && row.Bc_No) || '').trim();
+        if (workorderNo === '')
+        {
+            workorderNo = String((row && row.No) || '').trim();
+        }
+        if (workorderNo === '')
+        {
+            workorderNo = String((row && row.Workorder_Source_Key) || '').trim();
+        }
+        if (workorderNo === '')
+        {
+            return '';
+        }
+
+        return jobNo + '|' + workorderNo.toLowerCase();
+    }
+
+    function findExistingRowForBusinessKey (monthRow)
+    {
+        const businessKey = workorderBusinessKey(monthRow);
+        if (businessKey === '')
+        {
+            return null;
+        }
+
+        for (const row of rows)
+        {
+            if (workorderBusinessKey(row) === businessKey)
+            {
+                return row;
+            }
+        }
+
+        return null;
+    }
+
+    function coalesceDuplicateRowsByBusinessKey ()
+    {
+        const canonicalByBusinessKey = new Map();
+        const kept = [];
+        const removedKeys = [];
+
+        for (const row of rows)
+        {
+            const businessKey = workorderBusinessKey(row);
+            const rowKey = String((row && row.Row_Key) || '').trim();
+            if (businessKey === '' || rowKey === '')
+            {
+                kept.push(row);
+                continue;
+            }
+
+            const existing = canonicalByBusinessKey.get(businessKey);
+            if (!existing)
+            {
+                canonicalByBusinessKey.set(businessKey, row);
+                kept.push(row);
+                continue;
+            }
+
+            mergeMonthRowIntoExisting(existing, row);
+            removedKeys.push(rowKey);
+        }
+
+        if (removedKeys.length === 0)
+        {
+            return;
+        }
+
+        rows.length = 0;
+        for (const row of kept)
+        {
+            rows.push(row);
+        }
+
+        rowsByKey.clear();
+        for (const row of rows)
+        {
+            const rowKey = String(row.Row_Key || '').trim();
+            if (rowKey !== '')
+            {
+                rowsByKey.set(rowKey, row);
+            }
+        }
+
+        for (const removedKey of removedKeys)
+        {
+            const tr = rowDomByKey.get(removedKey);
+            if (tr && tr.parentNode)
+            {
+                tr.remove();
+            }
+            rowDomByKey.delete(removedKey);
+            rowLoadStates.delete(removedKey);
+        }
+    }
+
     function sortRowsInPlace ()
     {
         rows.sort(function (a, b)
@@ -5016,6 +5122,7 @@
         }
 
         const monthRows = Array.isArray(chunk.rows) ? chunk.rows : [];
+        const touchedRows = [];
         for (const monthRow of monthRows)
         {
             const rowKey = String(monthRow.Row_Key || '').trim();
@@ -5024,7 +5131,12 @@
                 continue;
             }
 
-            const existing = rowsByKey.get(rowKey);
+            let existing = rowsByKey.get(rowKey);
+            if (!existing)
+            {
+                existing = findExistingRowForBusinessKey(monthRow);
+            }
+
             if (existing)
             {
                 if (isRefreshFinance)
@@ -5043,18 +5155,22 @@
                 {
                     mergeMonthRowIntoExisting(existing, monthRow);
                 }
+
+                touchedRows.push(existing);
             }
             else
             {
                 rows.push(monthRow);
                 rowsByKey.set(rowKey, monthRow);
+                touchedRows.push(monthRow);
             }
         }
 
+        coalesceDuplicateRowsByBusinessKey();
         applyCumulativeProjectTotalsToRows();
         sortRowsInPlace();
         renderHeader();
-        applyChunkRowsToDom(monthRows);
+        applyChunkRowsToDom(touchedRows);
         refreshStatusFilters();
         accumulateLoadStats(chunk.load_meta);
     }

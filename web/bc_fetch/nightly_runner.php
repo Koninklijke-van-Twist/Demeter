@@ -104,7 +104,8 @@ function demeter_refresh_cost_center_weeks(
 }
 
 /**
- * Haalt memo's op voor alle rijen in de display-cache en slaat ze op.
+ * Haalt memo's op voor open/niet-afgesloten rijen in de display-cache en slaat ze op.
+ * Afgesloten/geannuleerde rijen die al memo's hebben worden overgeslagen (minder BC-calls).
  */
 function demeter_refresh_all_memos_for_cost_center(string $company, string $costCenter, array $auth, int $ttl): int
 {
@@ -116,6 +117,12 @@ function demeter_refresh_all_memos_for_cost_center(string $company, string $cost
     $rowRefs = [];
     foreach ($displayRowsByKey as $rowKey => $row) {
         if (!is_string($rowKey) || $rowKey === '' || !is_array($row)) {
+            continue;
+        }
+
+        $status = trim((string) ($row['Status'] ?? ''));
+        $memosLoaded = !empty($row['Memos_Loaded']);
+        if (demeter_workorder_status_is_closed($status) && $memosLoaded) {
             continue;
         }
 

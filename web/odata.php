@@ -142,6 +142,26 @@ function odata_append_debug_to_payload(array $payload): array
     return $payload;
 }
 
+/**
+ * Zet een grotere pagina-grootte op de eerste OData-URL (niet op @odata.nextLink).
+ * Minder round-trips bij grote resultsets; BC mag $top begrensen.
+ */
+function odata_ensure_preferred_page_size(string $url, int $top = 5000): string
+{
+    $url = trim($url);
+    if ($url === '' || $top <= 0) {
+        return $url;
+    }
+
+    if (stripos($url, '$top=') !== false || stripos($url, '%24top=') !== false) {
+        return $url;
+    }
+
+    $separator = strpos($url, '?') === false ? '?' : '&';
+
+    return $url . $separator . '$top=' . $top;
+}
+
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
 {
     consolelog("Fetching $url\n");
@@ -153,6 +173,7 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
         odata_load_progress_set_current_call($activeProgressToken, $url);
     }
 
+    $url = odata_ensure_preferred_page_size($url);
     $cacheKey = build_cache_key($url, $auth);
     $cachePath = cache_path_for_key($cacheKey);
 

@@ -15,8 +15,8 @@ const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 14;
 /** Huidige ISO-week overslaan bij herladen als scan jonger is dan dit aantal uren. */
 const DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS = 2;
-/** Per Job_No: bij hoogstens dit aantal paren eerst gerichte AND-filter i.p.v. volledige job-batch. */
-const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 3;
+/** Per Job_No: 0 = altijd Job_No-batches (geen pair-first N+1). */
+const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 0;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */
 const DEMETER_WORKORDER_JOB_NO_BATCH_SIZE = 15;
 
@@ -234,6 +234,33 @@ function demeter_workorder_pair_key(string $jobNo, string $jobTaskNo): string
 function demeter_workorder_row_key(string $jobNo, string $workorderSourceKey): string
 {
     return strtolower(trim($jobNo)) . '|' . strtolower(trim($workorderSourceKey));
+}
+
+/**
+ * Business-key voor UI-samenvoeging: project + zichtbaar werkordernummer.
+ * Voorkomt dubbele rijen wanneer finance_key (LVS vs Job_Task_No) wisselt.
+ */
+function demeter_workorder_business_key(array $row): string
+{
+    $jobNo = strtolower(trim((string) ($row['Job_No'] ?? '')));
+    if ($jobNo === '') {
+        return '';
+    }
+
+    $workorderNo = trim((string) ($row['Bc_No'] ?? ''));
+    if ($workorderNo === '') {
+        $workorderNo = trim((string) ($row['No'] ?? ''));
+    }
+
+    if ($workorderNo === '') {
+        $workorderNo = trim((string) ($row['Workorder_Source_Key'] ?? ''));
+    }
+
+    if ($workorderNo === '') {
+        return '';
+    }
+
+    return $jobNo . '|' . strtolower($workorderNo);
 }
 
 /**
@@ -621,6 +648,10 @@ function demeter_workorder_state_cache_load_display_rows(string $company, string
         if (is_string($raw) && trim($raw) !== '') {
             $decoded = json_decode($raw, true);
             if (is_array($decoded)) {
+                if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
+                    return demeter_coalesce_display_rows_by_business_key($decoded);
+                }
+
                 return $decoded;
             }
         }
@@ -647,6 +678,10 @@ function demeter_workorder_state_cache_save_display_rows(string $company, string
     $directory = demeter_workorder_state_cache_directory();
     if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
         return false;
+    }
+
+    if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
+        $displayRowsByKey = demeter_coalesce_display_rows_by_business_key($displayRowsByKey);
     }
 
     $json = demeter_workorder_state_cache_json_encode($displayRowsByKey);
@@ -906,6 +941,8 @@ function demeter_month_scan_update_after_load(string $yearMonth, bool $hasMonthR
         $monthScan['stop_before_month'] = $yearMonth;
     }
 
+    $previousMeta = is_array($monthScan['months'][$yearMonth] ?? null) ? $monthScan['months'][$yearMonth] : [];
+
     $monthScan['months'][$yearMonth] = [
         'scanned_at' => gmdate('c'),
         'has_projectposten' => $hasMonthRows,
@@ -916,7 +953,170 @@ function demeter_month_scan_update_after_load(string $yearMonth, bool $hasMonthR
         }))),
     ];
 
+    // Behoud eerdere week-projecttotalen tot ze expliciet opnieuw worden gezet.
+    if (isset($previousMeta['project_costs_by_job']) && is_array($previousMeta['project_costs_by_job'])) {
+        $monthScan['months'][$yearMonth]['project_costs_by_job'] = $previousMeta['project_costs_by_job'];
+    }
+    if (isset($previousMeta['project_revenue_by_job']) && is_array($previousMeta['project_revenue_by_job'])) {
+        $monthScan['months'][$yearMonth]['project_revenue_by_job'] = $previousMeta['project_revenue_by_job'];
+    }
+
     return $monthScan;
+}
+
+/**
+ * Slaat projecttotalen van één week op in month_scan (overschrijft die week).
+ *
+ * @param array<string, array{costs?: float|int, revenue?: float|int}|float|int> $projectTotalsByJob
+ */
+function demeter_month_scan_store_week_project_totals(array $monthScan, string $yearWeek, array $projectTotalsByJob): array
+{
+    $yearWeek = trim($yearWeek);
+    if ($yearWeek === '') {
+        return $monthScan;
+    }
+
+    if (!is_array($monthScan['months'] ?? null)) {
+        $monthScan['months'] = [];
+    }
+    if (!isset($monthScan['months'][$yearWeek]) || !is_array($monthScan['months'][$yearWeek])) {
+        $monthScan['months'][$yearWeek] = [];
+    }
+
+    $costsByJob = [];
+    $revenueByJob = [];
+    foreach ($projectTotalsByJob as $jobKey => $totals) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '') {
+            continue;
+        }
+
+        if (is_array($totals)) {
+            $costsByJob[$normalizedJob] = (float) ($totals['costs'] ?? 0.0);
+            $revenueByJob[$normalizedJob] = (float) ($totals['revenue'] ?? 0.0);
+            continue;
+        }
+
+        $costsByJob[$normalizedJob] = (float) $totals;
+        $revenueByJob[$normalizedJob] = (float) ($revenueByJob[$normalizedJob] ?? 0.0);
+    }
+
+    $monthScan['months'][$yearWeek]['project_costs_by_job'] = $costsByJob;
+    $monthScan['months'][$yearWeek]['project_revenue_by_job'] = $revenueByJob;
+
+    return $monthScan;
+}
+
+/**
+ * Sommeert projecttotalen over alle gescande weken in month_scan.
+ *
+ * @return array<string, array{costs: float, revenue: float}>
+ */
+function demeter_month_scan_cumulative_project_totals(array $monthScan): array
+{
+    $cumulative = [];
+    $months = is_array($monthScan['months'] ?? null) ? $monthScan['months'] : [];
+
+    foreach ($months as $weekMeta) {
+        if (!is_array($weekMeta)) {
+            continue;
+        }
+
+        $costsByJob = is_array($weekMeta['project_costs_by_job'] ?? null) ? $weekMeta['project_costs_by_job'] : [];
+        $revenueByJob = is_array($weekMeta['project_revenue_by_job'] ?? null) ? $weekMeta['project_revenue_by_job'] : [];
+
+        foreach ($costsByJob as $jobKey => $amount) {
+            $normalizedJob = strtolower(trim((string) $jobKey));
+            if ($normalizedJob === '') {
+                continue;
+            }
+            if (!isset($cumulative[$normalizedJob])) {
+                $cumulative[$normalizedJob] = ['costs' => 0.0, 'revenue' => 0.0];
+            }
+            $cumulative[$normalizedJob]['costs'] += (float) $amount;
+        }
+
+        foreach ($revenueByJob as $jobKey => $amount) {
+            $normalizedJob = strtolower(trim((string) $jobKey));
+            if ($normalizedJob === '') {
+                continue;
+            }
+            if (!isset($cumulative[$normalizedJob])) {
+                $cumulative[$normalizedJob] = ['costs' => 0.0, 'revenue' => 0.0];
+            }
+            $cumulative[$normalizedJob]['revenue'] += (float) $amount;
+        }
+    }
+
+    return $cumulative;
+}
+
+/**
+ * Of elke gescande week projecttotalen heeft opgeslagen (na een volle Ververs Nu).
+ */
+function demeter_month_scan_has_complete_project_totals(array $monthScan): bool
+{
+    $months = is_array($monthScan['months'] ?? null) ? $monthScan['months'] : [];
+    if ($months === []) {
+        return false;
+    }
+
+    $sawScannedWeek = false;
+    foreach ($months as $weekMeta) {
+        if (!is_array($weekMeta)) {
+            continue;
+        }
+
+        $scannedAt = trim((string) ($weekMeta['scanned_at'] ?? ''));
+        if ($scannedAt === '') {
+            continue;
+        }
+
+        $sawScannedWeek = true;
+        if (!array_key_exists('project_costs_by_job', $weekMeta) || !array_key_exists('project_revenue_by_job', $weekMeta)) {
+            return false;
+        }
+    }
+
+    return $sawScannedWeek;
+}
+
+/**
+ * Leest opgeslagen week-projecttotalen uit month_scan.
+ *
+ * @return array<string, array{costs: float, revenue: float}>
+ */
+function demeter_month_scan_week_project_totals(array $monthScan, string $yearWeek): array
+{
+    $yearWeek = trim($yearWeek);
+    $weekMeta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+    $costsByJob = is_array($weekMeta['project_costs_by_job'] ?? null) ? $weekMeta['project_costs_by_job'] : [];
+    $revenueByJob = is_array($weekMeta['project_revenue_by_job'] ?? null) ? $weekMeta['project_revenue_by_job'] : [];
+    $totals = [];
+
+    foreach ($costsByJob as $jobKey => $amount) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '') {
+            continue;
+        }
+        $totals[$normalizedJob] = [
+            'costs' => (float) $amount,
+            'revenue' => (float) ($revenueByJob[$normalizedJob] ?? 0.0),
+        ];
+    }
+
+    foreach ($revenueByJob as $jobKey => $amount) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '' || isset($totals[$normalizedJob])) {
+            continue;
+        }
+        $totals[$normalizedJob] = [
+            'costs' => 0.0,
+            'revenue' => (float) $amount,
+        ];
+    }
+
+    return $totals;
 }
 
 /**

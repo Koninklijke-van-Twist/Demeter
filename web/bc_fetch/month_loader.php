@@ -233,6 +233,7 @@ function bc_fetch_load_workorder_week_chunk(
             $cachedState
         );
 
+        $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $normalizedYearWeek);
         $monthScan = demeter_month_scan_update_after_load(
             $normalizedYearWeek,
             false,
@@ -240,6 +241,7 @@ function bc_fetch_load_workorder_week_chunk(
             $rowKeys,
             $monthScan
         );
+        $monthScan = demeter_month_scan_store_week_project_totals($monthScan, $normalizedYearWeek, []);
 
         $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
         $displayRowsByKey = demeter_merge_display_rows_for_month_chunk(
@@ -248,6 +250,18 @@ function bc_fetch_load_workorder_week_chunk(
             $normalizedYearWeek === $currentCalendarWeek,
             []
         );
+        if (demeter_month_scan_has_complete_project_totals($monthScan)) {
+            $displayRowsByKey = demeter_apply_project_totals_to_display_rows(
+                $displayRowsByKey,
+                demeter_month_scan_cumulative_project_totals($monthScan)
+            );
+        } else {
+            $displayRowsByKey = demeter_adjust_project_totals_on_display_rows_by_week_delta(
+                $displayRowsByKey,
+                $previousWeekProjectTotals,
+                []
+            );
+        }
 
         demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan, $loadSession);
         demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
@@ -461,6 +475,11 @@ function bc_fetch_load_workorder_week_chunk(
     $rowKeys = $builtRows['row_keys'];
     $hasWeekRows = $builtRows['rows'] !== [];
 
+    $weekProjectTotals = is_array($rangeFinance['project_totals_by_job'] ?? null)
+        ? $rangeFinance['project_totals_by_job']
+        : [];
+    $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $normalizedYearWeek);
+
     $monthScan = demeter_month_scan_update_after_load(
         $normalizedYearWeek,
         $hasWeekRows,
@@ -468,6 +487,8 @@ function bc_fetch_load_workorder_week_chunk(
         $rowKeys,
         $monthScan
     );
+    $monthScan = demeter_month_scan_store_week_project_totals($monthScan, $normalizedYearWeek, $weekProjectTotals);
+    $cumulativeProjectTotals = demeter_month_scan_cumulative_project_totals($monthScan);
 
     $displayRowsByKey = $displayRowsByKey !== []
         ? $displayRowsByKey
@@ -476,8 +497,17 @@ function bc_fetch_load_workorder_week_chunk(
         $displayRowsByKey,
         $builtRows['rows'],
         $normalizedYearWeek === $currentCalendarWeek,
-        is_array($rangeFinance['project_totals_by_job'] ?? null) ? $rangeFinance['project_totals_by_job'] : []
+        []
     );
+    if (demeter_month_scan_has_complete_project_totals($monthScan)) {
+        $displayRowsByKey = demeter_apply_project_totals_to_display_rows($displayRowsByKey, $cumulativeProjectTotals);
+    } else {
+        $displayRowsByKey = demeter_adjust_project_totals_on_display_rows_by_week_delta(
+            $displayRowsByKey,
+            $previousWeekProjectTotals,
+            $weekProjectTotals
+        );
+    }
 
     demeter_workorder_state_cache_save($company, $costCenter, $cacheState, $monthScan, $loadSession);
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
