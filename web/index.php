@@ -524,14 +524,36 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'row_keys' => [],
         ];
         if (empty($chunk['skipped'])) {
-            $built = demeter_build_workorder_rows_from_overview([
-                'workorders' => is_array($chunk['workorders'] ?? null) ? $chunk['workorders'] : [],
-                'project_totals_by_job' => is_array($chunk['project_totals_by_job'] ?? null) ? $chunk['project_totals_by_job'] : [],
-                'project_invoice_ids_by_job' => is_array($chunk['project_invoice_ids_by_job'] ?? null) ? $chunk['project_invoice_ids_by_job'] : [],
-                'project_invoiced_total_by_job' => is_array($chunk['project_invoiced_total_by_job'] ?? null) ? $chunk['project_invoiced_total_by_job'] : [],
-                'workorder_totals_by_project_and_number' => is_array($chunk['workorder_totals_by_project_and_number'] ?? null) ? $chunk['workorder_totals_by_project_and_number'] : [],
-                'finance_key_by_pair' => is_array($chunk['finance_key_by_pair'] ?? null) ? $chunk['finance_key_by_pair'] : [],
-            ], $invoiceFilter);
+            $useDayRows = !empty($chunk['load_meta']['day_load'])
+                && is_array($chunk['rows'] ?? null)
+                && $chunk['rows'] !== [];
+
+            if ($useDayRows) {
+                $dayRowsByKey = [];
+                foreach ($chunk['rows'] as $dayRow) {
+                    if (!is_array($dayRow)) {
+                        continue;
+                    }
+                    $rowKey = trim((string) ($dayRow['Row_Key'] ?? ''));
+                    if ($rowKey === '') {
+                        continue;
+                    }
+                    $dayRowsByKey[$rowKey] = $dayRow;
+                }
+                $built = [
+                    'rows' => demeter_filter_display_rows_by_invoice($dayRowsByKey, $invoiceFilter),
+                    'row_keys' => array_keys($dayRowsByKey),
+                ];
+            } else {
+                $built = demeter_build_workorder_rows_from_overview([
+                    'workorders' => is_array($chunk['workorders'] ?? null) ? $chunk['workorders'] : [],
+                    'project_totals_by_job' => is_array($chunk['project_totals_by_job'] ?? null) ? $chunk['project_totals_by_job'] : [],
+                    'project_invoice_ids_by_job' => is_array($chunk['project_invoice_ids_by_job'] ?? null) ? $chunk['project_invoice_ids_by_job'] : [],
+                    'project_invoiced_total_by_job' => is_array($chunk['project_invoiced_total_by_job'] ?? null) ? $chunk['project_invoiced_total_by_job'] : [],
+                    'workorder_totals_by_project_and_number' => is_array($chunk['workorder_totals_by_project_and_number'] ?? null) ? $chunk['workorder_totals_by_project_and_number'] : [],
+                    'finance_key_by_pair' => is_array($chunk['finance_key_by_pair'] ?? null) ? $chunk['finance_key_by_pair'] : [],
+                ], $invoiceFilter);
+            }
 
             if ($catchUp) {
                 demeter_workorder_state_cache_touch_updated_at($company, $costCenter);

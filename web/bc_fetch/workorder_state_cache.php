@@ -382,6 +382,484 @@ function demeter_previous_iso_year_week(string $yearWeek): ?string
 }
 
 /**
+ * Datumrange voor één kalenderdag [from, to).
+ *
+ * @return array{from: DateTimeImmutable, to: DateTimeImmutable, day: string}
+ */
+function demeter_day_date_range(string $dayYmd): array
+{
+    $from = DateTimeImmutable::createFromFormat('!Y-m-d', trim($dayYmd));
+    if (!$from instanceof DateTimeImmutable) {
+        throw new InvalidArgumentException('Ongeldige dag: ' . $dayYmd);
+    }
+
+    return [
+        'from' => $from,
+        'to' => $from->modify('+1 day'),
+        'day' => $from->format('Y-m-d'),
+    ];
+}
+
+/**
+ * Kalenderdagen (Y-m-d) van maandag t/m einddag binnen de ISO-week.
+ *
+ * @return list<string>
+ */
+function demeter_iso_week_calendar_days_until(string $yearWeek, ?DateTimeImmutable $untilInclusive = null): array
+{
+    $weekRange = demeter_week_date_range($yearWeek, false);
+    $from = $weekRange['from'];
+    $weekEndExclusive = $weekRange['to'];
+    $until = $untilInclusive ?? $from->modify('+6 days');
+    if ($until >= $weekEndExclusive) {
+        $until = $weekEndExclusive->modify('-1 day');
+    }
+    if ($until < $from) {
+        return [];
+    }
+
+    $days = [];
+    $cursor = $from;
+    while ($cursor <= $until) {
+        $days[] = $cursor->format('Y-m-d');
+        $cursor = $cursor->modify('+1 day');
+    }
+
+    return $days;
+}
+
+/**
+ * Of een week-slot nog open (per-dag) is.
+ */
+function demeter_month_scan_week_is_open(array $monthScan, string $yearWeek): bool
+{
+    $meta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+    if (!empty($meta['open'])) {
+        return true;
+    }
+
+    return is_array($meta['days'] ?? null) && $meta['days'] !== [];
+}
+
+/**
+ * Of een niet-huidige week nog geconsolideerd moet worden (volle BC-weekfetch).
+ */
+function demeter_month_scan_week_needs_consolidation(array $monthScan, string $yearWeek, string $currentWeek): bool
+{
+    $yearWeek = trim($yearWeek);
+    if ($yearWeek === '' || $yearWeek === $currentWeek) {
+        return false;
+    }
+
+    return demeter_month_scan_week_is_open($monthScan, $yearWeek);
+}
+
+/**
+ * @return array<string, array>
+ */
+function demeter_month_scan_week_days(array $monthScan, string $yearWeek): array
+{
+    $meta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+    $days = is_array($meta['days'] ?? null) ? $meta['days'] : [];
+    $normalized = [];
+    foreach ($days as $dayKey => $dayMeta) {
+        $day = trim((string) $dayKey);
+        if ($day === '' || !is_array($dayMeta)) {
+            continue;
+        }
+        $normalized[$day] = $dayMeta;
+    }
+
+    return $normalized;
+}
+
+/**
+ * Of een scanned_at-timestamp binnen maxAgeHours valt.
+ */
+function demeter_scanned_at_within_hours(?string $scannedAt, float $maxAgeHours): bool
+{
+    if ($maxAgeHours <= 0) {
+        return false;
+    }
+
+    $scannedAt = trim((string) $scannedAt);
+    if ($scannedAt === '') {
+        return false;
+    }
+
+    $parsed = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $scannedAt);
+    if (!$parsed instanceof DateTimeImmutable) {
+        $parsed = DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $scannedAt);
+    }
+    if (!$parsed instanceof DateTimeImmutable) {
+        return false;
+    }
+
+    $ageSeconds = time() - $parsed->getTimestamp();
+
+    return $ageSeconds >= 0 && $ageSeconds <= (int) round($maxAgeHours * 3600);
+}
+
+/**
+ * Dagen van de open week die (opnieuw) geladen moeten worden.
+ *
+ * @return list<string>
+ */
+function demeter_month_scan_open_week_days_to_load(
+    string $yearWeek,
+    array $monthScan,
+    bool $forceFull,
+    ?float $todaySkipMaxAgeHours = null
+): array {
+    $today = new DateTimeImmutable('today');
+    if (demeter_iso_year_week_from_date($today) !== $yearWeek) {
+        return [];
+    }
+
+    $days = demeter_iso_week_calendar_days_until($yearWeek, $today);
+    if ($days === []) {
+        return [];
+    }
+
+    $todayYmd = $today->format('Y-m-d');
+    $dayMetaByDay = demeter_month_scan_week_days($monthScan, $yearWeek);
+    $maxAgeHours = $todaySkipMaxAgeHours;
+    if ($maxAgeHours === null) {
+        $maxAgeHours = (float) DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS;
+    }
+
+    $toLoad = [];
+    foreach ($days as $dayYmd) {
+        if ($forceFull) {
+            $toLoad[] = $dayYmd;
+            continue;
+        }
+
+        $dayMeta = is_array($dayMetaByDay[$dayYmd] ?? null) ? $dayMetaByDay[$dayYmd] : null;
+        $scannedAt = is_array($dayMeta) ? trim((string) ($dayMeta['scanned_at'] ?? '')) : '';
+
+        if ($dayYmd === $todayYmd) {
+            if ($scannedAt === '' || !demeter_scanned_at_within_hours($scannedAt, $maxAgeHours)) {
+                $toLoad[] = $dayYmd;
+            }
+            continue;
+        }
+
+        // Afgesloten dagen in de open week: niet opnieuw, behalve als ze nog nooit gescand zijn.
+        if ($scannedAt === '') {
+            $toLoad[] = $dayYmd;
+        }
+    }
+
+    return $toLoad;
+}
+
+/**
+ * @param list<string> $rowKeys
+ * @param array<string, array{costs?: float|int, revenue?: float|int}|float|int> $projectTotalsByJob
+ * @param array<string, array{costs?: float|int, revenue?: float|int}|float|int> $workorderTotalsByProjectAndNumber
+ */
+function demeter_month_scan_store_day_after_load(
+    array $monthScan,
+    string $yearWeek,
+    string $dayYmd,
+    bool $hasRows,
+    array $rowKeys,
+    array $projectTotalsByJob,
+    array $workorderTotalsByProjectAndNumber = []
+): array {
+    $yearWeek = trim($yearWeek);
+    $dayYmd = trim($dayYmd);
+    if ($yearWeek === '' || $dayYmd === '') {
+        return $monthScan;
+    }
+
+    if (!is_array($monthScan['months'] ?? null)) {
+        $monthScan['months'] = [];
+    }
+    if (!isset($monthScan['months'][$yearWeek]) || !is_array($monthScan['months'][$yearWeek])) {
+        $monthScan['months'][$yearWeek] = [];
+    }
+
+    $normalizedRowKeys = array_values(array_unique(array_filter(array_map('strval', $rowKeys), static function (string $key): bool {
+        return trim($key) !== '';
+    })));
+
+    $costsByJob = [];
+    $revenueByJob = [];
+    foreach ($projectTotalsByJob as $jobKey => $totals) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '') {
+            continue;
+        }
+        if (is_array($totals)) {
+            $costsByJob[$normalizedJob] = (float) ($totals['costs'] ?? 0.0);
+            $revenueByJob[$normalizedJob] = (float) ($totals['revenue'] ?? 0.0);
+            continue;
+        }
+        $costsByJob[$normalizedJob] = (float) $totals;
+        $revenueByJob[$normalizedJob] = (float) ($revenueByJob[$normalizedJob] ?? 0.0);
+    }
+
+    $woTotals = [];
+    foreach ($workorderTotalsByProjectAndNumber as $woKey => $totals) {
+        $normalizedWo = strtolower(trim((string) $woKey));
+        if ($normalizedWo === '') {
+            continue;
+        }
+        if (is_array($totals)) {
+            $woTotals[$normalizedWo] = [
+                'costs' => (float) ($totals['costs'] ?? 0.0),
+                'revenue' => (float) ($totals['revenue'] ?? 0.0),
+            ];
+            continue;
+        }
+        $woTotals[$normalizedWo] = [
+            'costs' => (float) $totals,
+            'revenue' => 0.0,
+        ];
+    }
+
+    if (!isset($monthScan['months'][$yearWeek]['days']) || !is_array($monthScan['months'][$yearWeek]['days'])) {
+        $monthScan['months'][$yearWeek]['days'] = [];
+    }
+
+    $monthScan['months'][$yearWeek]['open'] = true;
+    $monthScan['months'][$yearWeek]['days'][$dayYmd] = [
+        'scanned_at' => gmdate('c'),
+        'empty' => !$hasRows,
+        'has_projectposten' => $hasRows,
+        'row_keys' => $normalizedRowKeys,
+        'project_costs_by_job' => $costsByJob,
+        'project_revenue_by_job' => $revenueByJob,
+        'workorder_totals_by_project_and_number' => $woTotals,
+    ];
+
+    return demeter_month_scan_reaggregate_open_week_from_days($monthScan, $yearWeek);
+}
+
+/**
+ * Herberekent week-aggregaat uit days[] voor een open week.
+ */
+function demeter_month_scan_reaggregate_open_week_from_days(array $monthScan, string $yearWeek): array
+{
+    $yearWeek = trim($yearWeek);
+    if ($yearWeek === '' || !isset($monthScan['months'][$yearWeek]) || !is_array($monthScan['months'][$yearWeek])) {
+        return $monthScan;
+    }
+
+    $days = demeter_month_scan_week_days($monthScan, $yearWeek);
+    $rowKeys = [];
+    $costsByJob = [];
+    $revenueByJob = [];
+    $woTotals = [];
+    $latestScannedAt = '';
+    $anyRows = false;
+    $anyPosten = false;
+
+    foreach ($days as $dayMeta) {
+        if (!is_array($dayMeta)) {
+            continue;
+        }
+
+        $scannedAt = trim((string) ($dayMeta['scanned_at'] ?? ''));
+        if ($scannedAt !== '' && ($latestScannedAt === '' || strcmp($scannedAt, $latestScannedAt) > 0)) {
+            $latestScannedAt = $scannedAt;
+        }
+
+        if (empty($dayMeta['empty'])) {
+            $anyRows = true;
+        }
+        if (!empty($dayMeta['has_projectposten'])) {
+            $anyPosten = true;
+        }
+
+        foreach (is_array($dayMeta['row_keys'] ?? null) ? $dayMeta['row_keys'] : [] as $rowKey) {
+            $normalizedKey = trim((string) $rowKey);
+            if ($normalizedKey !== '') {
+                $rowKeys[$normalizedKey] = true;
+            }
+        }
+
+        $dayCosts = is_array($dayMeta['project_costs_by_job'] ?? null) ? $dayMeta['project_costs_by_job'] : [];
+        $dayRevenue = is_array($dayMeta['project_revenue_by_job'] ?? null) ? $dayMeta['project_revenue_by_job'] : [];
+        foreach ($dayCosts as $jobKey => $amount) {
+            $normalizedJob = strtolower(trim((string) $jobKey));
+            if ($normalizedJob === '') {
+                continue;
+            }
+            $costsByJob[$normalizedJob] = ($costsByJob[$normalizedJob] ?? 0.0) + (float) $amount;
+        }
+        foreach ($dayRevenue as $jobKey => $amount) {
+            $normalizedJob = strtolower(trim((string) $jobKey));
+            if ($normalizedJob === '') {
+                continue;
+            }
+            $revenueByJob[$normalizedJob] = ($revenueByJob[$normalizedJob] ?? 0.0) + (float) $amount;
+        }
+
+        $dayWo = is_array($dayMeta['workorder_totals_by_project_and_number'] ?? null)
+            ? $dayMeta['workorder_totals_by_project_and_number']
+            : [];
+        foreach ($dayWo as $woKey => $totals) {
+            $normalizedWo = strtolower(trim((string) $woKey));
+            if ($normalizedWo === '') {
+                continue;
+            }
+            if (!isset($woTotals[$normalizedWo])) {
+                $woTotals[$normalizedWo] = ['costs' => 0.0, 'revenue' => 0.0];
+            }
+            if (is_array($totals)) {
+                $woTotals[$normalizedWo]['costs'] += (float) ($totals['costs'] ?? 0.0);
+                $woTotals[$normalizedWo]['revenue'] += (float) ($totals['revenue'] ?? 0.0);
+            } else {
+                $woTotals[$normalizedWo]['costs'] += (float) $totals;
+            }
+        }
+    }
+
+    $monthScan['months'][$yearWeek]['open'] = true;
+    $monthScan['months'][$yearWeek]['days'] = $days;
+    $monthScan['months'][$yearWeek]['scanned_at'] = $latestScannedAt !== '' ? $latestScannedAt : gmdate('c');
+    $monthScan['months'][$yearWeek]['empty'] = !$anyRows;
+    $monthScan['months'][$yearWeek]['has_projectposten'] = $anyPosten;
+    $monthScan['months'][$yearWeek]['only_closed_cached'] = false;
+    $monthScan['months'][$yearWeek]['row_keys'] = array_keys($rowKeys);
+    $monthScan['months'][$yearWeek]['project_costs_by_job'] = $costsByJob;
+    $monthScan['months'][$yearWeek]['project_revenue_by_job'] = $revenueByJob;
+    $monthScan['months'][$yearWeek]['workorder_totals_by_project_and_number'] = $woTotals;
+
+    return $monthScan;
+}
+
+/**
+ * Leest WO-totalen van een week (aggregaat of som van days).
+ *
+ * @return array<string, array{costs: float, revenue: float}>
+ */
+function demeter_month_scan_week_workorder_totals(array $monthScan, string $yearWeek): array
+{
+    $yearWeek = trim($yearWeek);
+    $meta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+    $raw = is_array($meta['workorder_totals_by_project_and_number'] ?? null)
+        ? $meta['workorder_totals_by_project_and_number']
+        : [];
+
+    if ($raw === [] && demeter_month_scan_week_is_open($monthScan, $yearWeek)) {
+        $monthScan = demeter_month_scan_reaggregate_open_week_from_days($monthScan, $yearWeek);
+        $meta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+        $raw = is_array($meta['workorder_totals_by_project_and_number'] ?? null)
+            ? $meta['workorder_totals_by_project_and_number']
+            : [];
+    }
+
+    $totals = [];
+    foreach ($raw as $woKey => $values) {
+        $normalizedWo = strtolower(trim((string) $woKey));
+        if ($normalizedWo === '') {
+            continue;
+        }
+        if (is_array($values)) {
+            $totals[$normalizedWo] = [
+                'costs' => (float) ($values['costs'] ?? 0.0),
+                'revenue' => (float) ($values['revenue'] ?? 0.0),
+            ];
+            continue;
+        }
+        $totals[$normalizedWo] = [
+            'costs' => (float) $values,
+            'revenue' => 0.0,
+        ];
+    }
+
+    return $totals;
+}
+
+/**
+ * Leest WO-totalen van één dag in een open week.
+ *
+ * @return array<string, array{costs: float, revenue: float}>
+ */
+function demeter_month_scan_day_workorder_totals(array $monthScan, string $yearWeek, string $dayYmd): array
+{
+    $days = demeter_month_scan_week_days($monthScan, $yearWeek);
+    $dayMeta = is_array($days[$dayYmd] ?? null) ? $days[$dayYmd] : [];
+    $raw = is_array($dayMeta['workorder_totals_by_project_and_number'] ?? null)
+        ? $dayMeta['workorder_totals_by_project_and_number']
+        : [];
+    $totals = [];
+    foreach ($raw as $woKey => $values) {
+        $normalizedWo = strtolower(trim((string) $woKey));
+        if ($normalizedWo === '') {
+            continue;
+        }
+        if (is_array($values)) {
+            $totals[$normalizedWo] = [
+                'costs' => (float) ($values['costs'] ?? 0.0),
+                'revenue' => (float) ($values['revenue'] ?? 0.0),
+            ];
+            continue;
+        }
+        $totals[$normalizedWo] = [
+            'costs' => (float) $values,
+            'revenue' => 0.0,
+        ];
+    }
+
+    return $totals;
+}
+
+/**
+ * @return array<string, array{costs: float, revenue: float}>
+ */
+function demeter_month_scan_day_project_totals(array $monthScan, string $yearWeek, string $dayYmd): array
+{
+    $days = demeter_month_scan_week_days($monthScan, $yearWeek);
+    $dayMeta = is_array($days[$dayYmd] ?? null) ? $days[$dayYmd] : [];
+    $costsByJob = is_array($dayMeta['project_costs_by_job'] ?? null) ? $dayMeta['project_costs_by_job'] : [];
+    $revenueByJob = is_array($dayMeta['project_revenue_by_job'] ?? null) ? $dayMeta['project_revenue_by_job'] : [];
+    $totals = [];
+
+    foreach ($costsByJob as $jobKey => $amount) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '') {
+            continue;
+        }
+        $totals[$normalizedJob] = [
+            'costs' => (float) $amount,
+            'revenue' => (float) ($revenueByJob[$normalizedJob] ?? 0.0),
+        ];
+    }
+    foreach ($revenueByJob as $jobKey => $amount) {
+        $normalizedJob = strtolower(trim((string) $jobKey));
+        if ($normalizedJob === '' || isset($totals[$normalizedJob])) {
+            continue;
+        }
+        $totals[$normalizedJob] = [
+            'costs' => 0.0,
+            'revenue' => (float) $amount,
+        ];
+    }
+
+    return $totals;
+}
+
+/**
+ * Verwijdert open/days na volle week-consolidatie; behoudt week-aggregaatvelden.
+ */
+function demeter_month_scan_close_week(array $monthScan, string $yearWeek): array
+{
+    $yearWeek = trim($yearWeek);
+    if ($yearWeek === '' || !isset($monthScan['months'][$yearWeek]) || !is_array($monthScan['months'][$yearWeek])) {
+        return $monthScan;
+    }
+
+    unset($monthScan['months'][$yearWeek]['open'], $monthScan['months'][$yearWeek]['days']);
+
+    return $monthScan;
+}
+
+/**
  * Herken oude maand-keys (YYYY-MM) t.o.v. ISO-weekkeys (YYYY-Www).
  */
 function demeter_is_legacy_calendar_month_key(string $periodKey): bool
@@ -804,6 +1282,10 @@ function demeter_month_scan_can_skip_reload(
         return false;
     }
 
+    if (demeter_month_scan_week_needs_consolidation($monthScan, $yearWeek, $currentWeek)) {
+        return false;
+    }
+
     if (demeter_month_scan_can_skip($yearWeek, $monthScan)) {
         return true;
     }
@@ -819,11 +1301,12 @@ function demeter_month_scan_can_skip_reload(
             $maxAgeHours = (float) DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS;
         }
 
-        return demeter_month_scan_week_scanned_within_hours(
+        return demeter_month_scan_open_week_days_to_load(
             $yearWeek,
             $monthScan,
+            false,
             $maxAgeHours
-        );
+        ) === [];
     }
 
     if (!empty($monthMeta['empty'])) {

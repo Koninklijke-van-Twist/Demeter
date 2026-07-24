@@ -608,18 +608,38 @@ function demeter_adjust_project_totals_on_display_rows_by_week_delta(
     array $previousWeekTotals,
     array $newWeekTotals
 ): array {
+    $normalizeTotalsMap = static function (array $totals): array {
+        $normalized = [];
+        foreach ($totals as $jobKey => $values) {
+            $key = strtolower(trim((string) $jobKey));
+            if ($key === '') {
+                continue;
+            }
+            if (is_array($values)) {
+                $normalized[$key] = [
+                    'costs' => (float) ($values['costs'] ?? 0.0),
+                    'revenue' => (float) ($values['revenue'] ?? 0.0),
+                ];
+                continue;
+            }
+            $normalized[$key] = [
+                'costs' => (float) $values,
+                'revenue' => 0.0,
+            ];
+        }
+
+        return $normalized;
+    };
+
+    $previousWeekTotals = $normalizeTotalsMap($previousWeekTotals);
+    $newWeekTotals = $normalizeTotalsMap($newWeekTotals);
+
     $jobKeys = [];
     foreach (array_keys($previousWeekTotals) as $jobKey) {
-        $normalizedJob = strtolower(trim((string) $jobKey));
-        if ($normalizedJob !== '') {
-            $jobKeys[$normalizedJob] = true;
-        }
+        $jobKeys[$jobKey] = true;
     }
     foreach (array_keys($newWeekTotals) as $jobKey) {
-        $normalizedJob = strtolower(trim((string) $jobKey));
-        if ($normalizedJob !== '') {
-            $jobKeys[$normalizedJob] = true;
-        }
+        $jobKeys[$jobKey] = true;
     }
 
     if ($jobKeys === []) {
@@ -646,6 +666,186 @@ function demeter_adjust_project_totals_on_display_rows_by_week_delta(
     }
 
     return $rowsByKey;
+}
+
+/**
+ * Past WO-kosten/opbrengst-delta toe (nieuw - oud) op display-rijen.
+ *
+ * @param array<string, array> $rowsByKey
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $previousTotals
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $newTotals
+ * @return array<string, array>
+ */
+function demeter_adjust_workorder_totals_on_display_rows_by_delta(
+    array $rowsByKey,
+    array $previousTotals,
+    array $newTotals
+): array {
+    $normalizeTotalsMap = static function (array $totals): array {
+        $normalized = [];
+        foreach ($totals as $woKey => $values) {
+            $key = strtolower(trim((string) $woKey));
+            if ($key === '') {
+                continue;
+            }
+            if (is_array($values)) {
+                $normalized[$key] = [
+                    'costs' => (float) ($values['costs'] ?? 0.0),
+                    'revenue' => (float) ($values['revenue'] ?? 0.0),
+                ];
+                continue;
+            }
+            $normalized[$key] = [
+                'costs' => (float) $values,
+                'revenue' => 0.0,
+            ];
+        }
+
+        return $normalized;
+    };
+
+    $previousTotals = $normalizeTotalsMap($previousTotals);
+    $newTotals = $normalizeTotalsMap($newTotals);
+
+    $woKeys = [];
+    foreach (array_keys($previousTotals) as $woKey) {
+        $woKeys[$woKey] = true;
+    }
+    foreach (array_keys($newTotals) as $woKey) {
+        $woKeys[$woKey] = true;
+    }
+
+    if ($woKeys === []) {
+        return $rowsByKey;
+    }
+
+    foreach ($rowsByKey as $rowKey => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $normalizedJobNo = strtolower(trim((string) ($row['Job_No'] ?? '')));
+        $sourceKey = strtolower(trim((string) ($row['Workorder_Source_Key'] ?? '')));
+        if ($sourceKey === '') {
+            $sourceKey = strtolower(trim((string) ($row['Job_Task_No'] ?? '')));
+        }
+        if ($sourceKey === '') {
+            $sourceKey = strtolower(trim((string) ($row['No'] ?? '')));
+        }
+        $compositeKey = $normalizedJobNo . '|' . $sourceKey;
+        if ($normalizedJobNo === '' || $sourceKey === '' || !isset($woKeys[$compositeKey])) {
+            continue;
+        }
+
+        $previous = is_array($previousTotals[$compositeKey] ?? null) ? $previousTotals[$compositeKey] : [];
+        $next = is_array($newTotals[$compositeKey] ?? null) ? $newTotals[$compositeKey] : [];
+        $costDelta = (float) ($next['costs'] ?? 0.0) - (float) ($previous['costs'] ?? 0.0);
+        $revenueDelta = (float) ($next['revenue'] ?? 0.0) - (float) ($previous['revenue'] ?? 0.0);
+
+        $rowsByKey[$rowKey]['Actual_Costs'] = (float) ($row['Actual_Costs'] ?? 0.0) + $costDelta;
+        $rowsByKey[$rowKey]['Total_Revenue'] = (float) ($row['Total_Revenue'] ?? 0.0) + $revenueDelta;
+        $rowsByKey[$rowKey]['Actual_Total'] = finance_calculate_result(
+            (float) $rowsByKey[$rowKey]['Total_Revenue'],
+            (float) $rowsByKey[$rowKey]['Actual_Costs']
+        );
+    }
+
+    return $rowsByKey;
+}
+
+/**
+ * Upsert open-week day/consolidate rijen: metadata vernieuwen, finance via delta.
+ *
+ * @param array<string, array> $displayRowsByKey
+ * @param list<array> $chunkRows
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $previousWoTotals
+ * @param array<string, array{costs?: float|int, revenue?: float|int}> $newWoTotals
+ * @return array<string, array>
+ */
+function demeter_merge_display_rows_for_open_week_finance_delta(
+    array $displayRowsByKey,
+    array $chunkRows,
+    array $previousWoTotals,
+    array $newWoTotals
+): array {
+    $rowKeyByBusinessKey = [];
+    foreach ($displayRowsByKey as $existingRowKey => $existingRow) {
+        if (!is_array($existingRow)) {
+            continue;
+        }
+
+        $businessKey = demeter_workorder_business_key($existingRow);
+        if ($businessKey !== '' && !isset($rowKeyByBusinessKey[$businessKey])) {
+            $rowKeyByBusinessKey[$businessKey] = (string) $existingRowKey;
+        }
+    }
+
+    foreach ($chunkRows as $chunkRow) {
+        if (!is_array($chunkRow)) {
+            continue;
+        }
+
+        $rowKey = trim((string) ($chunkRow['Row_Key'] ?? ''));
+        if ($rowKey === '') {
+            continue;
+        }
+
+        $businessKey = demeter_workorder_business_key($chunkRow);
+        $targetRowKey = $rowKey;
+        if ($businessKey !== '' && isset($rowKeyByBusinessKey[$businessKey])) {
+            $targetRowKey = $rowKeyByBusinessKey[$businessKey];
+        }
+
+        if (!isset($displayRowsByKey[$targetRowKey]) || !is_array($displayRowsByKey[$targetRowKey])) {
+            $chunkRow['Row_Key'] = $targetRowKey;
+            // Finance komt via delta (nieuw - oud); start op 0 om dubbeltelling te vermijden.
+            $chunkRow['Actual_Costs'] = 0.0;
+            $chunkRow['Total_Revenue'] = 0.0;
+            $chunkRow['Actual_Total'] = finance_calculate_result(0.0, 0.0);
+            $displayRowsByKey[$targetRowKey] = $chunkRow;
+            if ($businessKey !== '') {
+                $rowKeyByBusinessKey[$businessKey] = $targetRowKey;
+            }
+            continue;
+        }
+
+        $existing = $displayRowsByKey[$targetRowKey];
+        $preservedActualCosts = $existing['Actual_Costs'] ?? 0.0;
+        $preservedTotalRevenue = $existing['Total_Revenue'] ?? 0.0;
+        $preservedActualTotal = $existing['Actual_Total'] ?? null;
+        $preservedProjectCosts = $existing['Project_Actual_Costs'] ?? null;
+        $preservedProjectRevenue = $existing['Project_Total_Revenue'] ?? null;
+
+        $chunkRow['Row_Key'] = $targetRowKey;
+        $chunkRow['Actual_Costs'] = $preservedActualCosts;
+        $chunkRow['Total_Revenue'] = $preservedTotalRevenue;
+        if ($preservedActualTotal !== null) {
+            $chunkRow['Actual_Total'] = $preservedActualTotal;
+        }
+        if ($preservedProjectCosts !== null) {
+            $chunkRow['Project_Actual_Costs'] = $preservedProjectCosts;
+        }
+        if ($preservedProjectRevenue !== null) {
+            $chunkRow['Project_Total_Revenue'] = $preservedProjectRevenue;
+        }
+
+        $displayRowsByKey[$targetRowKey] = $chunkRow;
+        if ($businessKey !== '') {
+            $rowKeyByBusinessKey[$businessKey] = $targetRowKey;
+        }
+
+        if ($targetRowKey !== $rowKey && isset($displayRowsByKey[$rowKey])) {
+            unset($displayRowsByKey[$rowKey]);
+        }
+    }
+
+    $displayRowsByKey = demeter_coalesce_display_rows_by_business_key($displayRowsByKey);
+
+    return demeter_adjust_workorder_totals_on_display_rows_by_delta(
+        $displayRowsByKey,
+        $previousWoTotals,
+        $newWoTotals
+    );
 }
 
 /**
