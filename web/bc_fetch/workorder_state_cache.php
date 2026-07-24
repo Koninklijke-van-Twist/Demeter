@@ -15,6 +15,8 @@ const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 14;
 /** Huidige ISO-week overslaan bij herladen als scan jonger is dan dit aantal uren. */
 const DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS = 2;
+/** Catch-up bij page visit: huidige week overslaan als scan jonger is dan dit aantal minuten. */
+const DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES = 30;
 /** Per Job_No: 0 = altijd Job_No-batches (geen pair-first N+1). */
 const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 0;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */
@@ -752,7 +754,7 @@ function demeter_month_scan_can_skip(string $yearMonth, array $monthScan): bool
 /**
  * Bepaalt of een week-scan recent genoeg is (op basis van scanned_at).
  */
-function demeter_month_scan_week_scanned_within_hours(string $yearWeek, array $monthScan, int $maxAgeHours): bool
+function demeter_month_scan_week_scanned_within_hours(string $yearWeek, array $monthScan, float $maxAgeHours): bool
 {
     if ($maxAgeHours <= 0) {
         return false;
@@ -778,7 +780,7 @@ function demeter_month_scan_week_scanned_within_hours(string $yearWeek, array $m
 
     $ageSeconds = time() - $parsed->getTimestamp();
 
-    return $ageSeconds >= 0 && $ageSeconds <= ($maxAgeHours * 3600);
+    return $ageSeconds >= 0 && $ageSeconds <= (int) round($maxAgeHours * 3600);
 }
 
 /**
@@ -788,13 +790,15 @@ function demeter_month_scan_week_scanned_within_hours(string $yearWeek, array $m
  * lightweight refresh of verse scan bijgewerkt.
  *
  * @param array<string, array> $displayRowsByKey
+ * @param float|null $currentWeekSkipMaxAgeHours Override voor huidige-week skip (catch-up gebruikt kortere TTL).
  */
 function demeter_month_scan_can_skip_reload(
     string $yearWeek,
     array $monthScan,
     string $currentWeek,
     bool $forceFull,
-    array $displayRowsByKey = []
+    array $displayRowsByKey = [],
+    ?float $currentWeekSkipMaxAgeHours = null
 ): bool {
     if ($forceFull) {
         return false;
@@ -810,10 +814,15 @@ function demeter_month_scan_can_skip_reload(
     }
 
     if ($yearWeek === $currentWeek) {
+        $maxAgeHours = $currentWeekSkipMaxAgeHours;
+        if ($maxAgeHours === null) {
+            $maxAgeHours = (float) DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS;
+        }
+
         return demeter_month_scan_week_scanned_within_hours(
             $yearWeek,
             $monthScan,
-            DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS
+            $maxAgeHours
         );
     }
 

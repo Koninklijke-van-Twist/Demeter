@@ -393,6 +393,14 @@
                 console.error(refreshError);
             });
     }
+    else if (asyncLoadConfig.catch_up_enabled)
+    {
+        startCatchUpCurrentWeek()
+            .catch(function (catchUpError)
+            {
+                console.error(catchUpError);
+            });
+    }
 
     function renderCacheAgeBanner ()
     {
@@ -403,7 +411,19 @@
 
         const banner = document.createElement('div');
         banner.className = 'cache-age-banner';
+        banner.id = 'cacheAgeBanner';
 
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.id = 'cacheAgeBannerButton';
+        button.textContent = buildCacheAgeBannerText();
+        button.addEventListener('click', openNightlyStatsModal);
+        banner.appendChild(button);
+        app.appendChild(banner);
+    }
+
+    function buildCacheAgeBannerText ()
+    {
         const ageHours = Number(cacheMeta.age_hours);
         let ageText = 'Onbekend';
         if (Number.isFinite(ageHours))
@@ -422,12 +442,65 @@
             ageText = 'geen cache';
         }
 
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.textContent = 'Huidige gegevens zijn ' + ageText + ' oud.';
-        button.addEventListener('click', openNightlyStatsModal);
-        banner.appendChild(button);
-        app.appendChild(banner);
+        return 'Huidige gegevens zijn ' + ageText + ' oud.';
+    }
+
+    function updateCacheAgeBannerFromMeta ()
+    {
+        const button = document.getElementById('cacheAgeBannerButton');
+        if (button)
+        {
+            button.textContent = buildCacheAgeBannerText();
+        }
+    }
+
+    function applyCacheMetaFromChunk (chunk)
+    {
+        if (!chunk || typeof chunk !== 'object')
+        {
+            return;
+        }
+
+        if (typeof chunk.cache_updated_at === 'string' && chunk.cache_updated_at.trim() !== '')
+        {
+            cacheMeta.updated_at = chunk.cache_updated_at.trim();
+        }
+
+        const ageHours = Number(chunk.cache_age_hours);
+        if (Number.isFinite(ageHours))
+        {
+            cacheMeta.age_hours = ageHours;
+        }
+
+        cacheMeta.has_data = true;
+        updateCacheAgeBannerFromMeta();
+    }
+
+    function setCumulativeProjectTotalsFromMap (totalsByJob)
+    {
+        for (const key of Object.keys(cumulativeProjectTotals))
+        {
+            delete cumulativeProjectTotals[key];
+        }
+
+        if (!totalsByJob || typeof totalsByJob !== 'object')
+        {
+            return;
+        }
+
+        for (const projectKey of Object.keys(totalsByJob))
+        {
+            const values = totalsByJob[projectKey];
+            if (!values || typeof values !== 'object')
+            {
+                continue;
+            }
+
+            cumulativeProjectTotals[projectKey] = {
+                costs: Number(values.costs || 0),
+                revenue: Number(values.revenue || 0)
+            };
+        }
     }
 
     function openNightlyStatsModal ()
@@ -5116,7 +5189,11 @@
             }
         }
 
-        if (!isRefresh)
+        if (options && options.useCumulativeFromChunk)
+        {
+            setCumulativeProjectTotalsFromMap(chunk.project_totals_cumulative_by_job);
+        }
+        else if (!isRefresh)
         {
             addCumulativeProjectTotals(chunk.project_totals_by_job);
         }
@@ -5394,7 +5471,7 @@
         }
     }
 
-    function fetchHistoryWeek (yearWeek, weekProgressIndex, weekProgressTotal)
+    function fetchHistoryWeek (yearWeek, weekProgressIndex, weekProgressTotal, options)
     {
         const params = new URLSearchParams();
         params.set('action', 'load_month');
@@ -5402,6 +5479,10 @@
         params.set('cost_center', loadedCostCenter);
         params.set('year_week', yearWeek);
         params.set('invoice_filter', invoiceFilter);
+        if (options && options.catchUp === true)
+        {
+            params.set('catch_up', '1');
+        }
         if (asyncLoadConfig.force_full === true)
         {
             params.set('force_full', '1');
@@ -5445,6 +5526,65 @@
                 return body;
             });
         });
+    }
+
+    async function startCatchUpCurrentWeek ()
+    {
+        const catchUpWeek = typeof asyncLoadConfig.catch_up_week === 'string' && asyncLoadConfig.catch_up_week !== ''
+            ? asyncLoadConfig.catch_up_week
+            : (typeof asyncLoadConfig.current_week === 'string' ? asyncLoadConfig.current_week : null);
+
+        if (!asyncLoadConfig.catch_up_enabled || historyLoadRunning || !catchUpWeek)
+        {
+            return;
+        }
+
+        historyLoadRunning = true;
+        updateHistoryLoadNote('Huidige week bijwerken: ' + catchUpWeek + '...');
+
+        try
+        {
+            const weekMeta = monthScanState.months && monthScanState.months[catchUpWeek]
+                ? monthScanState.months[catchUpWeek]
+                : null;
+            const expectedRowKeys = weekMeta && Array.isArray(weekMeta.row_keys) ? weekMeta.row_keys : [];
+            if (expectedRowKeys.length > 0)
+            {
+                markRowsLoading(expectedRowKeys);
+            }
+
+            const chunk = await fetchHistoryWeek(catchUpWeek, 0, 0, { catchUp: true });
+            monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object'
+                ? chunk.month_scan
+                : monthScanState;
+
+            if (!chunk.skipped)
+            {
+                mergeMonthChunk(chunk, {
+                    replace: true,
+                    resetTotals: true,
+                    useCumulativeFromChunk: true
+                });
+                applyCacheMetaFromChunk(chunk);
+            }
+
+            const completedKeys = Array.isArray(chunk.row_keys) ? chunk.row_keys : [];
+            if (completedKeys.length > 0)
+            {
+                markRowsComplete(completedKeys);
+            }
+        }
+        catch (catchUpError)
+        {
+            console.error(catchUpError);
+            updateHistoryLoadNote('Bijwerken huidige week mislukt.');
+            await waitForMs(2500);
+        }
+        finally
+        {
+            historyLoadRunning = false;
+            updateHistoryLoadNote('');
+        }
     }
 
     async function startIncrementalMonthLoading ()

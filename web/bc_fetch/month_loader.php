@@ -71,6 +71,9 @@ function bc_fetch_load_workorder_week_chunk(
     $partialToToday = !empty($options['partial_to_today']);
     $skipIfCached = array_key_exists('skip_if_cached', $options) ? (bool) $options['skip_if_cached'] : true;
     $loadSessionId = trim((string) ($options['load_session_id'] ?? ''));
+    $currentWeekSkipMaxAgeHours = array_key_exists('current_week_skip_max_age_hours', $options)
+        ? (float) $options['current_week_skip_max_age_hours']
+        : null;
 
     $weekRange = bc_fetch_week_date_range($yearWeek, $partialToToday);
     $rangeStart = $weekRange['from'];
@@ -90,7 +93,8 @@ function bc_fetch_load_workorder_week_chunk(
         $monthScan,
         $currentCalendarWeek,
         false,
-        $displayRowsByKey
+        $displayRowsByKey,
+        $currentWeekSkipMaxAgeHours
     )) {
         $monthMeta = is_array($monthScan['months'][$normalizedYearWeek] ?? null) ? $monthScan['months'][$normalizedYearWeek] : [];
         $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);

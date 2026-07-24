@@ -472,6 +472,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
         $yearWeek = trim((string) ($_GET['year_week'] ?? $_GET['year_month'] ?? ''));
         $invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? 'both')));
         $forceFull = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
+        $catchUp = strtolower(trim((string) ($_GET['catch_up'] ?? ''))) === '1';
 
         if (!in_array($invoiceFilter, ['both', 'uninvoiced', 'invoiced'], true)) {
             $invoiceFilter = 'both';
@@ -479,6 +480,11 @@ if (($_GET['action'] ?? '') === 'load_month') {
 
         if ($company === '' || $costCenter === '' || !demeter_is_valid_iso_year_week($yearWeek)) {
             throw new InvalidArgumentException('Ongeldige parameters voor week-laden.');
+        }
+
+        $currentWeek = demeter_current_iso_year_week();
+        if ($catchUp && $yearWeek !== $currentWeek) {
+            throw new InvalidArgumentException('Catch-up is alleen toegestaan voor de huidige week.');
         }
 
         $loadProgressTokenRaw = trim((string) ($_GET['load_token'] ?? ''));
@@ -496,15 +502,22 @@ if (($_GET['action'] ?? '') === 'load_month') {
         if ($perfLogSession !== '') {
             odata_call_time_log_activate_session($perfLogSession);
         }
-        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, $chunkProgressToken, [
+
+        $chunkOptions = [
             'cost_center' => $costCenter,
             'force_full' => $forceFull,
             'skip_if_cached' => true,
-            'partial_to_today' => $yearWeek === demeter_current_iso_year_week(),
+            'partial_to_today' => $yearWeek === $currentWeek,
             'load_session_id' => $perfLogSession,
             'progress_week_index' => $progressWeekIndex,
             'progress_week_total' => $progressWeekTotal,
-        ]);
+        ];
+        if ($catchUp) {
+            $chunkOptions['current_week_skip_max_age_hours'] = DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES / 60;
+            $chunkOptions['partial_to_today'] = true;
+        }
+
+        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, $chunkProgressToken, $chunkOptions);
 
         $built = [
             'rows' => [],
@@ -519,6 +532,10 @@ if (($_GET['action'] ?? '') === 'load_month') {
                 'workorder_totals_by_project_and_number' => is_array($chunk['workorder_totals_by_project_and_number'] ?? null) ? $chunk['workorder_totals_by_project_and_number'] : [],
                 'finance_key_by_pair' => is_array($chunk['finance_key_by_pair'] ?? null) ? $chunk['finance_key_by_pair'] : [],
             ], $invoiceFilter);
+
+            if ($catchUp) {
+                demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
+            }
         }
 
         $monthScan = is_array($chunk['month_scan'] ?? null) ? $chunk['month_scan'] : demeter_workorder_month_scan_defaults();
@@ -526,11 +543,14 @@ if (($_GET['action'] ?? '') === 'load_month') {
             ? $chunk['next_week']
             : demeter_previous_iso_year_week($yearWeek);
 
+        $cacheUpdatedAt = demeter_workorder_cost_center_cache_updated_at($company, $costCenter);
+
         demeter_send_json_response([
             'ok' => true,
             'week' => $yearWeek,
             'month' => $yearWeek,
             'skipped' => !empty($chunk['skipped']),
+            'catch_up' => $catchUp,
             'rows' => $built['rows'],
             'row_keys' => !empty($chunk['skipped'])
                 ? demeter_month_scan_expected_row_keys($monthScan, $yearWeek)
@@ -542,10 +562,13 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'next_month' => $nextWeek,
             'should_continue' => !empty($chunk['should_continue']),
             'project_totals_by_job' => is_array($chunk['project_totals_by_job'] ?? null) ? $chunk['project_totals_by_job'] : [],
+            'project_totals_cumulative_by_job' => demeter_month_scan_cumulative_project_totals($monthScan),
             'projectposten_rows_by_project' => is_array($chunk['projectposten_rows_by_project'] ?? null) ? $chunk['projectposten_rows_by_project'] : [],
             'projectposten_rows_by_project_and_workorder' => is_array($chunk['projectposten_rows_by_project_and_workorder'] ?? null) ? $chunk['projectposten_rows_by_project_and_workorder'] : [],
             'invoice_details_by_id' => is_array($chunk['invoice_details_by_id'] ?? null) ? $chunk['invoice_details_by_id'] : [],
             'load_meta' => is_array($chunk['load_meta'] ?? null) ? $chunk['load_meta'] : [],
+            'cache_updated_at' => $cacheUpdatedAt,
+            'cache_age_hours' => demeter_cache_age_hours($cacheUpdatedAt),
         ]);
     } catch (Throwable $error) {
         demeter_send_json_response(odata_append_debug_to_payload([
@@ -890,6 +913,8 @@ $initialData = [
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
+        'catch_up_enabled' => !$asyncLoadEnabled && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
+        'catch_up_week' => $syncLoadWeek,
         'force_full' => $forceFullReload,
         'chunk_unit' => 'week',
         'current_week' => $syncLoadWeek,
