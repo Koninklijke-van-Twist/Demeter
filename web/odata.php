@@ -18,6 +18,10 @@ if (!defined('DEMETER_ODATA_RETRY_BASE_DELAY_MS')) {
 if (!defined('DEMETER_ODATA_RETRY_MAX_DELAY_MS')) {
     define('DEMETER_ODATA_RETRY_MAX_DELAY_MS', 15000);
 }
+/** Vast interval voor transport/cURL-fouten (geen pogingslimiet). */
+if (!defined('DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS')) {
+    define('DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS', 10000);
+}
 
 require_once __DIR__ . '/bc_fetch/call_time_log.php';
 
@@ -252,21 +256,84 @@ function odata_retry_delay_ms(int $attempt): int
     return min(DEMETER_ODATA_RETRY_MAX_DELAY_MS, $delay);
 }
 
+/**
+ * Transportfouten (cURL / verbinding) — oneindig opnieuw proberen.
+ */
+function odata_exception_is_connection_retryable(Throwable $error): bool
+{
+    $normalized = strtolower($error->getMessage());
+    $phrases = [
+        'curl error',
+        'curl fout',
+        'recv failure',
+        'connection was reset',
+        'connection reset',
+        'connection reset by peer',
+        'failed to connect',
+        "couldn't connect",
+        'could not connect',
+        'timed out',
+        'timeout was reached',
+        'operation timed out',
+        'ssl_connect_error',
+        'ssl connect error',
+        'empty reply from server',
+        'network is unreachable',
+        'transfer closed',
+        'broken pipe',
+        'connection refused',
+    ];
+
+    foreach ($phrases as $phrase) {
+        if (strpos($normalized, $phrase) !== false) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 function odata_get_json(string $url, array $auth): array
 {
-    $maxAttempts = max(1, (int) DEMETER_ODATA_RETRY_MAX_ATTEMPTS);
-    $lastError = null;
+    $maxHttpAttempts = max(1, (int) DEMETER_ODATA_RETRY_MAX_ATTEMPTS);
+    $httpAttempt = 0;
+    $attempt = 0;
     odata_error_context_begin_call($url);
 
-    for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+    while (true) {
+        $attempt++;
         try {
             $result = odata_get_json_once($url, $auth);
             odata_error_context_clear_for_url($url);
 
             return $result;
         } catch (Exception $error) {
-            $lastError = $error;
-            $willRetry = $attempt < $maxAttempts && odata_exception_is_retryable($error);
+            if (odata_exception_is_connection_retryable($error)) {
+                odata_error_context_record_attempt($url, $error, $attempt, true);
+                $delayMs = (int) DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS;
+                consolelog(
+                    "OData connection retry #{$attempt} after {$delayMs}ms for {$url}: {$error->getMessage()}\n"
+                );
+
+                $activeProgressToken = odata_get_active_load_progress_token();
+                if ($activeProgressToken !== '' && function_exists('odata_load_progress_set_current_call')) {
+                    odata_load_progress_set_current_call(
+                        $activeProgressToken,
+                        $url . ' | verbinding opnieuw proberen (#' . $attempt . ')'
+                    );
+                }
+
+                // Voorkom dat max_execution_time oneindige connection-retries afkapt.
+                if (function_exists('set_time_limit')) {
+                    @set_time_limit((int) DEMETER_ODATA_MAX_EXECUTION_SECONDS);
+                }
+
+                usleep($delayMs * 1000);
+                continue;
+            }
+
+            $httpAttempt++;
+            $willRetry = $httpAttempt < $maxHttpAttempts && odata_exception_is_retryable($error);
             odata_error_context_record_attempt($url, $error, $attempt, $willRetry);
 
             if (!$willRetry) {
@@ -274,30 +341,30 @@ function odata_get_json(string $url, array $auth): array
                 throw $error;
             }
 
-            $delayMs = odata_retry_delay_ms($attempt);
-            consolelog("OData retry {$attempt}/{$maxAttempts} after {$delayMs}ms for {$url}: {$error->getMessage()}\n");
+            $delayMs = odata_retry_delay_ms($httpAttempt);
+            consolelog(
+                "OData retry {$httpAttempt}/{$maxHttpAttempts} after {$delayMs}ms for {$url}: {$error->getMessage()}\n"
+            );
 
             $activeProgressToken = odata_get_active_load_progress_token();
             if ($activeProgressToken !== '' && function_exists('odata_load_progress_set_current_call')) {
                 odata_load_progress_set_current_call(
                     $activeProgressToken,
-                    $url . ' | opnieuw proberen (' . $attempt . '/' . $maxAttempts . ')'
+                    $url . ' | opnieuw proberen (' . $httpAttempt . '/' . $maxHttpAttempts . ')'
                 );
             }
 
             usleep($delayMs * 1000);
         }
     }
-
-    if ($lastError instanceof Exception) {
-        throw $lastError;
-    }
-
-    throw new Exception('OData request failed without error details.');
 }
 
 function odata_exception_is_retryable(Exception $error): bool
 {
+    if (odata_exception_is_connection_retryable($error)) {
+        return true;
+    }
+
     $message = $error->getMessage();
     if (!preg_match('/^HTTP (\d+) from OData:\s*(.*)$/s', $message, $matches)) {
         return false;

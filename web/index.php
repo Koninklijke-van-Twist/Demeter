@@ -591,6 +591,9 @@ if (($_GET['action'] ?? '') === 'load_month') {
             if ($catchUp) {
                 demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
             }
+        } elseif ($catchUp) {
+            // Skip = data nog vers genoeg; updated_at toch bijwerken zodat idle/banner niet vast blijft.
+            demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
         }
 
         if ($catchUp && $chunkProgressToken !== null) {

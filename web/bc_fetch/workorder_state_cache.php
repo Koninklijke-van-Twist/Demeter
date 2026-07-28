@@ -15,8 +15,12 @@ const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 14;
 /** Huidige ISO-week overslaan bij herladen als scan jonger is dan dit aantal uren. */
 const DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS = 2;
-/** Catch-up bij page visit: huidige week overslaan als scan jonger is dan dit aantal minuten. */
-const DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES = 30;
+/**
+ * Catch-up / idle auto-update: huidige week overslaan als scan jonger is dan dit.
+ * Iets onder de idle-drempel in index.js (10 min), zodat idle altijd opnieuw ophaalt
+ * i.p.v. stil te skippen terwijl de banner blijft oplopen.
+ */
+const DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES = 9;
 /** Per Job_No: 0 = altijd Job_No-batches (geen pair-first N+1). */
 const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 0;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */

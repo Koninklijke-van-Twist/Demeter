@@ -176,13 +176,34 @@ try {
             ];
 
             try {
-                $refreshResult = demeter_refresh_cost_center_weeks($company, $costCenter, $auth, $ttl, [
-                    'force_full' => false,
-                    'load_session_id' => 'nightly-' . gmdate('Ymd'),
-                ]);
-                $entry['weeks_processed'] = (int) ($refreshResult['weeks_processed'] ?? 0);
-                $entry['memos_refreshed'] = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
-                demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
+                $connectionAttempt = 0;
+                while (true) {
+                    $connectionAttempt++;
+                    try {
+                        $refreshResult = demeter_refresh_cost_center_weeks($company, $costCenter, $auth, $ttl, [
+                            'force_full' => false,
+                            'load_session_id' => 'nightly-' . gmdate('Ymd'),
+                        ]);
+                        $entry['weeks_processed'] = (int) ($refreshResult['weeks_processed'] ?? 0);
+                        $entry['memos_refreshed'] = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+                        demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
+                        break;
+                    } catch (Throwable $retryError) {
+                        if (!function_exists('odata_exception_is_connection_retryable')
+                            || !odata_exception_is_connection_retryable($retryError)
+                        ) {
+                            throw $retryError;
+                        }
+
+                        demeter_nightly_log(sprintf(
+                            "  Kostenplaats %s: verbindingfout (#%d), opnieuw over 10s: %s\n",
+                            $costCenter,
+                            $connectionAttempt,
+                            $retryError->getMessage()
+                        ), true);
+                        sleep(10);
+                    }
+                }
             } catch (Throwable $costCenterError) {
                 $entry['status'] = 'error';
                 $entry['error'] = $costCenterError->getMessage();

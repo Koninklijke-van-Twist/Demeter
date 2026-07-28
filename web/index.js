@@ -5735,8 +5735,30 @@
         });
     }
 
+    function isConnectionRetryableODataError (message)
+    {
+        const normalized = String(message || '').toLowerCase();
+        return normalized.indexOf('curl error') !== -1
+            || normalized.indexOf('curl fout') !== -1
+            || normalized.indexOf('recv failure') !== -1
+            || normalized.indexOf('connection was reset') !== -1
+            || normalized.indexOf('connection reset') !== -1
+            || normalized.indexOf('failed to connect') !== -1
+            || normalized.indexOf('timed out') !== -1
+            || normalized.indexOf('timeout') !== -1
+            || normalized.indexOf('empty reply') !== -1
+            || normalized.indexOf('broken pipe') !== -1
+            || normalized.indexOf('connection refused') !== -1
+            || normalized.indexOf('network is unreachable') !== -1;
+    }
+
     function isRetryableODataError (message)
     {
+        if (isConnectionRetryableODataError(message))
+        {
+            return true;
+        }
+
         const normalized = String(message || '').toLowerCase();
         if (normalized.indexOf('http 409') !== -1
             || normalized.indexOf('http 423') !== -1
@@ -5779,18 +5801,23 @@
             );
 
             const errorMessage = String(loadError && loadError.message ? loadError.message : loadError);
-            if (currentAttempt >= maxAttempts || !isRetryableODataError(errorMessage))
+            const isConnectionError = isConnectionRetryableODataError(errorMessage);
+            if (!isConnectionError && (currentAttempt >= maxAttempts || !isRetryableODataError(errorMessage)))
             {
                 throw loadError;
             }
 
-            const delayMs = Math.min(15000, 2000 * currentAttempt);
+            const delayMs = isConnectionError ? 10000 : Math.min(15000, 2000 * currentAttempt);
             updateHistoryLoadNote(
-                'BC is bezig met een andere sessie, opnieuw proberen ('
-                + String(currentAttempt)
-                + '/'
-                + String(maxAttempts)
-                + ')...'
+                isConnectionError
+                    ? ('Verbinding verbroken, opnieuw proberen (#' + String(currentAttempt) + ')...')
+                    : (
+                        'BC is bezig met een andere sessie, opnieuw proberen ('
+                        + String(currentAttempt)
+                        + '/'
+                        + String(maxAttempts)
+                        + ')...'
+                    )
             );
             await waitForMs(delayMs);
 
