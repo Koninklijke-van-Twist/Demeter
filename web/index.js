@@ -97,6 +97,15 @@
         ? payload.forget_cost_center_cache_url
         : 'index.php?action=forget_cost_center_cache';
     const loadProgressStatusUrl = typeof payload.load_progress_status_url === 'string' ? payload.load_progress_status_url : 'odata.php?action=load_progress';
+    const activeLoadStatusUrl = typeof payload.active_load_status_url === 'string'
+        ? payload.active_load_status_url
+        : 'odata.php?action=active_load';
+    const IDLE_CATCH_UP_MAX_AGE_MS = 10 * 60 * 1000;
+    const ACTIVE_LOAD_POLL_MS = 5000;
+    let hitchhikeLoadRunning = false;
+    let idleCatchUpTimerId = 0;
+    let activeLoadPollTimerId = 0;
+    let lastSeenCacheUpdatedAt = typeof cacheMeta.updated_at === 'string' ? cacheMeta.updated_at : '';
     const selectedMemoColumnKeys = new Set();
     for (const field of memoFields)
     {
@@ -383,6 +392,7 @@
     hidePageLoader();
     if (asyncLoadConfig.enabled)
     {
+        setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
         startIncrementalMonthLoading()
             .then(function ()
             {
@@ -391,7 +401,18 @@
             .catch(function (refreshError)
             {
                 console.error(refreshError);
+                setRefreshNowButtonDisabled(false, '');
             });
+    }
+    else if (asyncLoadConfig.hitchhike_enabled)
+    {
+        startHitchhikeActiveLoad(
+            typeof asyncLoadConfig.load_progress_token === 'string' ? asyncLoadConfig.load_progress_token : '',
+            typeof asyncLoadConfig.hitchhike_kind === 'string' ? asyncLoadConfig.hitchhike_kind : 'refresh'
+        ).catch(function (hitchError)
+        {
+            console.error(hitchError);
+        });
     }
     else if (asyncLoadConfig.catch_up_enabled)
     {
@@ -401,6 +422,8 @@
                 console.error(catchUpError);
             });
     }
+
+    startActiveLoadAndIdleCatchUpPolling();
 
     function renderCacheAgeBanner ()
     {
@@ -422,18 +445,48 @@
         app.appendChild(banner);
     }
 
-    function buildCacheAgeBannerText ()
+    function getCacheAgeSeconds ()
     {
+        if (typeof cacheMeta.updated_at === 'string' && cacheMeta.updated_at.trim() !== '')
+        {
+            const parsed = Date.parse(cacheMeta.updated_at);
+            if (Number.isFinite(parsed))
+            {
+                return Math.max(0, Math.floor((Date.now() - parsed) / 1000));
+            }
+        }
+
         const ageHours = Number(cacheMeta.age_hours);
-        let ageText = 'Onbekend';
         if (Number.isFinite(ageHours))
         {
-            if (ageHours < 1)
+            return Math.max(0, Math.round(ageHours * 3600));
+        }
+
+        if (typeof cacheMeta.age_seconds === 'number' && Number.isFinite(cacheMeta.age_seconds))
+        {
+            return Math.max(0, Math.round(cacheMeta.age_seconds));
+        }
+
+        return null;
+    }
+
+    function buildCacheAgeBannerText ()
+    {
+        const ageSeconds = getCacheAgeSeconds();
+        let ageText = 'Onbekend';
+        if (ageSeconds !== null)
+        {
+            if (ageSeconds < 60)
             {
-                ageText = 'minder dan 1 uur';
+                ageText = String(Math.max(1, ageSeconds)) + ' seconden';
+            }
+            else if (ageSeconds < 3600)
+            {
+                ageText = String(Math.max(1, Math.round(ageSeconds / 60))) + ' minuten';
             }
             else
             {
+                const ageHours = ageSeconds / 3600;
                 ageText = ageHours.toFixed(1).replace('.', ',') + ' uur';
             }
         }
@@ -464,6 +517,7 @@
         if (typeof chunk.cache_updated_at === 'string' && chunk.cache_updated_at.trim() !== '')
         {
             cacheMeta.updated_at = chunk.cache_updated_at.trim();
+            lastSeenCacheUpdatedAt = cacheMeta.updated_at;
         }
 
         const ageHours = Number(chunk.cache_age_hours);
@@ -472,8 +526,266 @@
             cacheMeta.age_hours = ageHours;
         }
 
+        const ageSeconds = Number(chunk.cache_age_seconds);
+        if (Number.isFinite(ageSeconds))
+        {
+            cacheMeta.age_seconds = ageSeconds;
+        }
+
         cacheMeta.has_data = true;
         updateCacheAgeBannerFromMeta();
+    }
+
+    function setRefreshNowButtonDisabled (disabled, titleText)
+    {
+        const button = document.getElementById('refreshNowButton');
+        if (!button)
+        {
+            return;
+        }
+
+        button.disabled = Boolean(disabled);
+        button.title = disabled ? String(titleText || 'Er loopt al een verversing') : '';
+    }
+
+    function reloadPageWithoutRefreshNow ()
+    {
+        const redirectParams = new URLSearchParams(window.location.search);
+        redirectParams.delete('refresh_now');
+        redirectParams.delete('call_time_log_session');
+        window.__demeterSuppressUnloadLoader = true;
+        window.location.replace('index.php?' + redirectParams.toString());
+    }
+
+    async function fetchActiveLoadStatus ()
+    {
+        const company = String(payload.company || '').trim();
+        if (company === '' || loadedCostCenter === '')
+        {
+            return null;
+        }
+
+        const requestUrl = new URL(activeLoadStatusUrl, window.location.href);
+        requestUrl.searchParams.set('company', company);
+        requestUrl.searchParams.set('cost_center', loadedCostCenter);
+        requestUrl.searchParams.set('_t', String(Date.now()));
+
+        const response = await fetch(requestUrl.toString(), {
+            headers: { Accept: 'application/json' },
+            credentials: 'same-origin',
+            cache: 'no-store'
+        });
+        if (!response.ok)
+        {
+            return null;
+        }
+
+        const body = await response.json();
+        return body && typeof body === 'object' ? body : null;
+    }
+
+    async function startHitchhikeActiveLoad (token, kind)
+    {
+        const safeToken = String(token || '').trim();
+        if (safeToken === '' || hitchhikeLoadRunning || historyLoadRunning)
+        {
+            return;
+        }
+
+        hitchhikeLoadRunning = true;
+        setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
+        if (loadProgressTokenInput)
+        {
+            loadProgressTokenInput.value = safeToken;
+        }
+        asyncLoadConfig.load_progress_token = safeToken;
+
+        const kindLabel = kind === 'catch_up' ? 'bijwerken' : 'verversen';
+        updateHistoryLoadNote('Bezig met ' + kindLabel + ' (meeliften)...');
+        startBackgroundLoadProgressPolling();
+
+        return new Promise(function (resolve)
+        {
+            const pollId = window.setInterval(async function ()
+            {
+                try
+                {
+                    const requestUrl = new URL(loadProgressStatusUrl, window.location.href);
+                    requestUrl.searchParams.set('token', safeToken);
+                    requestUrl.searchParams.set('_t', String(Date.now()));
+                    const response = await fetch(requestUrl.toString(), {
+                        headers: { Accept: 'application/json' },
+                        credentials: 'same-origin',
+                        cache: 'no-store'
+                    });
+                    if (!response.ok)
+                    {
+                        return;
+                    }
+
+                    const progress = await response.json();
+                    const status = String(progress && progress.status ? progress.status : '');
+                    const message = String(progress && progress.message ? progress.message : '');
+                    if (message !== '')
+                    {
+                        updateHistoryLoadNote(message);
+                    }
+
+                    if (status === 'completed')
+                    {
+                        window.clearInterval(pollId);
+                        stopPageLoaderProgress();
+                        hitchhikeLoadRunning = false;
+                        updateHistoryLoadNote('');
+                        reloadPageWithoutRefreshNow();
+                        resolve();
+                    }
+                    else if (status === 'error')
+                    {
+                        window.clearInterval(pollId);
+                        stopPageLoaderProgress();
+                        hitchhikeLoadRunning = false;
+                        updateHistoryLoadNote('Bijwerken mislukt.');
+                        setRefreshNowButtonDisabled(false, '');
+                        resolve();
+                    }
+                }
+                catch (error)
+                {
+                    console.warn(error);
+                }
+            }, 700);
+        });
+    }
+
+    async function maybeStartIdleCatchUp ()
+    {
+        if (historyLoadRunning || hitchhikeLoadRunning || asyncLoadConfig.enabled)
+        {
+            return;
+        }
+
+        const ageSeconds = getCacheAgeSeconds();
+        if (ageSeconds === null || (ageSeconds * 1000) < IDLE_CATCH_UP_MAX_AGE_MS)
+        {
+            return;
+        }
+
+        const status = await fetchActiveLoadStatus();
+        if (!status)
+        {
+            return;
+        }
+
+        if (status.running && status.active_load && status.active_load.token)
+        {
+            await startHitchhikeActiveLoad(status.active_load.token, status.active_load.kind || 'catch_up');
+            return;
+        }
+
+        const remoteUpdatedAt = typeof status.cache_updated_at === 'string' ? status.cache_updated_at : '';
+        if (status.recently_completed || (remoteUpdatedAt !== '' && remoteUpdatedAt !== lastSeenCacheUpdatedAt))
+        {
+            if (remoteUpdatedAt !== '')
+            {
+                cacheMeta.updated_at = remoteUpdatedAt;
+                lastSeenCacheUpdatedAt = remoteUpdatedAt;
+            }
+            if (typeof status.cache_age_hours === 'number')
+            {
+                cacheMeta.age_hours = status.cache_age_hours;
+            }
+            if (typeof status.cache_age_seconds === 'number')
+            {
+                cacheMeta.age_seconds = status.cache_age_seconds;
+            }
+            updateCacheAgeBannerFromMeta();
+            reloadPageWithoutRefreshNow();
+            return;
+        }
+
+        await startCatchUpCurrentWeek();
+    }
+
+    async function pollActiveLoadForButton ()
+    {
+        if (historyLoadRunning || hitchhikeLoadRunning || asyncLoadConfig.enabled)
+        {
+            setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
+            return;
+        }
+
+        const status = await fetchActiveLoadStatus();
+        if (!status)
+        {
+            return;
+        }
+
+        if (status.running && status.active_load && status.active_load.token)
+        {
+            setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
+            await startHitchhikeActiveLoad(status.active_load.token, status.active_load.kind || 'refresh');
+            return;
+        }
+
+        setRefreshNowButtonDisabled(false, '');
+
+        if (typeof status.cache_updated_at === 'string' && status.cache_updated_at !== '')
+        {
+            cacheMeta.updated_at = status.cache_updated_at;
+            lastSeenCacheUpdatedAt = status.cache_updated_at;
+        }
+        if (typeof status.cache_age_hours === 'number')
+        {
+            cacheMeta.age_hours = status.cache_age_hours;
+        }
+        if (typeof status.cache_age_seconds === 'number')
+        {
+            cacheMeta.age_seconds = status.cache_age_seconds;
+        }
+        updateCacheAgeBannerFromMeta();
+    }
+
+    function startActiveLoadAndIdleCatchUpPolling ()
+    {
+        if (loadedCostCenter === '' || String(payload.company || '').trim() === '')
+        {
+            return;
+        }
+
+        if (asyncLoadConfig.refresh_blocked)
+        {
+            setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
+        }
+
+        pollActiveLoadForButton().catch(function (error)
+        {
+            console.warn(error);
+        });
+
+        if (activeLoadPollTimerId !== 0)
+        {
+            window.clearInterval(activeLoadPollTimerId);
+        }
+        activeLoadPollTimerId = window.setInterval(function ()
+        {
+            pollActiveLoadForButton().catch(function (error)
+            {
+                console.warn(error);
+            });
+        }, ACTIVE_LOAD_POLL_MS);
+
+        if (idleCatchUpTimerId !== 0)
+        {
+            window.clearInterval(idleCatchUpTimerId);
+        }
+        idleCatchUpTimerId = window.setInterval(function ()
+        {
+            maybeStartIdleCatchUp().catch(function (error)
+            {
+                console.warn(error);
+            });
+        }, 60000);
     }
 
     function setCumulativeProjectTotalsFromMap (totalsByJob)
@@ -821,33 +1133,48 @@
                         return;
                     }
 
-                    demeterModal.confirm({
-                        title: 'Ververs Nu',
-                        message: 'Ververs Nu haalt alle gegevens opnieuw op uit Business Central en schrijft ze naar cache. Dit kan enkele minuten duren. Doorgaan?',
-                        confirmText: 'Doorgaan',
-                        cancelText: 'Annuleren'
-                    }).then(function (confirmed)
-                    {
-                        if (!confirmed || !controlsForm)
+                    fetchActiveLoadStatus()
+                        .then(function (status)
                         {
-                            return;
-                        }
+                            if (status && status.running && status.active_load && status.active_load.token)
+                            {
+                                startHitchhikeActiveLoad(
+                                    status.active_load.token,
+                                    status.active_load.kind || 'refresh'
+                                ).catch(function (error)
+                                {
+                                    console.error(error);
+                                });
+                                return;
+                            }
 
-                        controlsForm.dataset.refreshConfirmed = '1';
-                        window.__demeterSuppressUnloadLoader = true;
-                        if (typeof controlsForm.requestSubmit === 'function' && refreshNowButton)
+                            return demeterModal.confirm({
+                                title: 'Ververs Nu',
+                                message: 'Gegevens worden al automatisch elke tien minuten actueel gehouden. Gebruik "Ververs Nu" alleen als je denkt dat de lijst problemen vertoont.',
+                                confirmText: 'OK',
+                                cancelText: 'Annuleren'
+                            }).then(function (confirmed)
+                            {
+                                if (!confirmed)
+                                {
+                                    return;
+                                }
+
+                                controlsForm.dataset.refreshConfirmed = '1';
+                                if (typeof controlsForm.requestSubmit === 'function')
+                                {
+                                    controlsForm.requestSubmit(submitter);
+                                }
+                                else
+                                {
+                                    controlsForm.submit();
+                                }
+                            });
+                        })
+                        .catch(function (error)
                         {
-                            controlsForm.requestSubmit(refreshNowButton);
-                        }
-                        else if (refreshNowButton)
-                        {
-                            refreshNowButton.click();
-                        }
-                        else
-                        {
-                            controlsForm.submit();
-                        }
-                    });
+                            console.warn(error);
+                        });
 
                     return;
                 }
@@ -1232,7 +1559,7 @@
 
     function applyLoadProgressToUi (text, percent, currentCallLabel)
     {
-        if (asyncLoadConfig.enabled)
+        if (asyncLoadConfig.enabled || hitchhikeLoadRunning)
         {
             let noteText = text;
             const callText = String(currentCallLabel || '').trim();
@@ -5534,12 +5861,13 @@
             ? asyncLoadConfig.catch_up_week
             : (typeof asyncLoadConfig.current_week === 'string' ? asyncLoadConfig.current_week : null);
 
-        if (!asyncLoadConfig.catch_up_enabled || historyLoadRunning || !catchUpWeek)
+        if (historyLoadRunning || hitchhikeLoadRunning || !catchUpWeek || loadedCostCenter === '')
         {
             return;
         }
 
         historyLoadRunning = true;
+        setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
         updateHistoryLoadNote('Huidige week bijwerken: ' + catchUpWeek + '...');
 
         try
@@ -5554,6 +5882,17 @@
             }
 
             const chunk = await fetchHistoryWeek(catchUpWeek, 0, 0, { catchUp: true });
+
+            if (chunk && chunk.hitchhiked === true && chunk.load_progress_token)
+            {
+                historyLoadRunning = false;
+                await startHitchhikeActiveLoad(
+                    chunk.load_progress_token,
+                    chunk.hitchhike_kind || 'catch_up'
+                );
+                return;
+            }
+
             monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object'
                 ? chunk.month_scan
                 : monthScanState;
@@ -5565,6 +5904,10 @@
                     resetTotals: true,
                     useCumulativeFromChunk: true
                 });
+                applyCacheMetaFromChunk(chunk);
+            }
+            else
+            {
                 applyCacheMetaFromChunk(chunk);
             }
 
@@ -5584,6 +5927,10 @@
         {
             historyLoadRunning = false;
             updateHistoryLoadNote('');
+            if (!hitchhikeLoadRunning && !asyncLoadConfig.enabled)
+            {
+                setRefreshNowButtonDisabled(false, '');
+            }
         }
     }
 

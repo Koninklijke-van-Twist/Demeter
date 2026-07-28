@@ -548,6 +548,12 @@ function odata_load_progress_write(string $token, array $payload): void
     }
 
     @file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX);
+
+    if (function_exists('demeter_active_load_heartbeat_by_token')
+        && (string) ($normalizedPayload['status'] ?? '') === 'running'
+    ) {
+        demeter_active_load_heartbeat_by_token($token);
+    }
 }
 
 function odata_load_progress_begin(string $token, int $totalMonths): void
@@ -623,6 +629,9 @@ function odata_load_progress_complete(string $token, int $totalMonths): void
         'completed_at' => time(),
         'error' => '',
     ]);
+    if (function_exists('demeter_active_load_complete_by_token')) {
+        demeter_active_load_complete_by_token($token);
+    }
 }
 
 function odata_load_progress_error(string $token, int $totalMonths, int $currentMonthIndex, string $message): void
@@ -638,6 +647,9 @@ function odata_load_progress_error(string $token, int $totalMonths, int $current
         'completed_at' => time(),
         'error' => trim($message),
     ]);
+    if (function_exists('demeter_active_load_error_by_token')) {
+        demeter_active_load_error_by_token($token);
+    }
 }
 
 function odata_load_progress_payload(string $token): array
@@ -1083,6 +1095,55 @@ function odata_send_load_progress_json(): void
 
     $token = trim((string) ($_GET['token'] ?? ''));
     echo json_encode(odata_load_progress_payload($token), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+function odata_send_active_load_json(): void
+{
+    if (function_exists('xdebug_disable')) {
+        xdebug_disable();
+    }
+
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+
+    require_once __DIR__ . '/bc_fetch/active_load.php';
+
+    $company = trim((string) ($_GET['company'] ?? ''));
+    $costCenter = trim((string) ($_GET['cost_center'] ?? ''));
+    $claim = strtolower(trim((string) ($_GET['claim'] ?? ''))) === '1';
+    $kind = trim((string) ($_GET['kind'] ?? 'catch_up'));
+    $token = trim((string) ($_GET['token'] ?? ''));
+
+    try {
+        if ($claim) {
+            if ($token === '' || !odata_load_progress_is_valid_token($token)) {
+                $token = odata_load_progress_create_token();
+            }
+            $result = demeter_active_load_claim($company, $costCenter, $token, $kind);
+            $entry = is_array($result['entry'] ?? null) ? $result['entry'] : [];
+            if (empty($result['adopted'])) {
+                odata_load_progress_begin($token, $kind === 'catch_up' ? 4 : 1);
+            }
+            $payload = demeter_active_load_status_payload($company, $costCenter);
+            $payload['adopted'] = !empty($result['adopted']);
+            $payload['claim_token'] = (string) ($entry['token'] ?? $token);
+            $payload['claim_kind'] = (string) ($entry['kind'] ?? $kind);
+            echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            exit;
+        }
+
+        echo json_encode(
+            demeter_active_load_status_payload($company, $costCenter),
+            JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES
+        );
+    } catch (Throwable $error) {
+        http_response_code(400);
+        echo json_encode([
+            'ok' => false,
+            'error' => $error->getMessage(),
+        ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
     exit;
 }
 
@@ -1989,4 +2050,7 @@ if (odata_is_direct_request() && $odataAction === 'cache_clear') {
 }
 if (odata_is_direct_request() && $odataAction === 'load_progress') {
     odata_send_load_progress_json();
+}
+if (odata_is_direct_request() && $odataAction === 'active_load') {
+    odata_send_active_load_json();
 }

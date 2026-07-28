@@ -144,6 +144,7 @@ require_once __DIR__ . "/auth_helper.php";
 require_once __DIR__ . "/logincheck.php";
 demeter_release_session_lock_if_active();
 require_once __DIR__ . "/odata.php";
+require_once __DIR__ . "/bc_fetch/active_load.php";
 require_once __DIR__ . "/project_finance.php";
 require_once __DIR__ . "/bc_fetch/month_loader.php";
 require_once __DIR__ . "/bc_fetch/cost_centers.php";
@@ -496,6 +497,38 @@ if (($_GET['action'] ?? '') === 'load_month') {
             $chunkProgressToken = $loadProgressTokenRaw;
         }
 
+        if ($catchUp) {
+            $catchUpToken = $chunkProgressToken !== null
+                ? $chunkProgressToken
+                : odata_load_progress_create_token();
+            $claimResult = demeter_active_load_claim($company, $costCenter, $catchUpToken, 'catch_up');
+            $claimEntry = is_array($claimResult['entry'] ?? null) ? $claimResult['entry'] : [];
+            if (!empty($claimResult['adopted'])) {
+                demeter_send_json_response([
+                    'ok' => true,
+                    'hitchhiked' => true,
+                    'catch_up' => true,
+                    'skipped' => true,
+                    'week' => $yearWeek,
+                    'month' => $yearWeek,
+                    'load_progress_token' => (string) ($claimEntry['token'] ?? ''),
+                    'hitchhike_kind' => (string) ($claimEntry['kind'] ?? 'catch_up'),
+                    'rows' => [],
+                    'row_keys' => [],
+                    'month_scan' => demeter_workorder_month_scan_defaults(),
+                    'project_totals_by_job' => [],
+                    'project_totals_cumulative_by_job' => [],
+                    'cache_updated_at' => demeter_workorder_cost_center_cache_updated_at($company, $costCenter),
+                    'cache_age_hours' => demeter_cache_age_hours(demeter_workorder_cost_center_cache_updated_at($company, $costCenter)),
+                ]);
+            }
+
+            $chunkProgressToken = $catchUpToken;
+            odata_set_active_load_progress_token($catchUpToken);
+            odata_load_progress_begin($catchUpToken, 4);
+            demeter_active_load_heartbeat($company, $costCenter, $catchUpToken);
+        }
+
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
         $perfLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
@@ -560,6 +593,10 @@ if (($_GET['action'] ?? '') === 'load_month') {
             }
         }
 
+        if ($catchUp && $chunkProgressToken !== null) {
+            odata_load_progress_complete($chunkProgressToken, 4);
+        }
+
         $monthScan = is_array($chunk['month_scan'] ?? null) ? $chunk['month_scan'] : demeter_workorder_month_scan_defaults();
         $nextWeek = is_string($chunk['next_week'] ?? null)
             ? $chunk['next_week']
@@ -573,6 +610,8 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'month' => $yearWeek,
             'skipped' => !empty($chunk['skipped']),
             'catch_up' => $catchUp,
+            'hitchhiked' => false,
+            'load_progress_token' => $catchUp && $chunkProgressToken !== null ? $chunkProgressToken : null,
             'rows' => $built['rows'],
             'row_keys' => !empty($chunk['skipped'])
                 ? demeter_month_scan_expected_row_keys($monthScan, $yearWeek)
@@ -836,6 +875,9 @@ $cacheUsedForFirstPaint = false;
 $bootMonthPreloaded = false;
 $refreshProgressTotalSteps = 0;
 $clientLoadProgressToken = $nextLoadProgressToken;
+$hitchhikeActiveLoad = false;
+$hitchhikeKind = '';
+$refreshBlocked = false;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -844,7 +886,36 @@ try {
     }
 
     if ($shouldReadCacheData) {
-        $asyncLoadEnabled = $refreshNowRequested;
+        $existingActiveLoad = demeter_active_load_get($selectedCompany, $selectedCostCenter);
+        $refreshBlocked = demeter_active_load_is_fresh_running($existingActiveLoad);
+
+        if ($refreshNowRequested) {
+            $claimResult = demeter_active_load_claim(
+                $selectedCompany,
+                $selectedCostCenter,
+                $activeLoadProgressToken,
+                'refresh'
+            );
+            $claimEntry = is_array($claimResult['entry'] ?? null) ? $claimResult['entry'] : [];
+            if (!empty($claimResult['adopted'])) {
+                $hitchhikeActiveLoad = true;
+                $hitchhikeKind = (string) ($claimEntry['kind'] ?? 'refresh');
+                $clientLoadProgressToken = (string) ($claimEntry['token'] ?? $activeLoadProgressToken);
+                $asyncLoadEnabled = false;
+                $forceFullReload = false;
+                $refreshNowRequested = false;
+                $refreshBlocked = true;
+            } else {
+                $asyncLoadEnabled = true;
+                $clientLoadProgressToken = $activeLoadProgressToken;
+                $refreshBlocked = true;
+            }
+        } elseif ($refreshBlocked && is_array($existingActiveLoad)) {
+            $hitchhikeActiveLoad = true;
+            $hitchhikeKind = (string) ($existingActiveLoad['kind'] ?? 'refresh');
+            $clientLoadProgressToken = (string) ($existingActiveLoad['token'] ?? $nextLoadProgressToken);
+        }
+
         $cachedState = null;
 
         if ($asyncLoadEnabled) {
@@ -859,6 +930,7 @@ try {
             $refreshProgressTotalSteps = $estimatedWeeks * 4;
             $clientLoadProgressToken = $activeLoadProgressToken;
             odata_load_progress_begin($activeLoadProgressToken, $refreshProgressTotalSteps);
+            demeter_active_load_heartbeat($selectedCompany, $selectedCostCenter, $activeLoadProgressToken);
 
             $purgedLegacyCache = false;
             $cachedState = $forceFullReload
@@ -914,7 +986,23 @@ $cacheUpdatedAt = ($selectedCompany !== '' && $selectedCostCenter !== '')
     ? demeter_workorder_cost_center_cache_updated_at($selectedCompany, $selectedCostCenter)
     : null;
 $cacheAgeHours = demeter_cache_age_hours($cacheUpdatedAt);
+$cacheAgeSeconds = null;
+if (is_string($cacheUpdatedAt) && $cacheUpdatedAt !== '') {
+    $parsedCacheAge = DateTimeImmutable::createFromFormat(DateTimeInterface::ATOM, $cacheUpdatedAt);
+    if (!$parsedCacheAge instanceof DateTimeImmutable) {
+        $parsedCacheAge = DateTimeImmutable::createFromFormat('Y-m-d\TH:i:s\Z', $cacheUpdatedAt);
+    }
+    if ($parsedCacheAge instanceof DateTimeImmutable) {
+        $cacheAgeSeconds = max(0, time() - $parsedCacheAge->getTimestamp());
+    }
+}
 $nightlyStats = demeter_nightly_stats_load();
+$bootActiveLoad = ($selectedCompany !== '' && $selectedCostCenter !== '')
+    ? demeter_active_load_get($selectedCompany, $selectedCostCenter)
+    : null;
+if (!$refreshBlocked && demeter_active_load_is_fresh_running($bootActiveLoad)) {
+    $refreshBlocked = true;
+}
 
 $initialData = [
     'company' => $selectedCompany,
@@ -925,18 +1013,22 @@ $initialData = [
     'cache_meta' => [
         'updated_at' => $cacheUpdatedAt,
         'age_hours' => $cacheAgeHours,
+        'age_seconds' => $cacheAgeSeconds,
         'has_data' => $cacheUsedForFirstPaint,
-        'is_refreshing' => $refreshNowRequested,
+        'is_refreshing' => $asyncLoadEnabled || $hitchhikeActiveLoad,
     ],
     'nightly_stats' => $nightlyStats,
     'initial_load_stats' => [
         'from_cache_count' => $cacheUsedForFirstPaint ? count($rows) : 0,
-        'updated_from_bc_count' => $refreshNowRequested ? 0 : 0,
+        'updated_from_bc_count' => $asyncLoadEnabled ? 0 : 0,
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
-        'catch_up_enabled' => !$asyncLoadEnabled && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
+        'catch_up_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
         'catch_up_week' => $syncLoadWeek,
+        'hitchhike_enabled' => $hitchhikeActiveLoad,
+        'hitchhike_kind' => $hitchhikeKind,
+        'refresh_blocked' => $refreshBlocked || $asyncLoadEnabled || $hitchhikeActiveLoad,
         'force_full' => $forceFullReload,
         'chunk_unit' => 'week',
         'current_week' => $syncLoadWeek,
@@ -963,6 +1055,7 @@ $initialData = [
     'save_user_settings_url' => 'index.php?action=save_user_settings',
     'forget_cost_center_cache_url' => 'index.php?action=forget_cost_center_cache',
     'load_progress_status_url' => 'odata.php?action=load_progress',
+    'active_load_status_url' => 'odata.php?action=active_load',
     'gefactureerd' => $showInvoiced,
     'rows' => $rows,
     'pending_row_keys' => [],
@@ -2091,7 +2184,8 @@ $initialData = [
         <input type="hidden" name="load_token" id="loadProgressToken"
             value="<?= htmlspecialchars($clientLoadProgressToken) ?>">
         <button type="submit" name="refresh_now" value="1" class="secondary-button" id="refreshNowButton"
-            <?= ($selectedCompany === '' || $selectedCostCenter === '') ? 'disabled' : '' ?>>Ververs Nu</button>
+            <?= ($selectedCompany === '' || $selectedCostCenter === '' || !empty($initialData['async_load']['refresh_blocked'])) ? 'disabled' : '' ?>
+            title="<?= !empty($initialData['async_load']['refresh_blocked']) ? 'Er loopt al een verversing' : '' ?>">Ververs Nu</button>
         <div class="memo-menu-wrap" id="memoMenuWrap">
             <button type="button" class="memo-menu-trigger" id="memoMenuTrigger">Voorkeuren</button>
             <div class="memo-menu-panel" id="memoMenuPanel">
