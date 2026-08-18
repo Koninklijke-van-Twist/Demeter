@@ -5,3 +5,6 @@ web/cache/
 web/cache/call_time_logs/
 
 BC Webservices.txt
+
+web/analytics/analytics.sqlite
+web/analytics/analytics.sqlite-*
