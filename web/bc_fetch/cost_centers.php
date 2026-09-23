@@ -114,9 +114,12 @@ function bc_fetch_department_cost_center_options_from_rows(array $rows, string $
  *
  * @return list<array{code: string, name: string, label: string}>
  */
-function bc_fetch_department_cost_center_options(string $company, array $auth, int $ttl): array
+function bc_fetch_department_cost_center_options(string $company, array $auth, int $ttl, ?string $dimensionCode = null): array
 {
-    $dimensionCode = bc_fetch_global_dimension_1_code($company, $auth, $ttl);
+    $dimensionCode = trim((string) $dimensionCode);
+    if ($dimensionCode === '') {
+        $dimensionCode = bc_fetch_global_dimension_1_code($company, $auth, $ttl);
+    }
     $filter = "Dimension_Code eq '" . bc_fetch_odata_quote($dimensionCode) . "' and Blocked eq false";
     $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'DimensionValueList', [
         '$select' => 'Dimension_Code,Code,Name,Blocked',

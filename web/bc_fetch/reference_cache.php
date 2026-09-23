@@ -111,22 +111,17 @@ function demeter_companies_cache_save(array $companies, array $map): bool
 }
 
 /**
- * Marker voor caches die via Global Dimension 1 zijn opgebouwd.
- * Oudere bestanden (scan van heel DimensionValueList) missen deze marker
- * en worden bij de volgende paginaweergave opnieuw opgehaald.
- */
-function demeter_cost_center_options_cache_source(): string
-{
-    return 'global_dimension_1';
-}
-
-/**
+ * Laadt kostenplaatsopties alleen als ze voor deze Global Dimension 1-code zijn opgebouwd.
+ * Een andere of ontbrekende code (oude scan-cache) levert een lege lijst, zodat de
+ * aanroeper opnieuw ophaalt.
+ *
  * @return list<array{code: string, name: string, label: string}>
  */
-function demeter_cost_center_options_cache_load(string $company): array
+function demeter_cost_center_options_cache_load(string $company, string $currentDimensionCode): array
 {
+    $currentDimensionCode = trim($currentDimensionCode);
     $path = demeter_cost_center_options_cache_path($company);
-    if (!is_file($path) || !is_readable($path)) {
+    if ($currentDimensionCode === '' || !is_file($path) || !is_readable($path)) {
         return [];
     }
 
@@ -135,7 +130,8 @@ function demeter_cost_center_options_cache_load(string $company): array
         return [];
     }
 
-    if (($decoded['source'] ?? '') !== demeter_cost_center_options_cache_source()) {
+    $cachedDimensionCode = trim((string) ($decoded['dimension_code'] ?? ''));
+    if ($cachedDimensionCode !== $currentDimensionCode) {
         return [];
     }
 
@@ -163,15 +159,16 @@ function demeter_cost_center_options_cache_load(string $company): array
 /**
  * @param list<array{code: string, name: string, label: string}> $options
  */
-function demeter_cost_center_options_cache_save(string $company, array $options): bool
+function demeter_cost_center_options_cache_save(string $company, array $options, string $dimensionCode): bool
 {
-    if (!demeter_reference_cache_ensure_directory()) {
+    $dimensionCode = trim($dimensionCode);
+    if ($dimensionCode === '' || !demeter_reference_cache_ensure_directory()) {
         return false;
     }
 
     $payload = [
         'company' => trim($company),
-        'source' => demeter_cost_center_options_cache_source(),
+        'dimension_code' => $dimensionCode,
         'options' => $options,
         'updated_at' => gmdate('c'),
     ];

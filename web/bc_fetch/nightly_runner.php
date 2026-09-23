@@ -32,8 +32,9 @@ function demeter_discover_and_cache_companies(int $ttl): array
  */
 function demeter_fetch_and_cache_cost_center_options(string $company, array $auth, int $ttl): array
 {
-    $options = bc_fetch_department_cost_center_options($company, $auth, $ttl);
-    demeter_cost_center_options_cache_save($company, $options);
+    $dimensionCode = bc_fetch_global_dimension_1_code($company, $auth, $ttl);
+    $options = bc_fetch_department_cost_center_options($company, $auth, $ttl, $dimensionCode);
+    demeter_cost_center_options_cache_save($company, $options, $dimensionCode);
 
     return $options;
 }
