@@ -111,6 +111,16 @@ function demeter_companies_cache_save(array $companies, array $map): bool
 }
 
 /**
+ * Marker voor caches die via Global Dimension 1 zijn opgebouwd.
+ * Oudere bestanden (scan van heel DimensionValueList) missen deze marker
+ * en worden bij de volgende paginaweergave opnieuw opgehaald.
+ */
+function demeter_cost_center_options_cache_source(): string
+{
+    return 'global_dimension_1';
+}
+
+/**
  * @return list<array{code: string, name: string, label: string}>
  */
 function demeter_cost_center_options_cache_load(string $company): array
@@ -122,6 +132,10 @@ function demeter_cost_center_options_cache_load(string $company): array
 
     $decoded = json_decode((string) file_get_contents($path), true);
     if (!is_array($decoded) || !is_array($decoded['options'] ?? null)) {
+        return [];
+    }
+
+    if (($decoded['source'] ?? '') !== demeter_cost_center_options_cache_source()) {
         return [];
     }
 
@@ -157,6 +171,7 @@ function demeter_cost_center_options_cache_save(string $company, array $options)
 
     $payload = [
         'company' => trim($company),
+        'source' => demeter_cost_center_options_cache_source(),
         'options' => $options,
         'updated_at' => gmdate('c'),
     ];
