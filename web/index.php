@@ -851,15 +851,16 @@ $totalProgressSteps = 4;
 
 $departmentCostCenterOptions = [];
 if ($selectedCompany !== '') {
-    $departmentCostCenterOptions = demeter_cost_center_options_cache_load($selectedCompany);
-    if ($departmentCostCenterOptions === []) {
-        try {
-            $costCenterCompanyAuth = auth_get_auth_for_company($selectedCompany, 300);
+    try {
+        $costCenterCompanyAuth = auth_get_auth_for_company($selectedCompany, 300);
+        $currentDimensionCode = bc_fetch_global_dimension_1_code($selectedCompany, $costCenterCompanyAuth, $ttl);
+        $departmentCostCenterOptions = demeter_cost_center_options_cache_load($selectedCompany, $currentDimensionCode);
+        if ($departmentCostCenterOptions === []) {
             $departmentCostCenterOptions = demeter_fetch_and_cache_cost_center_options($selectedCompany, $costCenterCompanyAuth, $ttl);
-        } catch (Throwable $costCenterOptionsError) {
-            if ($companyDiscoveryErrorMessage === null) {
-                $companyDiscoveryErrorMessage = $costCenterOptionsError->getMessage();
-            }
+        }
+    } catch (Throwable $costCenterOptionsError) {
+        if ($companyDiscoveryErrorMessage === null) {
+            $companyDiscoveryErrorMessage = $costCenterOptionsError->getMessage();
         }
     }
 }

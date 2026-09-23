@@ -111,17 +111,27 @@ function demeter_companies_cache_save(array $companies, array $map): bool
 }
 
 /**
+ * Laadt kostenplaatsopties alleen als ze voor deze Global Dimension 1-code zijn opgebouwd.
+ * Een andere of ontbrekende code (oude scan-cache) levert een lege lijst, zodat de
+ * aanroeper opnieuw ophaalt.
+ *
  * @return list<array{code: string, name: string, label: string}>
  */
-function demeter_cost_center_options_cache_load(string $company): array
+function demeter_cost_center_options_cache_load(string $company, string $currentDimensionCode): array
 {
+    $currentDimensionCode = trim($currentDimensionCode);
     $path = demeter_cost_center_options_cache_path($company);
-    if (!is_file($path) || !is_readable($path)) {
+    if ($currentDimensionCode === '' || !is_file($path) || !is_readable($path)) {
         return [];
     }
 
     $decoded = json_decode((string) file_get_contents($path), true);
     if (!is_array($decoded) || !is_array($decoded['options'] ?? null)) {
+        return [];
+    }
+
+    $cachedDimensionCode = trim((string) ($decoded['dimension_code'] ?? ''));
+    if ($cachedDimensionCode !== $currentDimensionCode) {
         return [];
     }
 
@@ -149,14 +159,16 @@ function demeter_cost_center_options_cache_load(string $company): array
 /**
  * @param list<array{code: string, name: string, label: string}> $options
  */
-function demeter_cost_center_options_cache_save(string $company, array $options): bool
+function demeter_cost_center_options_cache_save(string $company, array $options, string $dimensionCode): bool
 {
-    if (!demeter_reference_cache_ensure_directory()) {
+    $dimensionCode = trim($dimensionCode);
+    if ($dimensionCode === '' || !demeter_reference_cache_ensure_directory()) {
         return false;
     }
 
     $payload = [
         'company' => trim($company),
+        'dimension_code' => $dimensionCode,
         'options' => $options,
         'updated_at' => gmdate('c'),
     ];
