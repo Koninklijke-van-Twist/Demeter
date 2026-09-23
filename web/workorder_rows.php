@@ -309,10 +309,20 @@ function demeter_build_single_workorder_row(
     }
 
     $normalizedWorkorderNo = strtolower(trim((string) ($workorder['No'] ?? '')));
+    $identity = function_exists('demeter_workorder_identity_from_row')
+        ? demeter_workorder_identity_from_row($workorder)
+        : '';
     $pairKey = $jobTaskNo !== '' ? demeter_workorder_pair_key($jobNo, $jobTaskNo) : '';
-    $financeSourceKey = $pairKey !== '' && isset($financeKeyByPair[$pairKey])
-        ? (string) $financeKeyByPair[$pairKey]
-        : ($jobTaskNo !== '' ? strtolower($jobTaskNo) : $normalizedWorkorderNo);
+    $financeSourceKey = $normalizedWorkorderNo;
+    if ($financeSourceKey === '' && $identity !== '' && isset($financeKeyByPair[$identity])) {
+        $financeSourceKey = (string) $financeKeyByPair[$identity];
+    }
+    if ($financeSourceKey === '' && $pairKey !== '' && isset($financeKeyByPair[$pairKey])) {
+        $financeSourceKey = (string) $financeKeyByPair[$pairKey];
+    }
+    if ($financeSourceKey === '') {
+        $financeSourceKey = $jobTaskNo !== '' ? strtolower($jobTaskNo) : $normalizedWorkorderNo;
+    }
     $normalizedWorkorderSourceKey = $financeSourceKey;
     $workorderProjectCompositeKey = $normalizedJobNo . '|' . $normalizedWorkorderSourceKey;
     $workorderTotals = $workorderProjectCompositeKey !== '|' && isset($workorderTotalsByProjectAndNumber[$workorderProjectCompositeKey])

@@ -41,6 +41,7 @@ function demeter_fetch_and_cache_cost_center_options(string $company, array $aut
 
 /**
  * Ververs alle ISO-weken voor een kostenplaats (zoals de browser-load_month keten).
+ * Per week: Werkorders op Start_Date + ProjectPosten op boekdatum, daarna koppelen.
  *
  * @param array{force_full?: bool, load_session_id?: string, progress_token?: string|null} $options
  * @return array{weeks_processed: int, last_month_scan: array}

@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Werkorders ophalen op basis van ProjectPosten job/task-paren.
+ * Werkorders ophalen via Start_Date (kop) en ProjectPosten (finance), daarna koppelen.
  */
 
 require_once __DIR__ . '/helpers.php';
@@ -23,15 +23,23 @@ function bc_fetch_projectposten_discovery_fields(): array
 }
 
 /**
- * Haalt unieke job/task-paren en finance-keys uit ruwe ProjectPosten-rijen.
+ * Haalt unieke job/task-paren, LVS-nummers en finance-keys uit ruwe ProjectPosten-rijen.
  *
- * @return array{pairs: list<array{job_no: string, job_task_no: string}>, finance_key_by_pair: array<string, string>, pair_keys_in_posten: array<string, bool>}
+ * @return array{
+ *   pairs: list<array{job_no: string, job_task_no: string}>,
+ *   finance_key_by_pair: array<string, string>,
+ *   pair_keys_in_posten: array<string, bool>,
+ *   lvs_work_order_nos: list<string>,
+ *   empty_lvs_pairs: list<array{job_no: string, job_task_no: string}>
+ * }
  */
 function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): array
 {
     $pairs = [];
     $financeKeyByPair = [];
     $pairKeysInPosten = [];
+    $lvsWorkOrderNos = [];
+    $emptyLvsPairs = [];
 
     foreach ($rows as $row) {
         if (!is_array($row)) {
@@ -40,6 +48,11 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
 
         $jobNo = trim((string) ($row['Job_No'] ?? ''));
         $jobTaskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+        $lvsWorkOrderNo = trim((string) ($row['LVS_Work_Order_No'] ?? ''));
+        if ($lvsWorkOrderNo !== '') {
+            $lvsWorkOrderNos[strtolower($lvsWorkOrderNo)] = $lvsWorkOrderNo;
+        }
+
         if ($jobNo === '' || $jobTaskNo === '') {
             continue;
         }
@@ -51,10 +64,16 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
         ];
         $pairKeysInPosten[$pairKey] = true;
 
-        $lvsWorkOrderNo = trim((string) ($row['LVS_Work_Order_No'] ?? ''));
         $financeKey = $lvsWorkOrderNo !== '' ? $lvsWorkOrderNo : $jobTaskNo;
         if (!isset($financeKeyByPair[$pairKey]) || $lvsWorkOrderNo !== '') {
             $financeKeyByPair[$pairKey] = strtolower(trim($financeKey));
+        }
+
+        if ($lvsWorkOrderNo === '') {
+            $emptyLvsPairs[$pairKey] = [
+                'job_no' => $jobNo,
+                'job_task_no' => $jobTaskNo,
+            ];
         }
     }
 
@@ -62,7 +81,213 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
         'pairs' => array_values($pairs),
         'finance_key_by_pair' => $financeKeyByPair,
         'pair_keys_in_posten' => $pairKeysInPosten,
+        'lvs_work_order_nos' => array_values($lvsWorkOrderNos),
+        'empty_lvs_pairs' => array_values($emptyLvsPairs),
     ];
+}
+
+/**
+ * Haalt Werkorders op via Start_Date (zonder kostenplaats-filter in OData; dat is vaak traag).
+ *
+ * @return list<array>
+ */
+function bc_fetch_workorders_by_start_date_range(
+    string $company,
+    DateTimeImmutable $from,
+    DateTimeImmutable $toExclusive,
+    array $auth,
+    int $ttl,
+    bool $includeFuture = false
+): array {
+    $fromDate = $from->format('Y-m-d');
+    $filter = 'Start_Date ge ' . $fromDate;
+    if (!$includeFuture) {
+        $filter .= ' and Start_Date lt ' . $toExclusive->format('Y-m-d');
+    }
+
+    $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+        '$select' => bc_fetch_werkorders_list_select(),
+        '$filter' => $filter,
+    ]);
+    $rows = odata_get_all($url, $auth, $ttl);
+
+    $result = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $result[] = bc_fetch_apply_sub_entity_component_description($row);
+    }
+
+    return $result;
+}
+
+/**
+ * Haalt Werkorders op via No (LVS_Work_Order_No uit ProjectPosten).
+ *
+ * @param list<string> $numbers
+ * @return list<array>
+ */
+function bc_fetch_workorders_by_numbers(string $company, array $numbers, array $auth, int $ttl): array
+{
+    $normalized = [];
+    foreach ($numbers as $number) {
+        $trimmed = trim((string) $number);
+        if ($trimmed === '') {
+            continue;
+        }
+        $normalized[strtolower($trimmed)] = $trimmed;
+    }
+
+    if ($normalized === []) {
+        return [];
+    }
+
+    $select = bc_fetch_werkorders_list_select();
+    $allRows = [];
+    $seenRowKeys = [];
+    $wantedDummy = [];
+
+    foreach (bc_fetch_chunk_string_values(array_values($normalized), 20) as $chunk) {
+        $filter = bc_fetch_build_odata_or_equals_filter('No', $chunk);
+        $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => $select,
+            '$filter' => $filter,
+        ]);
+        $rows = odata_get_all($url, $auth, $ttl);
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $row = bc_fetch_apply_sub_entity_component_description($row);
+            $rowKey = bc_fetch_werkorder_row_key($row);
+            if (isset($seenRowKeys[$rowKey])) {
+                continue;
+            }
+            $seenRowKeys[$rowKey] = true;
+            $allRows[] = $row;
+        }
+    }
+
+    unset($wantedDummy);
+
+    return $allRows;
+}
+
+/**
+ * @param list<array> $workorders
+ * @return array<string, bool>
+ */
+function bc_fetch_workorder_nos_from_rows(array $workorders): array
+{
+    $nos = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        if ($no !== '') {
+            $nos[$no] = true;
+        }
+    }
+
+    return $nos;
+}
+
+/**
+ * @param list<array> $workorders
+ * @return list<array>
+ */
+function bc_fetch_dedupe_workorders_by_identity(array $workorders): array
+{
+    $byIdentity = [];
+    $orphans = [];
+
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+
+        $identity = demeter_workorder_identity_from_row($workorder);
+        if ($identity === '') {
+            $orphans[] = $workorder;
+            continue;
+        }
+
+        $byIdentity[$identity] = $workorder;
+    }
+
+    return array_values(array_merge(array_values($byIdentity), $orphans));
+}
+
+/**
+ * Finance-sleutel per werkorder: altijd het werkordernummer.
+ *
+ * @param list<array> $workorders
+ * @return array<string, string>
+ */
+function bc_fetch_finance_key_by_workorder(array $workorders): array
+{
+    $map = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+        $identity = demeter_workorder_identity_from_row($workorder);
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        if ($identity === '' || $no === '') {
+            continue;
+        }
+        $map[$identity] = $no;
+    }
+
+    return $map;
+}
+
+/**
+ * @return array<string, bool>
+ */
+function bc_fetch_cached_workorder_nos(?array $cachedState): array
+{
+    $nos = [];
+    $cachedWorkorders = is_array($cachedState) && is_array($cachedState['workorders'] ?? null)
+        ? $cachedState['workorders']
+        : [];
+
+    foreach ($cachedWorkorders as $entry) {
+        if (!is_array($entry)) {
+            continue;
+        }
+        $no = strtolower(trim((string) ($entry['workorder_no'] ?? '')));
+        if ($no === '' && is_array($entry['row'] ?? null)) {
+            $no = strtolower(trim((string) ($entry['row']['No'] ?? '')));
+        }
+        if ($no !== '') {
+            $nos[$no] = true;
+        }
+    }
+
+    return $nos;
+}
+
+/**
+ * @return list<array>
+ */
+function bc_fetch_cached_workorder_rows(?array $cachedState): array
+{
+    $rows = [];
+    $cachedWorkorders = is_array($cachedState) && is_array($cachedState['workorders'] ?? null)
+        ? $cachedState['workorders']
+        : [];
+
+    foreach ($cachedWorkorders as $entry) {
+        if (!is_array($entry) || !is_array($entry['row'] ?? null)) {
+            continue;
+        }
+        $rows[] = $entry['row'];
+    }
+
+    return $rows;
 }
 
 /**
@@ -796,7 +1021,14 @@ function bc_fetch_build_workorder_state_cache(
     ?array $existingCache
 ): array {
     $state = is_array($existingCache) && is_array($existingCache['workorders'] ?? null) ? $existingCache['workorders'] : [];
-    $updatedPairKeys = [];
+    $updatedIdentityKeys = [];
+    $seenWorkorderNos = [];
+    foreach (array_keys($pairKeysInPosten) as $seenKey) {
+        $normalized = strtolower(trim((string) $seenKey));
+        if ($normalized !== '') {
+            $seenWorkorderNos[$normalized] = true;
+        }
+    }
 
     foreach ($workorderRows as $workorderRow) {
         if (!is_array($workorderRow)) {
@@ -804,29 +1036,38 @@ function bc_fetch_build_workorder_state_cache(
         }
 
         $jobNo = trim((string) ($workorderRow['Job_No'] ?? ''));
+        $workorderNo = trim((string) ($workorderRow['No'] ?? ''));
         $jobTaskNo = trim((string) ($workorderRow['Job_Task_No'] ?? ''));
-        if ($jobNo === '' || $jobTaskNo === '') {
-            continue;
+        $identity = demeter_workorder_identity_key($jobNo, $workorderNo);
+        if ($identity === '') {
+            if ($jobNo === '' || $jobTaskNo === '') {
+                continue;
+            }
+            $identity = demeter_workorder_pair_key($jobNo, $jobTaskNo);
         }
 
-        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
-        $updatedPairKeys[$pairKey] = true;
-        $financeKey = $financeKeyByPair[$pairKey] ?? strtolower($jobTaskNo);
-        $seenInPosten = isset($pairKeysInPosten[$pairKey]);
-        $existingEntry = $state[$pairKey] ?? null;
+        $updatedIdentityKeys[$identity] = true;
+        $financeKey = strtolower($workorderNo !== '' ? $workorderNo : $jobTaskNo);
+        $identityFinance = $financeKeyByPair[$identity] ?? '';
+        if ($identityFinance !== '') {
+            $financeKey = $identityFinance;
+        }
+        $seenInPosten = isset($seenWorkorderNos[$financeKey])
+            || isset($pairKeysInPosten[demeter_workorder_pair_key($jobNo, $jobTaskNo)]);
+        $existingEntry = $state[$identity] ?? null;
         if (is_array($existingEntry) && !empty($existingEntry['is_closed']) && is_array($existingEntry['row'] ?? null)) {
             continue;
         }
 
-        $state[$pairKey] = demeter_workorder_state_cache_entry_from_row($workorderRow, $financeKey, $seenInPosten);
+        $state[$identity] = demeter_workorder_state_cache_entry_from_row($workorderRow, $financeKey, $seenInPosten);
     }
 
-    foreach ($state as $pairKey => $entry) {
-        if (!is_string($pairKey) || !is_array($entry)) {
+    foreach ($state as $identity => $entry) {
+        if (!is_string($identity) || !is_array($entry)) {
             continue;
         }
 
-        if (isset($updatedPairKeys[$pairKey])) {
+        if (isset($updatedIdentityKeys[$identity])) {
             continue;
         }
 
@@ -834,12 +1075,13 @@ function bc_fetch_build_workorder_state_cache(
             continue;
         }
 
-        if (!isset($pairKeysInPosten[$pairKey])) {
+        $financeKey = strtolower(trim((string) ($entry['finance_key'] ?? $entry['workorder_no'] ?? '')));
+        if ($financeKey === '' || !isset($seenWorkorderNos[$financeKey])) {
             continue;
         }
 
         $entry['last_seen_in_posten'] = gmdate('Y-m-d');
-        $state[$pairKey] = $entry;
+        $state[$identity] = $entry;
     }
 
     return $state;

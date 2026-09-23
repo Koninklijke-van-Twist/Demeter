@@ -687,6 +687,22 @@ function bc_fetch_execute_workorder_date_range_load(
         ? demeter_workorder_state_normalize_load_session($cachedState['load_session'] ?? null)
         : demeter_workorder_load_session_defaults();
 
+    $today = new DateTimeImmutable('today');
+    $includeFutureStartDates = $rangeEndExclusive > $today;
+
+    $advanceProgress('Werkorders');
+    $startDateWorkorders = bc_fetch_workorders_by_start_date_range(
+        $company,
+        $rangeStart,
+        $rangeEndExclusive,
+        $auth,
+        $ttl,
+        $includeFutureStartDates
+    );
+    if ($costCenter !== '') {
+        $startDateWorkorders = bc_fetch_filter_workorders_for_cost_center($startDateWorkorders, [], $costCenter);
+    }
+
     $advanceProgress('ProjectPosten');
     $financeService = new ProjectFinanceService($company);
     $rangeFinance = $financeService->collectProjectAndWorkorderFinanceFromProjectPostenRange(
@@ -701,8 +717,90 @@ function bc_fetch_execute_workorder_date_range_load(
     $pairs = $extractedKeys['pairs'];
     $financeKeyByPair = $extractedKeys['finance_key_by_pair'];
     $pairKeysInPosten = $extractedKeys['pair_keys_in_posten'];
+    $lvsWorkOrderNos = is_array($extractedKeys['lvs_work_order_nos'] ?? null) ? $extractedKeys['lvs_work_order_nos'] : [];
+    $emptyLvsPairs = is_array($extractedKeys['empty_lvs_pairs'] ?? null) ? $extractedKeys['empty_lvs_pairs'] : [];
 
-    if ($allProjectPostenRows === []) {
+    $knownNos = bc_fetch_workorder_nos_from_rows($startDateWorkorders);
+    $cachedNos = $forceFull ? [] : bc_fetch_cached_workorder_nos($cachedState);
+    $cachedWorkorderRows = [];
+    $missingNos = [];
+    $lvsNosSet = [];
+
+    foreach ($lvsWorkOrderNos as $lvsNo) {
+        $normalizedLvs = strtolower(trim((string) $lvsNo));
+        if ($normalizedLvs === '') {
+            continue;
+        }
+        $lvsNosSet[$normalizedLvs] = true;
+        if (isset($knownNos[$normalizedLvs])) {
+            continue;
+        }
+        if (!$forceFull && isset($cachedNos[$normalizedLvs])) {
+            continue;
+        }
+        $missingNos[$normalizedLvs] = (string) $lvsNo;
+    }
+
+    if (!$forceFull) {
+        foreach (bc_fetch_cached_workorder_rows($cachedState) as $cachedRow) {
+            $cachedNo = strtolower(trim((string) ($cachedRow['No'] ?? '')));
+            if ($cachedNo === '' || isset($knownNos[$cachedNo]) || isset($missingNos[$cachedNo])) {
+                continue;
+            }
+            if (isset($lvsNosSet[$cachedNo])) {
+                $cachedWorkorderRows[] = $cachedRow;
+            }
+        }
+    }
+
+    $startDatePairKeys = bc_fetch_pair_keys_from_workorders($startDateWorkorders);
+    $cachedPairKeys = $forceFull ? [] : bc_fetch_pair_keys_from_workorders(bc_fetch_cached_workorder_rows($cachedState));
+    $missingPairs = [];
+    foreach ($emptyLvsPairs as $emptyPair) {
+        if (!is_array($emptyPair)) {
+            continue;
+        }
+        $jobNo = trim((string) ($emptyPair['job_no'] ?? ''));
+        $jobTaskNo = trim((string) ($emptyPair['job_task_no'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+        if (!$forceFull && (isset($startDatePairKeys[$pairKey]) || isset($cachedPairKeys[$pairKey]))) {
+            continue;
+        }
+        $missingPairs[$pairKey] = [
+            'job_no' => $jobNo,
+            'job_task_no' => $jobTaskNo,
+        ];
+    }
+
+    $statusCheckCount = 0;
+    $statusClosedCount = 0;
+    $statusRefreshCount = 0;
+    $fetchPairs = array_values($missingPairs);
+    $fetchedFromNumbers = [];
+    $fetchedFromPairs = [];
+
+    if ($missingNos !== []) {
+        $fetchedFromNumbers = bc_fetch_workorders_by_numbers($company, array_values($missingNos), $auth, $ttl);
+    }
+    if ($fetchPairs !== []) {
+        $fetchedFromPairs = bc_fetch_workorders_by_job_task_pairs($company, $fetchPairs, $auth, $ttl);
+    }
+
+    $workorders = bc_fetch_dedupe_workorders_by_identity(bc_fetch_merge_workorder_rows(
+        $startDateWorkorders,
+        $cachedWorkorderRows,
+        $fetchedFromNumbers,
+        $fetchedFromPairs
+    ));
+
+    if ($costCenter !== '') {
+        $workorders = bc_fetch_filter_workorders_for_cost_center($workorders, $allProjectPostenRows, $costCenter);
+    }
+
+    if ($allProjectPostenRows === [] && $workorders === []) {
         $cacheState = bc_fetch_build_workorder_state_cache([], $financeKeyByPair, $pairKeysInPosten, $cachedState);
 
         return [
@@ -734,104 +832,39 @@ function bc_fetch_execute_workorder_date_range_load(
         ];
     }
 
-    $fetchPlan = bc_fetch_resolve_workorder_fetch_plan($pairs, $pairKeysInPosten, $cachedState, $forceFull, $loadSessionId);
-    $fetchPairs = $fetchPlan['fetch_pairs'];
-    $cachedWorkorderRows = $fetchPlan['use_cached_rows'];
-    $statusCheckCount = 0;
-    $statusClosedCount = 0;
-    $statusRefreshCount = 0;
-
-    if (!$forceFull && $fetchPlan['status_check_pairs'] !== []) {
-        $advanceProgress('Open werkorders controleren');
-        $staleResult = bc_fetch_process_stale_workorders_via_status_check(
-            $company,
-            $fetchPlan['status_check_pairs'],
-            $cachedWorkorders,
-            $auth,
-            $ttl
-        );
-        $statusCheckedPairKeys = [];
-        foreach ($fetchPlan['status_check_pairs'] as $statusCheckPair) {
-            if (!is_array($statusCheckPair)) {
-                continue;
-            }
-            $jobNo = trim((string) ($statusCheckPair['job_no'] ?? ''));
-            $jobTaskNo = trim((string) ($statusCheckPair['job_task_no'] ?? ''));
-            if ($jobNo === '' || $jobTaskNo === '') {
-                continue;
-            }
-            $statusCheckedPairKeys[] = demeter_workorder_pair_key($jobNo, $jobTaskNo);
-        }
-        $loadSession = demeter_workorder_state_record_status_checked_pairs(
-            $loadSession,
-            $loadSessionId,
-            $statusCheckedPairKeys
-        );
-        $fetchPairs = array_merge($fetchPairs, $staleResult['fetch_pairs']);
-        $cachedWorkorderRows = array_merge(
-            $cachedWorkorderRows,
-            $staleResult['use_cached_rows'],
-            $staleResult['status_updated_rows']
-        );
-        $statusCheckCount = count($fetchPlan['status_check_pairs']);
-        $statusClosedCount = count($staleResult['status_updated_rows']);
-    }
-
-    $statusRefreshPairs = [];
-    foreach ($pairs as $pair) {
-        if (!is_array($pair)) {
-            continue;
-        }
-        $jobNo = trim((string) ($pair['job_no'] ?? ''));
-        $jobTaskNo = trim((string) ($pair['job_task_no'] ?? ''));
-        if ($jobNo === '' || $jobTaskNo === '') {
-            continue;
-        }
-        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
-        if (!isset($pairKeysInPosten[$pairKey])) {
-            continue;
-        }
-        $cachedEntry = $cachedWorkorders[$pairKey] ?? null;
-        if (!is_array($cachedEntry) || !empty($cachedEntry['is_closed']) || !is_array($cachedEntry['row'] ?? null)) {
-            continue;
-        }
-        $statusRefreshPairs[] = [
-            'job_no' => $jobNo,
-            'job_task_no' => $jobTaskNo,
-        ];
-    }
-    if ($statusRefreshPairs !== []) {
-        $statusSnapshots = bc_fetch_fetch_workorder_status_by_pairs($company, $statusRefreshPairs, $auth, $ttl);
-        $cachedWorkorderRows = bc_fetch_apply_status_snapshots_to_workorder_rows($cachedWorkorderRows, $statusSnapshots);
-        $statusRefreshCount = count($statusRefreshPairs);
-        $statusCheckCount += $statusRefreshCount;
-    }
-
-    if ($fetchPairs === [] && !$forceFull && $cachedWorkorderRows !== []) {
+    if ($fetchedFromNumbers === [] && $fetchedFromPairs === [] && !$forceFull && $cachedWorkorderRows !== []) {
         $weekLoadMode = 'lightweight';
     }
 
-    $advanceProgress($weekLoadMode === 'lightweight' ? 'Werkorders (cache)' : ($isIncrementalRun ? 'Werkorders (open)' : 'Werkorders'));
-    $fetchedWorkorders = $fetchPairs !== []
-        ? bc_fetch_workorders_by_job_task_pairs($company, $fetchPairs, $auth, $ttl)
-        : [];
-    $workorders = bc_fetch_merge_workorder_rows($cachedWorkorderRows, $fetchedWorkorders);
+    $seenWorkorderNos = [];
+    foreach ($lvsWorkOrderNos as $lvsNo) {
+        $normalizedLvs = strtolower(trim((string) $lvsNo));
+        if ($normalizedLvs !== '') {
+            $seenWorkorderNos[$normalizedLvs] = true;
+        }
+    }
 
-    if ($costCenter !== '') {
-        $workorders = bc_fetch_filter_workorders_for_cost_center($workorders, $allProjectPostenRows, $costCenter);
-        $allowedPairKeys = bc_fetch_pair_keys_from_workorders($workorders);
-        $filteredProjectPostenRows = bc_fetch_filter_projectposten_rows_by_pair_keys($allProjectPostenRows, $allowedPairKeys);
+    if ($allProjectPostenRows !== []) {
+        $filteredProjectPostenRows = bc_fetch_filter_projectposten_rows_for_workorders($allProjectPostenRows, $workorders);
         $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows($filteredProjectPostenRows);
         $extractedKeys = bc_fetch_extract_workorder_keys_from_projectposten_rows($filteredProjectPostenRows);
-        $financeKeyByPair = $extractedKeys['finance_key_by_pair'];
-        $pairKeysInPosten = $extractedKeys['pair_keys_in_posten'];
+        $financeKeyByPair = array_merge(
+            $extractedKeys['finance_key_by_pair'],
+            bc_fetch_finance_key_by_workorder($workorders)
+        );
+        $pairKeysInPosten = $seenWorkorderNos + $extractedKeys['pair_keys_in_posten'];
+    } else {
+        $financeKeyByPair = bc_fetch_finance_key_by_workorder($workorders);
+        $pairKeysInPosten = $seenWorkorderNos;
+        $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows([]);
     }
 
     $projectPostenRows = is_array($rangeFinance['projectposten_rows'] ?? null) ? $rangeFinance['projectposten_rows'] : [];
     $hasProjectPostenForCostCenter = $projectPostenRows !== [];
+    $fetchedWorkorders = array_merge($fetchedFromNumbers, $fetchedFromPairs);
     $onlyClosedCached = $hasProjectPostenForCostCenter
-        && $fetchPairs === []
-        && $fetchPlan['use_cached_rows'] !== [];
+        && $fetchedWorkorders === []
+        && $cachedWorkorderRows !== [];
 
     $advanceProgress('Werkorders samenvoegen');
 
@@ -843,6 +876,16 @@ function bc_fetch_execute_workorder_date_range_load(
         'from_cache_count' => 0,
         'fetched_count' => 0,
     ];
+
+    foreach ($workorders as $workorderRow) {
+        if (!is_array($workorderRow)) {
+            continue;
+        }
+        $jobNo = trim((string) ($workorderRow['Job_No'] ?? ''));
+        if ($jobNo !== '' && !in_array($jobNo, $projectNumbers, true)) {
+            $projectNumbers[] = $jobNo;
+        }
+    }
 
     if ($projectNumbers !== []) {
         $invoiceData = bc_fetch_resolve_invoices_for_projects(
@@ -872,7 +915,9 @@ function bc_fetch_execute_workorder_date_range_load(
     if ($costCenter !== '') {
         $importSapWorkorderRows = bc_fetch_filter_workorders_for_cost_center($importSapWorkorderRows, $allProjectPostenRows, $costCenter);
     }
-    $workorders = bc_fetch_merge_workorder_rows($workorders, $importSapWorkorderRows);
+    $workorders = bc_fetch_dedupe_workorders_by_identity(
+        bc_fetch_merge_workorder_rows($workorders, $importSapWorkorderRows)
+    );
 
     $cacheState = bc_fetch_build_workorder_state_cache(
         $workorders,

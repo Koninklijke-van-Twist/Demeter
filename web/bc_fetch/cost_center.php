@@ -311,6 +311,88 @@ function bc_fetch_filter_projectposten_rows_by_pair_keys(array $rows, array $all
 }
 
 /**
+ * Koppelt ProjectPosten aan bekende werkorders via LVS_Work_Order_No.
+ * Lege LVS + uniek Job/Task-paar valt terug op dat ene werkorder.
+ *
+ * @param list<array> $rows
+ * @param list<array> $workorders
+ * @return list<array>
+ */
+function bc_fetch_filter_projectposten_rows_for_workorders(array $rows, array $workorders): array
+{
+    $allowedNos = [];
+    $allowedJobs = [];
+    $pairCounts = [];
+    $uniquePairNos = [];
+
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        if ($no !== '') {
+            $allowedNos[$no] = true;
+        }
+
+        $jobNo = trim((string) ($workorder['Job_No'] ?? ''));
+        if ($jobNo !== '') {
+            $allowedJobs[strtolower($jobNo)] = true;
+        }
+        $jobTaskNo = trim((string) ($workorder['Job_Task_No'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            continue;
+        }
+
+        if (!function_exists('demeter_workorder_pair_key')) {
+            require_once __DIR__ . '/workorder_state_cache.php';
+        }
+
+        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+        $pairCounts[$pairKey] = ($pairCounts[$pairKey] ?? 0) + 1;
+        if (($pairCounts[$pairKey] ?? 0) === 1 && $no !== '') {
+            $uniquePairNos[$pairKey] = $no;
+        } else {
+            unset($uniquePairNos[$pairKey]);
+        }
+    }
+
+    if ($allowedNos === [] && $uniquePairNos === [] && $allowedJobs === []) {
+        return [];
+    }
+
+    return array_values(array_filter($rows, static function ($row) use ($allowedNos, $uniquePairNos, $allowedJobs): bool {
+        if (!is_array($row)) {
+            return false;
+        }
+
+        $lvs = strtolower(trim((string) ($row['LVS_Work_Order_No'] ?? '')));
+        if ($lvs !== '') {
+            return isset($allowedNos[$lvs]);
+        }
+
+        $description = trim((string) ($row['Description'] ?? ''));
+        $jobNo = trim((string) ($row['Job_No'] ?? ''));
+        if ($description !== '' && strncasecmp($description, 'IMPORT SAP', 10) === 0) {
+            return $jobNo !== '' && isset($allowedJobs[strtolower($jobNo)]);
+        }
+
+        $jobTaskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+        if ($jobNo === '' || $jobTaskNo === '') {
+            return false;
+        }
+
+        if (!function_exists('demeter_workorder_pair_key')) {
+            require_once __DIR__ . '/workorder_state_cache.php';
+        }
+
+        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
+
+        return isset($uniquePairNos[$pairKey]);
+    }));
+}
+
+/**
  * Filtert ProjectPosten-rijen op kostenplaats in PHP (BC OData ondersteunt complexe filters niet altijd).
  *
  * @param list<array> $rows

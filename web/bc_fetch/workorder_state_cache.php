@@ -8,7 +8,7 @@
 
 require_once __DIR__ . '/cost_center.php';
 
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 6;
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 7;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */
@@ -232,6 +232,33 @@ function demeter_workorder_cache_entry_needs_full_refresh_by_age(array $entry): 
 function demeter_workorder_pair_key(string $jobNo, string $jobTaskNo): string
 {
     return strtolower(trim($jobNo)) . '|' . strtolower(trim($jobTaskNo));
+}
+
+/**
+ * Unieke werkorder-identiteit: project + werkordernummer (niet Job_Task_No).
+ */
+function demeter_workorder_identity_key(string $jobNo, string $workorderNo): string
+{
+    $job = strtolower(trim($jobNo));
+    $number = strtolower(trim($workorderNo));
+    if ($job === '' || $number === '') {
+        return '';
+    }
+
+    return $job . '|' . $number;
+}
+
+/**
+ * Identiteit vanuit een BC-werkorderrij.
+ */
+function demeter_workorder_identity_from_row(array $row): string
+{
+    $workorderNo = trim((string) ($row['No'] ?? ''));
+    if ($workorderNo === '') {
+        $workorderNo = trim((string) ($row['Bc_No'] ?? ''));
+    }
+
+    return demeter_workorder_identity_key((string) ($row['Job_No'] ?? ''), $workorderNo);
 }
 
 /**
@@ -1185,12 +1212,18 @@ function demeter_workorder_state_cache_entry_from_row(array $workorderRow, strin
 {
     $jobNo = trim((string) ($workorderRow['Job_No'] ?? ''));
     $jobTaskNo = trim((string) ($workorderRow['Job_Task_No'] ?? ''));
+    $workorderNo = trim((string) ($workorderRow['No'] ?? ''));
     $status = trim((string) ($workorderRow['Status'] ?? ''));
+    $normalizedFinanceKey = strtolower(trim($financeKey));
+    if ($normalizedFinanceKey === '') {
+        $normalizedFinanceKey = strtolower($workorderNo);
+    }
 
     return [
         'job_no' => $jobNo,
         'job_task_no' => $jobTaskNo,
-        'finance_key' => strtolower(trim($financeKey)),
+        'workorder_no' => $workorderNo,
+        'finance_key' => $normalizedFinanceKey,
         'is_closed' => demeter_workorder_status_is_closed($status),
         'status' => $status,
         'row' => $workorderRow,
@@ -1681,8 +1714,12 @@ function demeter_build_overview_from_workorder_cache(array $cachedState): array
 
         $workorders[] = $entry['row'];
         $financeKey = trim((string) ($entry['finance_key'] ?? ''));
+        if ($financeKey === '') {
+            $financeKey = strtolower(trim((string) ($entry['workorder_no'] ?? $entry['row']['No'] ?? '')));
+        }
         if ($financeKey !== '') {
-            $financeKeyByPair[$pairKey] = $financeKey;
+            $identity = demeter_workorder_identity_from_row($entry['row']);
+            $financeKeyByPair[$identity !== '' ? $identity : $pairKey] = $financeKey;
         }
     }
 
@@ -1727,8 +1764,13 @@ function demeter_pending_refresh_row_keys_from_cache(?array $cachedState, bool $
         }
 
         $financeKey = trim((string) ($entry['finance_key'] ?? ''));
+        $workorderNo = trim((string) ($entry['workorder_no'] ?? ''));
+        if ($workorderNo === '' && is_array($entry['row'] ?? null)) {
+            $workorderNo = trim((string) ($entry['row']['No'] ?? ''));
+        }
         $jobTaskNo = trim((string) ($entry['job_task_no'] ?? ''));
-        $keys[] = demeter_workorder_row_key($jobNo, $financeKey !== '' ? $financeKey : $jobTaskNo);
+        $rowSource = $financeKey !== '' ? $financeKey : ($workorderNo !== '' ? $workorderNo : $jobTaskNo);
+        $keys[] = demeter_workorder_row_key($jobNo, $rowSource);
     }
 
     return array_values(array_unique(array_filter(array_map('strval', $keys), static function (string $key): bool {
