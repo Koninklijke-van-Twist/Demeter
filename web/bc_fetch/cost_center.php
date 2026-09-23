@@ -202,43 +202,51 @@ function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCen
 }
 
 /**
- * Filtert werkorders op kostenplaats via ProjectPosten-dimensie en/of Job_Dimension_1_Value.
+ * Filtert werkorders strikt op de werkorderkop (Job_Dimension_1_Value).
+ *
+ * ProjectPosten Global Dimension 1 telt niet mee. Een werkorder met kop 70
+ * hoort niet bij filter 15, ook als een projectpost die dimensie wel heeft.
  *
  * @param list<array> $workorders
- * @param list<array> $allPostenRows
+ * @param list<array> $allPostenRows Ongebruikt; aanroepers blijven de posten meegeven.
  * @return list<array>
  */
 function bc_fetch_filter_workorders_for_cost_center(array $workorders, array $allPostenRows, string $costCenter): array
 {
+    unset($allPostenRows);
+
+    return bc_fetch_filter_workorders_by_cost_center($workorders, $costCenter);
+}
+
+/**
+ * Houdt UI-rijen waarvan Cost_Center (werkorderkop) bij de gekozen kostenplaats hoort.
+ *
+ * @param array<string, mixed> $rowsByKey
+ * @return array<string, array>
+ */
+function bc_fetch_filter_display_rows_for_cost_center(array $rowsByKey, string $costCenter): array
+{
     $normalized = bc_fetch_normalize_cost_center($costCenter);
     if ($normalized === '') {
-        return $workorders;
+        return $rowsByKey;
     }
 
-    $pairKeysFromPosten = bc_fetch_pair_keys_from_projectposten_rows($allPostenRows, $normalized, true);
-
-    return array_values(array_filter($workorders, static function ($workorder) use ($normalized, $pairKeysFromPosten): bool {
-        if (!is_array($workorder)) {
-            return false;
+    $filtered = [];
+    foreach ($rowsByKey as $key => $row) {
+        if (!is_array($row)) {
+            continue;
         }
 
-        $jobNo = trim((string) ($workorder['Job_No'] ?? ''));
-        $jobTaskNo = trim((string) ($workorder['Job_Task_No'] ?? ''));
-        if ($jobNo === '' || $jobTaskNo === '') {
-            return false;
+        if (!bc_fetch_workorder_matches_cost_center([
+            'Job_Dimension_1_Value' => (string) ($row['Cost_Center'] ?? ''),
+        ], $normalized)) {
+            continue;
         }
 
-        if (!function_exists('demeter_workorder_pair_key')) {
-            require_once __DIR__ . '/workorder_state_cache.php';
-        }
+        $filtered[$key] = $row;
+    }
 
-        $pairKey = demeter_workorder_pair_key($jobNo, $jobTaskNo);
-        if (isset($pairKeysFromPosten[$pairKey])) {
-            return true;
-        }
-
-        return bc_fetch_workorder_matches_cost_center($workorder, $normalized);
-    }));
+    return $filtered;
 }
 
 /**

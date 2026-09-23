@@ -79,7 +79,8 @@ function bc_fetch_app_werkorders_select(): string
 }
 
 /**
- * ProjectPosten voor week-range finance + kostenplaats-filter + UI-modal.
+ * ProjectPosten voor week-range finance en de UI-modal.
+ * Kostenplaats van een werkorder komt uit Job_Dimension_1_Value op de werkorderkop.
  *
  * @return list<string>
  */

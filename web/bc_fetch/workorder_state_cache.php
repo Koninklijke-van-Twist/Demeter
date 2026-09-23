@@ -1133,17 +1133,17 @@ function demeter_workorder_state_cache_load_display_rows(string $company, string
             $decoded = json_decode($raw, true);
             if (is_array($decoded)) {
                 if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
-                    return demeter_coalesce_display_rows_by_business_key($decoded);
+                    $decoded = demeter_coalesce_display_rows_by_business_key($decoded);
                 }
 
-                return $decoded;
+                return bc_fetch_filter_display_rows_for_cost_center($decoded, $costCenter);
             }
         }
     }
 
     $cachedState = demeter_workorder_state_cache_load($company, $costCenter);
     if (is_array($cachedState) && is_array($cachedState['display_rows'] ?? null) && $cachedState['display_rows'] !== []) {
-        $legacyRows = $cachedState['display_rows'];
+        $legacyRows = bc_fetch_filter_display_rows_for_cost_center($cachedState['display_rows'], $costCenter);
         demeter_workorder_state_cache_save_display_rows($company, $costCenter, $legacyRows);
 
         return $legacyRows;
