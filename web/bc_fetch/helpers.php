@@ -55,13 +55,27 @@ function company_entity_url_with_query(string $baseUrl, mixed $environment, stri
         }
     }
 
+    $mimirOn = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
     if ($resolvedEnvironment === '') {
-        throw new RuntimeException('Geen environment beschikbaar voor company_entity_url_with_query.');
+        if ($mimirOn) {
+            $resolvedEnvironment = 'mimir';
+        } else {
+            throw new RuntimeException('Geen environment beschikbaar voor company_entity_url_with_query.');
+        }
+    }
+
+    $resolvedBaseUrl = trim($baseUrl);
+    if ($resolvedBaseUrl === '') {
+        if ($mimirOn) {
+            $resolvedBaseUrl = 'https://mimir.invalid/';
+        } else {
+            throw new RuntimeException('baseUrl ontbreekt voor company_entity_url_with_query.');
+        }
     }
 
     $safeCompany = str_replace("'", "''", trim($company));
     $companySegment = "Company('" . rawurlencode($safeCompany) . "')";
-    $url = rtrim($baseUrl, '/') . '/' . rawurlencode($resolvedEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entitySet);
+    $url = rtrim($resolvedBaseUrl, '/') . '/' . rawurlencode($resolvedEnvironment) . '/ODataV4/' . $companySegment . '/' . rawurlencode($entitySet);
 
     if ($query !== []) {
         $url .= '?' . http_build_query($query, '', '&', PHP_QUERY_RFC3986);

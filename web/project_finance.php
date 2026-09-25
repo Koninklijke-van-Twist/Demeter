@@ -862,6 +862,9 @@ class ProjectFinanceService
         global $baseUrl, $environment, $auth;
 
         require_once __DIR__ . '/auth_helper.php';
+        if (!function_exists('odata_mimir_enabled') && is_file(__DIR__ . '/odata.php')) {
+            require_once __DIR__ . '/odata.php';
+        }
 
         $resolvedEnvironment = '';
         if (is_array($environment ?? null)) {
@@ -888,8 +891,30 @@ class ProjectFinanceService
             }
         }
 
-        if (!isset($baseUrl) || $resolvedEnvironment === '' || !is_array($resolvedAuth) || $resolvedAuth === []) {
+        $mimirOn = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
+
+        if (!isset($baseUrl) || !is_string($baseUrl) || trim($baseUrl) === '') {
+            if ($mimirOn) {
+                $baseUrl = 'https://mimir.invalid/';
+            } else {
+                throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
+            }
+        }
+
+        if ($resolvedEnvironment === '') {
+            if ($mimirOn) {
+                $resolvedEnvironment = 'mimir';
+            } else {
+                throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
+            }
+        }
+
+        // Mímir-modus: lege auth is OK (credentials zitten in Mímir).
+        if (!$mimirOn && (!is_array($resolvedAuth) || $resolvedAuth === [])) {
             throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
+        }
+        if (!is_array($resolvedAuth)) {
+            $resolvedAuth = [];
         }
 
         return [

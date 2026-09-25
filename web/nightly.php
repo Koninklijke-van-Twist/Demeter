@@ -3,6 +3,7 @@
 /**
  * Nachtelijke cache-verversing (cron om 02:00).
  * Geen UI — alleen stdout/logging (CLI of HTTP via cron).
+ * Mímir max_age op nightly-fetches: DEMETER_NIGHTLY_MAX_AGE (14400).
  */
 
 if (!defined('DEMETER_ODATA_MAX_EXECUTION_SECONDS')) {
@@ -68,7 +69,8 @@ require_once __DIR__ . '/bc_fetch/nightly_runner.php';
 $second = 1;
 $minute = $second * 60;
 $hour = $minute * 60;
-$ttl = $hour * 12;
+// Nightly Mímir max_age / legacy filecache TTL: 4h (UI keeps 12h in index.php).
+$ttl = defined('DEMETER_NIGHTLY_MAX_AGE') ? DEMETER_NIGHTLY_MAX_AGE : 14400;
 
 $lockPath = __DIR__ . '/cache/reference/nightly.lock';
 if (!is_dir(dirname($lockPath)) && !mkdir(dirname($lockPath), 0775, true) && !is_dir(dirname($lockPath))) {
