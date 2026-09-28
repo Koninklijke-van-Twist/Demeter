@@ -98,8 +98,6 @@ function bc_fetch_projectposten_finance_select_fields(): array
         'Total_Cost',
         'Line_Amount',
         'Line_Amount_LCY',
-        'LVS_Global_Dimension_1_Code',
-        'Global_Dimension_1_Code',
     ];
 }
 
