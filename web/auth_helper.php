@@ -78,7 +78,11 @@ function auth_get_active_environments(): array
     }
 
     $known = is_array($auth_list ?? null) ? array_keys($auth_list) : [];
-    if ($configured !== []) {
+    // Tijdens de BC-fallback hoort een ontbrekende $auth_list de primaire $environment te houden.
+    // Zolang Mímir gezond is blijft een lege lijst environments uit companies.php halen.
+    $authListMissing = !isset($auth_list) || !is_array($auth_list) || $auth_list === [];
+    $circuitOpen = function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open();
+    if ($configured !== [] && !($circuitOpen && $authListMissing)) {
         $knownMap = array_fill_keys($known, true);
         $configured = array_values(array_filter($configured, static function (string $item) use ($knownMap): bool {
             return isset($knownMap[$item]);
@@ -172,6 +176,22 @@ function auth_get_auth_for_environment(string $environment): array
         // Na een Mímir-storing wel de echte BC-auth, of de oorspronkelijke fout als die ontbreekt.
         if (auth_mimir_transport_active()) {
             return [];
+        }
+        if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open()) {
+            foreach ($list as $key => $entry) {
+                if (strcasecmp((string) $key, $environmentKey) === 0 && is_array($entry)) {
+                    return $entry;
+                }
+            }
+            if (function_exists('odata_bc_env_may_use_primary_auth')
+                && odata_bc_env_may_use_primary_auth($environmentKey)
+                && function_exists('odata_bc_passed_or_stored_auth')
+                && function_exists('odata_auth_is_usable')) {
+                $fallbackAuth = odata_bc_passed_or_stored_auth([]);
+                if (odata_auth_is_usable($fallbackAuth)) {
+                    return $fallbackAuth;
+                }
+            }
         }
         if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open() && function_exists('odata_mimir_last_error')) {
             $previous = odata_mimir_last_error();
@@ -619,6 +639,7 @@ function auth_set_current_company_context(?string $company, int $ttlSeconds = 30
         }
 
         // BC-auth alleen als lokaal geconfigureerd; anders lege sentinel.
+        // Bewaar bruikbare $auth: de fallback laadt auth.php via require_once en krijgt die niet terug.
         $targetAuth = [];
         if ($targetEnvironment !== '') {
             global $auth_list;
@@ -626,6 +647,10 @@ function auth_set_current_company_context(?string $company, int $ttlSeconds = 30
             if (isset($list[$targetEnvironment]) && is_array($list[$targetEnvironment])) {
                 $targetAuth = $list[$targetEnvironment];
             }
+        }
+
+        if ($targetAuth === [] && function_exists('odata_bc_preserve_auth_for_fallback')) {
+            odata_bc_preserve_auth_for_fallback($auth);
         }
 
         $environment = $targetEnvironment;
