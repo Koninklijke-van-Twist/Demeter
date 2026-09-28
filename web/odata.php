@@ -129,6 +129,7 @@ function odata_mimir_circuit_reset(): void
     $state = &odata_mimir_circuit_state();
     $state['open'] = false;
     $state['error'] = null;
+    $GLOBALS['demeter_mimir_failure_ids'] = [];
 }
 
 function odata_mimir_connect_timeout_seconds(): int
@@ -148,8 +149,25 @@ function odata_mimir_timeout_seconds(): int
 
 function odata_mimir_fail(Exception $exception): void
 {
+    if (!isset($GLOBALS['demeter_mimir_failure_ids']) || !is_array($GLOBALS['demeter_mimir_failure_ids'])) {
+        $GLOBALS['demeter_mimir_failure_ids'] = [];
+    }
+    $GLOBALS['demeter_mimir_failure_ids'][spl_object_id($exception)] = true;
     odata_mimir_trip($exception);
     throw $exception;
+}
+
+/**
+ * Alleen transport/timeout, non-2xx, ongeldige JSON en een Mímir-foutpayload.
+ * odata_mimir_fail markeert die; andere exceptions van de caller doen dat niet.
+ */
+function odata_mimir_exception_is_failure(Throwable $exception): bool
+{
+    $ids = $GLOBALS['demeter_mimir_failure_ids'] ?? null;
+    if (!is_array($ids)) {
+        return false;
+    }
+    return !empty($ids[spl_object_id($exception)]);
 }
 
 function odata_auth_is_usable($auth): bool
@@ -168,9 +186,65 @@ function odata_auth_is_usable($auth): bool
     return array_key_exists('pass', $auth);
 }
 
+function odata_bc_auth_php_path(): string
+{
+    $override = $GLOBALS['DEMETER_AUTH_PHP_PATH'] ?? '';
+    if (is_string($override) && trim($override) !== '') {
+        return $override;
+    }
+    return __DIR__ . '/auth.php';
+}
+
 /**
- * Laadt auth.php als dat nog niet gebeurd is, zodat de BC-fallback ook werkt
- * wanneer een caller de directe setup oversloeg omdat $mimirApi gezet was.
+ * Een require binnen een functie maakt variabelen lokaal. Alleen placeholders
+ * en ontbrekende waarden worden naar $GLOBALS gekopieerd.
+ */
+function odata_bc_global_is_real(string $name): bool
+{
+    if (!array_key_exists($name, $GLOBALS)) {
+        return false;
+    }
+    $value = $GLOBALS[$name];
+    if ($name === 'baseUrl' || $name === 'base') {
+        return is_string($value) && trim($value) !== '' && stripos($value, 'mimir.invalid') === false;
+    }
+    if ($name === 'environment') {
+        if (is_string($value)) {
+            $env = trim($value);
+            return $env !== '' && strcasecmp($env, 'mimir') !== 0;
+        }
+        if (is_array($value)) {
+            foreach ($value as $item) {
+                $env = trim((string) $item);
+                if ($env !== '' && strcasecmp($env, 'mimir') !== 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+    if ($name === 'auth') {
+        return odata_auth_is_usable($value);
+    }
+    if ($name === 'auth_list') {
+        if (!is_array($value)) {
+            return false;
+        }
+        foreach ($value as $entry) {
+            if (odata_auth_is_usable($entry)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if ($name === 'mimirApi' || $name === 'mimirBase') {
+        return is_string($value) && trim($value) !== '';
+    }
+    return false;
+}
+
+/**
+ * Laadt auth.php als de BC-fallback nog geen bruikbare globals heeft.
  */
 function odata_ensure_bc_config_loaded(): void
 {
@@ -178,43 +252,72 @@ function odata_ensure_bc_config_loaded(): void
     if ($loading) {
         return;
     }
-    $path = __DIR__ . '/auth.php';
+    if (odata_bc_credentials_configured_from_globals()) {
+        return;
+    }
+    $path = odata_bc_auth_php_path();
     if (!is_file($path)) {
         return;
     }
     $loading = true;
-    require_once $path;
+    $loaded = (static function (string $authPath): array {
+        require_once $authPath;
+        return [
+            'baseUrl' => isset($baseUrl) ? $baseUrl : null,
+            'base' => isset($base) ? $base : null,
+            'environment' => isset($environment) ? $environment : null,
+            'auth' => isset($auth) ? $auth : null,
+            'auth_list' => isset($auth_list) ? $auth_list : null,
+            'mimirApi' => isset($mimirApi) ? $mimirApi : null,
+            'mimirBase' => isset($mimirBase) ? $mimirBase : null,
+        ];
+    })($path);
     $loading = false;
+    foreach ($loaded as $name => $value) {
+        if ($value === null || odata_bc_global_is_real($name)) {
+            continue;
+        }
+        $GLOBALS[$name] = $value;
+    }
 }
 
-function odata_bc_base_url(): ?string
+function odata_bc_base_url_from_globals(): ?string
 {
-    odata_ensure_bc_config_loaded();
-    global $baseUrl;
-    if (!isset($baseUrl) || !is_string($baseUrl)) {
+    $base = $GLOBALS['baseUrl'] ?? null;
+    if (!is_string($base) || trim($base) === '' || stripos($base, 'mimir.invalid') !== false) {
+        $alternate = $GLOBALS['base'] ?? null;
+        if (is_string($alternate) && trim($alternate) !== '' && stripos($alternate, 'mimir.invalid') === false) {
+            $base = $alternate;
+        }
+    }
+    if (!is_string($base)) {
         return null;
     }
-    $base = trim($baseUrl);
+    $base = trim($base);
     if ($base === '' || stripos($base, 'mimir.invalid') !== false) {
         return null;
     }
     return rtrim($base, '/') . '/';
 }
 
-function odata_bc_environment(): ?string
+function odata_bc_base_url(): ?string
 {
     odata_ensure_bc_config_loaded();
-    global $environment, $auth_list;
+    return odata_bc_base_url_from_globals();
+}
+
+function odata_bc_environment_from_globals(): ?string
+{
+    $environment = $GLOBALS['environment'] ?? null;
+    $authList = $GLOBALS['auth_list'] ?? null;
 
     $candidates = [];
-    if (isset($environment)) {
-        if (is_array($environment)) {
-            foreach ($environment as $item) {
-                $candidates[] = trim((string) $item);
-            }
-        } elseif (is_string($environment)) {
-            $candidates[] = trim($environment);
+    if (is_array($environment)) {
+        foreach ($environment as $item) {
+            $candidates[] = trim((string) $item);
         }
+    } elseif (is_string($environment)) {
+        $candidates[] = trim($environment);
     }
     foreach ($candidates as $env) {
         if ($env !== '' && strcasecmp($env, 'mimir') !== 0) {
@@ -222,8 +325,8 @@ function odata_bc_environment(): ?string
         }
     }
 
-    if (isset($auth_list) && is_array($auth_list)) {
-        foreach ($auth_list as $key => $entry) {
+    if (is_array($authList)) {
+        foreach ($authList as $key => $entry) {
             $env = trim((string) $key);
             if ($env === '' || strcasecmp($env, 'mimir') === 0) {
                 continue;
@@ -237,22 +340,120 @@ function odata_bc_environment(): ?string
     return null;
 }
 
-function odata_bc_auth_for_fallback(array $passed): ?array
+function odata_bc_environment(): ?string
 {
     odata_ensure_bc_config_loaded();
+    return odata_bc_environment_from_globals();
+}
+
+function odata_bc_mapped_environment(string $company): ?string
+{
+    $company = trim($company);
+    $map = $GLOBALS['demeter_company_environment_map'] ?? null;
+    if ($company === '' || !is_array($map)) {
+        return null;
+    }
+
+    $pairs = [];
+    if (isset($map[$company])) {
+        $pairs[] = $map[$company];
+    }
+    foreach ($map as $name => $env) {
+        if (strcasecmp((string) $name, $company) === 0) {
+            $pairs[] = $env;
+        }
+    }
+    foreach ($pairs as $env) {
+        $envName = trim((string) $env);
+        if ($envName !== '' && strcasecmp($envName, 'mimir') !== 0) {
+            return $envName;
+        }
+    }
+    return null;
+}
+
+function odata_bc_environment_for_company(string $company): ?string
+{
+    $mapped = odata_bc_mapped_environment($company);
+    if ($mapped !== null) {
+        return $mapped;
+    }
+    return odata_bc_environment_from_globals();
+}
+
+function odata_bc_environment_from_url(string $url): ?string
+{
+    $parts = parse_url($url);
+    $path = is_array($parts) ? (string) ($parts['path'] ?? '') : '';
+    if (preg_match('#^/([^/]+)(?:/|$)#', $path, $match) !== 1) {
+        return null;
+    }
+    $segment = trim(rawurldecode($match[1]));
+    if ($segment === '' || strcasecmp($segment, 'mimir') === 0) {
+        return null;
+    }
+    return $segment;
+}
+
+function odata_bc_environment_from_odata_url(string $url): ?string
+{
+    $fromUrl = odata_bc_environment_from_url($url);
+    if ($fromUrl !== null) {
+        return $fromUrl;
+    }
+    if (function_exists('odata_mimir_parse_entity_url')) {
+        $parsed = odata_mimir_parse_entity_url($url);
+        if (is_array($parsed) && isset($parsed['company'])) {
+            $mapped = odata_bc_mapped_environment((string) $parsed['company']);
+            if ($mapped !== null) {
+                return $mapped;
+            }
+        }
+    }
+    return odata_bc_environment_from_globals();
+}
+
+function odata_bc_auth_for_environment(?string $env): ?array
+{
+    if ($env === null) {
+        return null;
+    }
+    $env = trim($env);
+    if ($env === '' || strcasecmp($env, 'mimir') === 0) {
+        return null;
+    }
+    $authList = $GLOBALS['auth_list'] ?? null;
+    if (!is_array($authList)) {
+        return null;
+    }
+    if (isset($authList[$env]) && odata_auth_is_usable($authList[$env])) {
+        return $authList[$env];
+    }
+    foreach ($authList as $key => $entry) {
+        if (strcasecmp((string) $key, $env) === 0 && odata_auth_is_usable($entry)) {
+            return $entry;
+        }
+    }
+    return null;
+}
+
+function odata_bc_auth_for_fallback_from_globals(array $passed): ?array
+{
     if (odata_auth_is_usable($passed)) {
         return $passed;
     }
-    global $auth, $auth_list;
-    if (isset($auth) && odata_auth_is_usable($auth)) {
+    $auth = $GLOBALS['auth'] ?? null;
+    if (odata_auth_is_usable($auth)) {
         return $auth;
     }
-    $env = odata_bc_environment();
-    if ($env !== null && isset($auth_list) && is_array($auth_list) && isset($auth_list[$env]) && odata_auth_is_usable($auth_list[$env])) {
-        return $auth_list[$env];
+    $env = odata_bc_environment_from_globals();
+    $fromEnv = odata_bc_auth_for_environment($env);
+    if ($fromEnv !== null) {
+        return $fromEnv;
     }
-    if (isset($auth_list) && is_array($auth_list)) {
-        foreach ($auth_list as $entry) {
+    $authList = $GLOBALS['auth_list'] ?? null;
+    if (is_array($authList)) {
+        foreach ($authList as $entry) {
             if (odata_auth_is_usable($entry)) {
                 return $entry;
             }
@@ -261,12 +462,36 @@ function odata_bc_auth_for_fallback(array $passed): ?array
     return null;
 }
 
-function odata_bc_credentials_configured(): bool
+function odata_bc_auth_for_fallback(array $passed): ?array
 {
-    if (odata_bc_base_url() === null || odata_bc_environment() === null) {
+    odata_ensure_bc_config_loaded();
+    return odata_bc_auth_for_fallback_from_globals($passed);
+}
+
+/**
+ * Auth van $auth_list[$env]. Pas als dat environment onbekend is: $auth / primair.
+ */
+function odata_bc_auth_for_company_env(?string $env, array $passed): ?array
+{
+    $fromEnv = odata_bc_auth_for_environment($env);
+    if ($fromEnv !== null) {
+        return $fromEnv;
+    }
+    return odata_bc_auth_for_fallback_from_globals($passed);
+}
+
+function odata_bc_credentials_configured_from_globals(): bool
+{
+    if (odata_bc_base_url_from_globals() === null || odata_bc_environment_from_globals() === null) {
         return false;
     }
-    return odata_bc_auth_for_fallback([]) !== null;
+    return odata_bc_auth_for_fallback_from_globals([]) !== null;
+}
+
+function odata_bc_credentials_configured(): bool
+{
+    odata_ensure_bc_config_loaded();
+    return odata_bc_credentials_configured_from_globals();
 }
 
 function odata_mimir_log_fallback(Throwable $exception): void
@@ -314,14 +539,15 @@ function odata_mimir_or_direct(callable $viaMimir, callable $viaDirect)
             }
             throw new Exception('Mímir eerder mislukt.');
         }
-        odata_mimir_log_fallback($original instanceof Throwable ? $original : new Exception('Mímir overgeslagen na eerdere fout.'));
         return $viaDirect();
     }
 
     try {
         return $viaMimir();
     } catch (Throwable $exception) {
-        odata_mimir_trip($exception);
+        if (!odata_mimir_exception_is_failure($exception)) {
+            throw $exception;
+        }
         if (!odata_bc_credentials_configured()) {
             throw $exception;
         }
@@ -340,7 +566,8 @@ function odata_bc_url_from_odata_url(string $url): string
     if ($host !== 'mimir.invalid') {
         return $url;
     }
-    $base = odata_bc_base_url();
+    odata_ensure_bc_config_loaded();
+    $base = odata_bc_base_url_from_globals();
     if ($base === null) {
         return $url;
     }
@@ -348,16 +575,11 @@ function odata_bc_url_from_odata_url(string $url): string
     if (preg_match('#^/([^/]+)(/.+)$#', $path, $match) !== 1) {
         return $url;
     }
-    $envInUrl = rawurldecode($match[1]);
-    $env = $envInUrl;
-    if ($env === '' || strcasecmp($env, 'mimir') === 0) {
-        $resolved = odata_bc_environment();
-        if ($resolved === null) {
-            return $url;
-        }
-        $env = $resolved;
+    $env = odata_bc_environment_from_odata_url($url);
+    if ($env === null || $env === '') {
+        return $url;
     }
-    $rebuilt = $base . $env . $match[2];
+    $rebuilt = rtrim($base, '/') . '/' . rawurlencode($env) . $match[2];
     if (isset($parts['query']) && is_string($parts['query']) && $parts['query'] !== '') {
         $rebuilt .= '?' . $parts['query'];
     }
@@ -518,6 +740,7 @@ function odata_mimir_companies_as_rows_impl(?string $environment = null): array
  */
 function odata_direct_companies_as_rows(?string $environmentFilter = null): array
 {
+    odata_ensure_bc_config_loaded();
     $environments = [];
     if ($environmentFilter !== null && trim($environmentFilter) !== '' && strcasecmp(trim($environmentFilter), 'mimir') !== 0) {
         $environments[] = trim($environmentFilter);
@@ -553,18 +776,11 @@ function odata_direct_companies_as_rows(?string $environmentFilter = null): arra
 
     $out = [];
     foreach ($environments as $env) {
-        $auth = null;
-        global $auth_list;
-        if (isset($auth_list) && is_array($auth_list) && isset($auth_list[$env]) && odata_auth_is_usable($auth_list[$env])) {
-            $auth = $auth_list[$env];
-        }
-        if ($auth === null) {
-            $auth = odata_bc_auth_for_fallback([]);
-        }
+        $auth = odata_bc_auth_for_company_env($env, []);
         if ($auth === null) {
             continue;
         }
-        $rows = odata_get_all_direct($base . $env . '/ODataV4/Company', $auth, 300);
+        $rows = odata_get_all_direct(rtrim($base, '/') . '/' . rawurlencode($env) . '/ODataV4/Company', $auth, 300);
         foreach ($rows as $row) {
             if (!is_array($row)) {
                 continue;
@@ -701,9 +917,10 @@ function odata_mimir_query_impl(string $company, string $table, array $odataQuer
  */
 function odata_direct_query(string $company, string $table, array $odataQuery, int $ttlSeconds): array
 {
-    $env = odata_bc_environment();
-    $base = odata_bc_base_url();
-    $auth = odata_bc_auth_for_fallback([]);
+    odata_ensure_bc_config_loaded();
+    $env = odata_bc_environment_for_company($company);
+    $base = odata_bc_base_url_from_globals();
+    $auth = odata_bc_auth_for_company_env($env, []);
     if ($env === null || $base === null || $auth === null) {
         $previous = odata_mimir_last_error();
         if ($previous instanceof Throwable) {
@@ -725,7 +942,7 @@ function odata_direct_query(string $company, string $table, array $odataQuery, i
         $params[$odataKey] = $value;
     }
 
-    $url = $base . $env . "/ODataV4/Company('" . rawurlencode($company) . "')/" . $table;
+    $url = rtrim($base, '/') . '/' . rawurlencode($env) . "/ODataV4/Company('" . rawurlencode($company) . "')/" . $table;
     if ($params !== []) {
         $url .= '?' . http_build_query($params, '', '&', PHP_QUERY_RFC3986);
     }
@@ -787,7 +1004,12 @@ function odata_mimir_fetch_all(string $url, int $ttlSeconds): array
     return odata_mimir_or_direct(
         $fromMimir,
         static function () use ($url, $ttlSeconds): array {
-            $auth = odata_bc_auth_for_fallback([]);
+            $directUrl = odata_bc_url_from_odata_url($url);
+            $env = odata_bc_environment_from_url($directUrl);
+            if ($env === null) {
+                $env = odata_bc_environment_from_odata_url($url);
+            }
+            $auth = odata_bc_auth_for_company_env($env, []);
             if ($auth === null) {
                 $previous = odata_mimir_last_error();
                 if ($previous instanceof Throwable) {
@@ -795,7 +1017,7 @@ function odata_mimir_fetch_all(string $url, int $ttlSeconds): array
                 }
                 throw new Exception('Mímir mislukt.');
             }
-            return odata_get_all_direct(odata_bc_url_from_odata_url($url), $auth, $ttlSeconds);
+            return odata_get_all_direct($directUrl, $auth, $ttlSeconds);
         }
     );
 }
@@ -957,11 +1179,16 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
                 return $rows;
             },
             static function () use ($url, $auth, $ttlSeconds): array {
-                $directAuth = odata_bc_auth_for_fallback($auth);
+                $directUrl = odata_bc_url_from_odata_url($url);
+                $env = odata_bc_environment_from_url($directUrl);
+                if ($env === null) {
+                    $env = odata_bc_environment_from_odata_url($url);
+                }
+                $directAuth = odata_bc_auth_for_company_env($env, $auth);
                 if ($directAuth === null) {
                     $directAuth = $auth;
                 }
-                return odata_get_all_direct(odata_bc_url_from_odata_url($url), $directAuth, $ttlSeconds);
+                return odata_get_all_direct($directUrl, $directAuth, $ttlSeconds);
             }
         );
     }
@@ -1237,20 +1464,36 @@ function odata_get_json_once(string $url, array $auth): array
 
 function build_cache_key(string $url, array $auth): string
 {
-    require_once __DIR__ . "/auth.php";
-    require_once __DIR__ . "/auth_helper.php";
-    $user = (string) ($auth['user'] ?? '');
-    $environmentSegment = '';
-    if (function_exists('auth_get_environment_key_fragment')) {
-        $environmentSegment = auth_get_environment_key_fragment();
+    odata_ensure_bc_config_loaded();
+    $helper = __DIR__ . '/auth_helper.php';
+    if (is_file($helper)) {
+        require_once $helper;
     }
-
-    if ($environmentSegment === '') {
-        $environmentValue = $GLOBALS['environment'] ?? '';
-        if (is_array($environmentValue)) {
-            $environmentSegment = implode(',', array_map('strval', $environmentValue));
-        } else {
-            $environmentSegment = trim((string) $environmentValue);
+    $user = (string) ($auth['user'] ?? '');
+    $fromUrl = odata_bc_environment_from_url($url);
+    if ($fromUrl !== null) {
+        $environmentSegment = $fromUrl;
+    } else {
+        $environmentSegment = '';
+        if (function_exists('auth_get_environment_key_fragment')) {
+            $environmentSegment = auth_get_environment_key_fragment();
+        }
+        if ($environmentSegment === '') {
+            $environmentValue = $GLOBALS['environment'] ?? '';
+            if (is_array($environmentValue)) {
+                $environmentSegment = implode(',', array_map('strval', $environmentValue));
+            } else {
+                $environmentSegment = trim((string) $environmentValue);
+            }
+        }
+        $placeholder = $environmentSegment === ''
+            || strcasecmp($environmentSegment, 'mimir') === 0
+            || stripos($environmentSegment, 'mimir.invalid') !== false;
+        if ($placeholder) {
+            $resolved = odata_bc_environment_from_globals();
+            if ($resolved !== null) {
+                $environmentSegment = $resolved;
+            }
         }
     }
 
