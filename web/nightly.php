@@ -50,6 +50,8 @@ function demeter_nightly_exit(int $code): void
 
 define('DEMETER_SKIP_LOGINCHECK_AUTO', true);
 
+// auth.php levert $mimirApi én de BC-credentials ($baseUrl, $auth, $auth_list, $environment).
+// Die BC-gegevens blijven nodig: nightly/CLI valt daarop terug als Mímir uitvalt.
 require __DIR__ . '/auth.php';
 
 if (PHP_SAPI !== 'cli') {

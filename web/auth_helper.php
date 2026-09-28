@@ -51,6 +51,21 @@ function auth_mimir_enabled(): bool
 }
 
 /**
+ * Mímir is geconfigureerd én in dit proces nog niet uitgevallen.
+ * Na de circuit-breaker geldt weer het directe BC-pad.
+ */
+function auth_mimir_transport_active(): bool
+{
+    if (!auth_mimir_enabled()) {
+        return false;
+    }
+    if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open()) {
+        return false;
+    }
+    return true;
+}
+
+/**
  * Geeft de actieve environments terug op basis van config.
  */
 function auth_get_active_environments(): array
@@ -78,8 +93,9 @@ function auth_get_active_environments(): array
         return $configured;
     }
 
-    // Geen lokale BC-config: bij Mímir environments afleiden uit companies.php.
-    if (auth_mimir_enabled()) {
+    // Geen lokale BC-config: bij Mímir environments afleiden uit companies.php
+    // (die functie valt zelf terug op directe BC OData als Mímir faalt).
+    if (auth_mimir_transport_active()) {
         $cached = $GLOBALS['demeter_active_environments'] ?? null;
         if (is_array($cached) && $cached !== []) {
             return array_values(array_map('strval', $cached));
@@ -128,9 +144,24 @@ function auth_get_auth_for_environment(string $environment): array
     $environmentKey = trim($environment);
     $list = is_array($auth_list ?? null) ? $auth_list : [];
 
-    if ($environmentKey === '') {
-        if (auth_mimir_enabled()) {
+    if ($environmentKey === '' || strcasecmp($environmentKey, 'mimir') === 0) {
+        if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open() && function_exists('odata_bc_environment')) {
+            $bcEnv = odata_bc_environment();
+            if (is_string($bcEnv) && $bcEnv !== '') {
+                $environmentKey = $bcEnv;
+            }
+        }
+    }
+
+    if ($environmentKey === '' || strcasecmp($environmentKey, 'mimir') === 0) {
+        if (auth_mimir_transport_active()) {
             return [];
+        }
+        if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open() && function_exists('odata_mimir_last_error')) {
+            $previous = odata_mimir_last_error();
+            if ($previous instanceof Throwable && (!function_exists('odata_bc_credentials_configured') || !odata_bc_credentials_configured())) {
+                throw $previous;
+            }
         }
         throw new RuntimeException('Environment ontbreekt in auth-configuratie.');
     }
@@ -138,8 +169,15 @@ function auth_get_auth_for_environment(string $environment): array
     $auth = $list[$environmentKey] ?? null;
     if (!is_array($auth)) {
         // Mímir-modus zonder BC-auth: leftover callers krijgen lege auth i.p.v. exception.
-        if (auth_mimir_enabled()) {
+        // Na een Mímir-storing wel de echte BC-auth, of de oorspronkelijke fout als die ontbreekt.
+        if (auth_mimir_transport_active()) {
             return [];
+        }
+        if (function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open() && function_exists('odata_mimir_last_error')) {
+            $previous = odata_mimir_last_error();
+            if ($previous instanceof Throwable && (!function_exists('odata_bc_credentials_configured') || !odata_bc_credentials_configured())) {
+                throw $previous;
+            }
         }
         throw new RuntimeException('Geen auth-configuratie gevonden voor environment: ' . $environmentKey);
     }
@@ -404,8 +442,10 @@ function auth_discover_companies_via_mimir(): array
  */
 function auth_discover_companies_across_active_environments(int $ttlSeconds = 300): array
 {
-    // Mímir: companies + environments uit Mímir API — geen $auth_list/$baseUrl nodig.
-    if (auth_mimir_enabled()) {
+    // Mímir: companies + environments uit Mímir API.
+    // Bij een storing (of een al open circuit) geldt het pre-Mímir pad hieronder,
+    // dat $auth_list/$baseUrl uit auth.php gebruikt.
+    if (auth_mimir_transport_active()) {
         return auth_discover_companies_via_mimir();
     }
 
@@ -566,7 +606,7 @@ function auth_set_current_company_context(?string $company, int $ttlSeconds = 30
 
     $companyName = trim((string) $company);
 
-    if (auth_mimir_enabled()) {
+    if (auth_mimir_transport_active()) {
         $targetEnvironment = '';
         if ($companyName !== '') {
             try {

@@ -139,6 +139,7 @@ register_shutdown_function(function () {
     );
 });
 
+// auth.php: $mimirApi én BC-credentials ($baseUrl, $auth, $auth_list, $environment) voor de directe fallback.
 require __DIR__ . "/auth.php";
 require_once __DIR__ . "/auth_helper.php";
 require_once __DIR__ . "/logincheck.php";

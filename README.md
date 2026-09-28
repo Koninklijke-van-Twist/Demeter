@@ -21,7 +21,7 @@ $mimirApi  = 'mimir_…';
 $mimirBase = 'https://sleutels.kvt.nl/mimir/api';
 ```
 
-Met `$mimirApi` gezet zijn `$auth_list`, `$environment`, `$baseUrl` en `$auth` ongebruikt voor Business Central — company-discovery en alle OData-fetches (`odata_get_all` / `ProjectFinanceService` / `bc_fetch/*` / nightly) lopen via Mímir. Zonder `$mimirApi` blijft het bestaande directe BC-pad ongewijzigd.
+Met `$mimirApi` gezet proberen company-discovery en alle OData-fetches (`odata_get_all` / `ProjectFinanceService` / `bc_fetch/*` / nightly, zowel web als CLI) eerst Mímir. Faalt die aanroep (verbinding/timeout, non-2xx, ongeldige JSON of een Mímir-foutpayload), dan haalt Demeter dezelfde data op via het directe Business Central-pad van vóór de Mímir-migratie (`$baseUrl`, `$auth` / `$auth_list`, `$environment`, lokale odata-filecache) en slaat Mímir voor de rest van dat PHP-proces over. Laat die BC-gegevens in `auth.php` naast `$mimirApi` staan; ontbreken ze, dan komt de oorspronkelijke Mímir-fout terug. Zonder `$mimirApi` blijft het bestaande directe BC-pad ongewijzigd.
 
 **max_age-beleid**
 
@@ -35,4 +35,4 @@ Tim moet `$mimirApi` (en optioneel `$mimirBase`) lokaal/op de server zetten; `au
 
 ## auth.php
 
-Geen `auth.php` in deze repository (staat in `.gitignore`). Lokaal/op de server de Mímir-sleutel zetten zoals hierboven; legacy BC-credentials alleen nodig zonder `$mimirApi`.
+Geen `auth.php` in deze repository (staat in `.gitignore`). Lokaal/op de server `$mimirApi` (en optioneel `$mimirBase`) én de Business Central-credentials (`$baseUrl`, `$auth`, `$auth_list`, `$environment`) naast elkaar zetten. Die BC-credentials zijn de automatische fallback als Mímir uitvalt, ook voor `nightly.php` en andere CLI/cron-scripts.
