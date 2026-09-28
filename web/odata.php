@@ -437,14 +437,27 @@ function odata_bc_auth_for_environment(?string $env): ?array
     return null;
 }
 
-function odata_bc_auth_for_fallback_from_globals(array $passed): ?array
+/**
+ * Meegegeven credentials, anders $auth (of de kopie die Mímir-context bewaard heeft).
+ */
+function odata_bc_passed_or_stored_auth(array $passed): ?array
 {
     if (odata_auth_is_usable($passed)) {
         return $passed;
     }
     $auth = $GLOBALS['auth'] ?? null;
-    if (odata_auth_is_usable($auth)) {
-        return $auth;
+    if (!odata_auth_is_usable($auth)) {
+        // auth_set_current_company_context kan $auth legen; require_once haalt auth.php niet terug.
+        $auth = $GLOBALS['demeter_bc_auth_preserved'] ?? null;
+    }
+    return odata_auth_is_usable($auth) ? $auth : null;
+}
+
+function odata_bc_auth_for_fallback_from_globals(array $passed): ?array
+{
+    $stored = odata_bc_passed_or_stored_auth($passed);
+    if ($stored !== null) {
+        return $stored;
     }
     $env = odata_bc_environment_from_globals();
     $fromEnv = odata_bc_auth_for_environment($env);
@@ -469,8 +482,83 @@ function odata_bc_auth_for_fallback(array $passed): ?array
 }
 
 /**
- * Auth van $auth_list[$env]. Pas als het bedrijf onbekend is: $auth / primair.
- * Wijst het bedrijf wel naar dit environment, maar ontbreken die credentials, dan geen terugval.
+ * $auth_list telt als gevuld zodra er één bruikbare entry in staat.
+ */
+function odata_bc_auth_list_is_populated(): bool
+{
+    $authList = $GLOBALS['auth_list'] ?? null;
+    if (!is_array($authList) || $authList === []) {
+        return false;
+    }
+    foreach ($authList as $entry) {
+        if (odata_auth_is_usable($entry)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Primaire environment uit $environment (niet de eerste $auth_list-sleutel).
+ */
+function odata_bc_primary_environment_name(): ?string
+{
+    $environment = $GLOBALS['environment'] ?? null;
+    $candidates = [];
+    if (is_array($environment)) {
+        foreach ($environment as $item) {
+            $candidates[] = trim((string) $item);
+        }
+    } elseif (is_string($environment)) {
+        $candidates[] = trim($environment);
+    }
+    foreach ($candidates as $env) {
+        if ($env !== '' && strcasecmp($env, 'mimir') !== 0) {
+            return $env;
+        }
+    }
+    return null;
+}
+
+/**
+ * Zonder bruikbare $auth_list, of als $env de primaire $environment is: $auth mag.
+ * Een ander environment terwijl de lijst wél gevuld is, mag niet op $auth terugvallen.
+ */
+function odata_bc_env_may_use_primary_auth(?string $env): bool
+{
+    if (!odata_bc_auth_list_is_populated()) {
+        return true;
+    }
+    $primary = odata_bc_primary_environment_name();
+    if ($primary === null || $env === null) {
+        return false;
+    }
+    $env = trim($env);
+    if ($env === '' || strcasecmp($env, 'mimir') === 0) {
+        return false;
+    }
+    return strcasecmp($primary, $env) === 0;
+}
+
+/**
+ * Bewaart bruikbare BC-credentials voordat Mímir-context $auth leegmaakt.
+ */
+function odata_bc_preserve_auth_for_fallback($auth): void
+{
+    if (!odata_auth_is_usable($auth)) {
+        return;
+    }
+    $preserved = $GLOBALS['demeter_bc_auth_preserved'] ?? null;
+    if (odata_auth_is_usable($preserved)) {
+        return;
+    }
+    $GLOBALS['demeter_bc_auth_preserved'] = $auth;
+}
+
+/**
+ * Auth van $auth_list[$env]. Zonder entry: $auth als de lijst leeg is of dit de
+ * primaire environment is. Een ander environment met gevulde lijst én een bedrijf
+ * dat daarnaar wijst, valt niet terug.
  */
 function odata_bc_auth_for_company_env(?string $env, array $passed, ?string $company = null): ?array
 {
@@ -478,9 +566,12 @@ function odata_bc_auth_for_company_env(?string $env, array $passed, ?string $com
     if ($fromEnv !== null) {
         return $fromEnv;
     }
-    if ($company !== null) {
+    if (odata_bc_env_may_use_primary_auth($env)) {
+        return odata_bc_passed_or_stored_auth($passed);
+    }
+    if ($company !== null && $env !== null) {
         $mapped = odata_bc_mapped_environment($company);
-        if ($mapped !== null && $env !== null && strcasecmp($mapped, $env) === 0) {
+        if ($mapped !== null && strcasecmp($mapped, trim($env)) === 0) {
             return null;
         }
     }
@@ -522,6 +613,10 @@ function odata_mimir_log_fallback(Throwable $exception): void
     global $auth, $auth_list;
     if (isset($auth) && is_array($auth) && isset($auth['pass']) && is_string($auth['pass']) && $auth['pass'] !== '') {
         $redactions[] = $auth['pass'];
+    }
+    $preservedAuth = $GLOBALS['demeter_bc_auth_preserved'] ?? null;
+    if (is_array($preservedAuth) && isset($preservedAuth['pass']) && is_string($preservedAuth['pass']) && $preservedAuth['pass'] !== '') {
+        $redactions[] = $preservedAuth['pass'];
     }
     if (isset($auth_list) && is_array($auth_list)) {
         foreach ($auth_list as $entry) {
