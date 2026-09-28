@@ -253,6 +253,72 @@ if (strpos($sandboxLog, 'sandbox-secret') !== false || strpos($sandboxLog, 'bc-s
     fail('log bevat een geheim van een tweede environment');
 }
 
+$auth_list = [
+    'Production' => ['mode' => 'basic', 'user' => 'bcuser', 'pass' => 'bc-secret'],
+];
+$auth = $auth_list['Production'];
+odata_mimir_circuit_reset();
+$callsBeforeMissingSandbox = count($calls);
+$missingSandbox = null;
+try {
+    odata_mimir_query('Hunter van Twist', 'AppResource', ['$select' => 'No'], 30);
+    fail('bekend Sandbox-bedrijf zonder Sandbox-credentials mag niet op Production terugvallen');
+} catch (Throwable $exception) {
+    $missingSandbox = $exception;
+}
+if (!$missingSandbox instanceof Throwable || strpos($missingSandbox->getMessage(), 'Mímir') === false) {
+    $detail = $missingSandbox instanceof Throwable ? $missingSandbox->getMessage() : 'geen exception';
+    fail('ontbrekende Sandbox-credentials gaven niet de Mímir-fout terug: ' . $detail);
+}
+if (count($calls) !== $callsBeforeMissingSandbox) {
+    fail('bekend bedrijf zonder environment-credentials startte toch een directe fetch: ' . json_encode(array_slice($calls, $callsBeforeMissingSandbox)));
+}
+if (!odata_mimir_circuit_open()) {
+    fail('Mímir-fout moet het circuit openen ook als de environment-credentials ontbreken');
+}
+
+$callsBeforeMissingGet = count($calls);
+$missingGet = null;
+try {
+    odata_get_all(
+        "https://mimir.invalid/Sandbox/ODataV4/Company('Hunter%20van%20Twist')/AppWerkorders?\$select=No",
+        $auth,
+        12
+    );
+    fail('URL met Sandbox-segment mag doorgegeven Production-auth niet gebruiken als Sandbox ontbreekt');
+} catch (Throwable $exception) {
+    $missingGet = $exception;
+}
+if (!$missingGet instanceof Throwable || count($calls) !== $callsBeforeMissingGet) {
+    fail('odata_get_all viel terug op de doorgegeven auth: ' . json_encode(array_slice($calls, $callsBeforeMissingGet)));
+}
+
+$callsBeforeOtherEnv = count($calls);
+$otherRows = odata_get_all(
+    "https://mimir.invalid/Other/ODataV4/Company('Hunter%20van%20Twist')/AppWerkorders?\$select=No",
+    $auth,
+    12
+);
+$otherCall = $calls[$callsBeforeOtherEnv] ?? null;
+$expectedOtherUrl = "https://bc.example:7148/Other/ODataV4/Company('Hunter%20van%20Twist')/AppWerkorders?\$select=No";
+if (($otherRows[0]['No'] ?? '') !== 'WO-1' || !is_array($otherCall) || $otherCall['url'] !== $expectedOtherUrl || $otherCall['user'] !== 'bcuser') {
+    fail('expliciet environment-segment zonder eigen credentials moet terugvallen: ' . json_encode($otherCall));
+}
+
+odata_mimir_circuit_reset();
+$beforeUnknown = count($calls);
+$unknownRows = odata_mimir_query('Onbekend Bedrijf', 'AppResource', ['$select' => 'No'], 30);
+$unknownCall = $calls[$beforeUnknown] ?? null;
+if (($unknownRows[0]['No'] ?? '') !== 'WO-1' || !is_array($unknownCall) || ($unknownCall['user'] ?? '') !== 'bcuser' || strpos((string) ($unknownCall['url'] ?? ''), '/Production/') === false) {
+    fail('onbekend bedrijf moet op de primaire environment terugvallen: ' . json_encode($unknownCall));
+}
+
+$auth_list = [
+    'Production' => ['mode' => 'basic', 'user' => 'bcuser', 'pass' => 'bc-secret'],
+    'Sandbox' => $sandboxAuth,
+];
+$auth = $auth_list['Production'];
+
 unset($GLOBALS['demeter_company_environment_map']);
 
 odata_mimir_circuit_reset();
