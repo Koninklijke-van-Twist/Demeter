@@ -47,28 +47,56 @@ function company_entity_url_with_query(string $baseUrl, mixed $environment, stri
         $resolvedEnvironment = trim((string) $environment);
     }
 
-    if (function_exists('auth_get_environment_for_company')) {
-        try {
-            $resolvedEnvironment = auth_get_environment_for_company($company);
-        } catch (Throwable $error) {
-            // Laat bestaande environment-parameter staan als fallback.
-        }
-    }
+    $circuitOpen = function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open();
+    $mimirHealthy = function_exists('odata_mimir_enabled') && odata_mimir_enabled() && !$circuitOpen;
 
-    $mimirOn = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
-    if ($resolvedEnvironment === '') {
-        if ($mimirOn) {
-            $resolvedEnvironment = 'mimir';
-        } else {
-            throw new RuntimeException('Geen environment beschikbaar voor company_entity_url_with_query.');
+    // Zolang Mímir gezond is, geen company-discovery (die zou Mímir al aanroepen).
+    // Na een storing: sentinel 'mimir' vervangen door de BC-environment uit auth.php.
+    if (!$mimirHealthy && ($resolvedEnvironment === '' || strcasecmp($resolvedEnvironment, 'mimir') === 0)) {
+        $bcEnv = function_exists('odata_bc_environment') ? odata_bc_environment() : null;
+        if (is_string($bcEnv) && $bcEnv !== '') {
+            $resolvedEnvironment = $bcEnv;
+        } elseif (function_exists('auth_get_environment_for_company')) {
+            try {
+                $fromCompany = auth_get_environment_for_company($company);
+                if (is_string($fromCompany) && trim($fromCompany) !== '' && strcasecmp($fromCompany, 'mimir') !== 0) {
+                    $resolvedEnvironment = $fromCompany;
+                }
+            } catch (Throwable $error) {
+                // Laat bestaande environment-parameter staan als fallback.
+            }
         }
     }
 
     $resolvedBaseUrl = trim($baseUrl);
-    if ($resolvedBaseUrl === '') {
-        if ($mimirOn) {
-            $resolvedBaseUrl = 'https://mimir.invalid/';
-        } else {
+    if ($mimirHealthy) {
+        if ($resolvedEnvironment === '') {
+            $resolvedEnvironment = 'mimir';
+        }
+        $resolvedBaseUrl = 'https://mimir.invalid/';
+    } else {
+        if ($resolvedBaseUrl === '' || stripos($resolvedBaseUrl, 'mimir.invalid') !== false) {
+            $bcBase = function_exists('odata_bc_base_url') ? odata_bc_base_url() : null;
+            $resolvedBaseUrl = is_string($bcBase) ? $bcBase : '';
+        }
+        if ($resolvedEnvironment === '' || strcasecmp($resolvedEnvironment, 'mimir') === 0) {
+            $bcEnv = function_exists('odata_bc_environment') ? odata_bc_environment() : null;
+            if (is_string($bcEnv) && $bcEnv !== '') {
+                $resolvedEnvironment = $bcEnv;
+            }
+        }
+        if ($resolvedEnvironment === '' || $resolvedBaseUrl === '') {
+            $mimirWasOn = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
+            $bcReady = function_exists('odata_bc_credentials_configured') && odata_bc_credentials_configured();
+            if ($mimirWasOn && !$bcReady && function_exists('odata_mimir_last_error')) {
+                $previous = odata_mimir_last_error();
+                if ($previous instanceof Throwable) {
+                    throw $previous;
+                }
+            }
+            if ($resolvedEnvironment === '') {
+                throw new RuntimeException('Geen environment beschikbaar voor company_entity_url_with_query.');
+            }
             throw new RuntimeException('baseUrl ontbreekt voor company_entity_url_with_query.');
         }
     }

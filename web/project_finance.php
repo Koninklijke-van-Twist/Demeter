@@ -892,33 +892,67 @@ class ProjectFinanceService
         }
 
         $mimirOn = function_exists('odata_mimir_enabled') && odata_mimir_enabled();
+        $circuitOpen = function_exists('odata_mimir_circuit_open') && odata_mimir_circuit_open();
+        $bcReady = $circuitOpen && function_exists('odata_bc_credentials_configured') && odata_bc_credentials_configured();
 
-        if (!isset($baseUrl) || !is_string($baseUrl) || trim($baseUrl) === '') {
-            if ($mimirOn) {
-                $baseUrl = 'https://mimir.invalid/';
+        $contextBase = trim((string) ($baseUrl ?? ''));
+        if ($bcReady) {
+            $bcBase = odata_bc_base_url();
+            $bcEnv = odata_bc_environment();
+            $bcAuth = odata_bc_auth_for_fallback(is_array($resolvedAuth) ? $resolvedAuth : []);
+            if (is_string($bcBase) && ($contextBase === '' || stripos($contextBase, 'mimir.invalid') !== false)) {
+                $contextBase = $bcBase;
+                if (!isset($baseUrl) || !is_string($baseUrl) || trim($baseUrl) === '' || stripos($baseUrl, 'mimir.invalid') !== false) {
+                    $baseUrl = $bcBase;
+                }
+            }
+            if (($resolvedEnvironment === '' || strcasecmp($resolvedEnvironment, 'mimir') === 0) && is_string($bcEnv) && $bcEnv !== '') {
+                $resolvedEnvironment = $bcEnv;
+            }
+            if (is_array($bcAuth) && (!is_array($resolvedAuth) || $resolvedAuth === [] || (function_exists('odata_auth_is_usable') && !odata_auth_is_usable($resolvedAuth)))) {
+                $resolvedAuth = $bcAuth;
+            }
+        } elseif ($mimirOn && !$circuitOpen) {
+            // Synthetische host zolang Mímir gezond is. De globale BC-base blijft intact voor de fallback.
+            $contextBase = 'https://mimir.invalid/';
+            if ($resolvedEnvironment === '') {
+                $resolvedEnvironment = 'mimir';
+            }
+        }
+
+        // Lege context is OK zolang Mímir de credentials heeft, of Mímir al stuk is én BC niet geconfigureerd
+        // (dan gooit de fetch de oorspronkelijke Mímir-fout). Een gezonde directe BC-setup blijft verplicht.
+        $allowIncomplete = ($mimirOn && !$circuitOpen) || ($mimirOn && $circuitOpen && !$bcReady);
+
+        if ($contextBase === '' || stripos($contextBase, 'mimir.invalid') !== false) {
+            if ($allowIncomplete) {
+                if ($contextBase === '') {
+                    $contextBase = 'https://mimir.invalid/';
+                }
             } else {
                 throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
             }
         }
 
         if ($resolvedEnvironment === '') {
-            if ($mimirOn) {
+            if ($allowIncomplete) {
                 $resolvedEnvironment = 'mimir';
             } else {
                 throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
             }
         }
 
-        // Mímir-modus: lege auth is OK (credentials zitten in Mímir).
-        if (!$mimirOn && (!is_array($resolvedAuth) || $resolvedAuth === [])) {
-            throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
-        }
-        if (!is_array($resolvedAuth)) {
-            $resolvedAuth = [];
+        if (!is_array($resolvedAuth) || $resolvedAuth === [] || (function_exists('odata_auth_is_usable') && !odata_auth_is_usable($resolvedAuth))) {
+            if (!$allowIncomplete) {
+                throw new RuntimeException('OData context ontbreekt. Zorg dat auth.php geladen is.');
+            }
+            if (!is_array($resolvedAuth)) {
+                $resolvedAuth = [];
+            }
         }
 
         return [
-            'base_url' => (string) $baseUrl,
+            'base_url' => $contextBase,
             'environment' => $resolvedEnvironment,
             'auth' => $resolvedAuth,
         ];
