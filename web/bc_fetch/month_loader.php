@@ -918,6 +918,12 @@ function bc_fetch_execute_workorder_date_range_load(
     $workorders = bc_fetch_dedupe_workorders_by_identity(
         bc_fetch_merge_workorder_rows($workorders, $importSapWorkorderRows)
     );
+    $workorders = bc_fetch_enrich_workorder_rows_with_component_descriptions(
+        $company,
+        $workorders,
+        $auth,
+        $ttl
+    );
 
     $cacheState = bc_fetch_build_workorder_state_cache(
         $workorders,

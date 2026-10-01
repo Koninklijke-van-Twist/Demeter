@@ -8,7 +8,8 @@
 
 require_once __DIR__ . '/cost_center.php';
 
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 7;
+/** v8: Component_Description is de component-Description, niet Sub_Entity_Description (equipmentsoort). */
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 8;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */

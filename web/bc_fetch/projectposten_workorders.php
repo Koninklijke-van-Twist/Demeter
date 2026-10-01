@@ -116,7 +116,7 @@ function bc_fetch_workorders_by_start_date_range(
         if (!is_array($row)) {
             continue;
         }
-        $result[] = bc_fetch_apply_sub_entity_component_description($row);
+        $result[] = $row;
     }
 
     return $result;
@@ -159,7 +159,6 @@ function bc_fetch_workorders_by_numbers(string $company, array $numbers, array $
             if (!is_array($row)) {
                 continue;
             }
-            $row = bc_fetch_apply_sub_entity_component_description($row);
             $rowKey = bc_fetch_werkorder_row_key($row);
             if (isset($seenRowKeys[$rowKey])) {
                 continue;
@@ -477,13 +476,147 @@ function bc_fetch_build_odata_single_pair_filter(string $jobNo, string $jobTaskN
 }
 
 /**
- * Zet Component_Description op basis van Sub_Entity_Description (AppWerkorders niet nodig).
+ * Component_Description uit AppWerkorders-koppeling (rij-key, anders Job_Task_No).
+ *
+ * @param array<string, string> $byRowKey
+ * @param array<string, string> $byTaskNo
  */
-function bc_fetch_apply_sub_entity_component_description(array $row): array
+function bc_fetch_component_description_from_maps(array $row, array $byRowKey, array $byTaskNo): string
 {
-    $row['Component_Description'] = trim((string) ($row['Sub_Entity_Description'] ?? ''));
+    $rowKey = bc_fetch_werkorder_row_key($row);
+    if ($rowKey !== '|||' && isset($byRowKey[$rowKey]) && $byRowKey[$rowKey] !== '') {
+        return $byRowKey[$rowKey];
+    }
+
+    $taskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+    if ($taskNo !== '' && isset($byTaskNo[$taskNo]) && $byTaskNo[$taskNo] !== '') {
+        return $byTaskNo[$taskNo];
+    }
+
+    return '';
+}
+
+/**
+ * Zet Component_Description op de Description van het component.
+ * Een kopie van de equipmentsoort (Sub_Entity_Description) telt niet als component-Description.
+ */
+function bc_fetch_resolve_component_description(array $row, string $componentDescription): array
+{
+    $componentDescription = trim($componentDescription);
+    if ($componentDescription !== '') {
+        $row['Component_Description'] = $componentDescription;
+
+        return $row;
+    }
+
+    $existing = trim((string) ($row['Component_Description'] ?? ''));
+    $equipmentKind = trim((string) ($row['Sub_Entity_Description'] ?? ''));
+    if ($equipmentKind !== '' && $existing === $equipmentKind) {
+        $row['Component_Description'] = '';
+    }
 
     return $row;
+}
+
+/**
+ * @param list<array> $rows
+ * @param array<string, string> $byRowKey
+ * @param array<string, string> $byTaskNo
+ * @return list<array>
+ */
+function bc_fetch_apply_component_descriptions(array $rows, array $byRowKey, array $byTaskNo): array
+{
+    $updated = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $updated[] = bc_fetch_resolve_component_description(
+            $row,
+            bc_fetch_component_description_from_maps($row, $byRowKey, $byTaskNo)
+        );
+    }
+
+    return $updated;
+}
+
+/**
+ * @param list<string> $jobNos
+ * @return array{by_row_key: array<string, string>, by_task_no: array<string, string>}
+ */
+function bc_fetch_fetch_app_component_description_maps(string $company, array $jobNos, array $auth, int $ttl): array
+{
+    $componentDescriptionByRowKey = [];
+    $componentDescriptionByTaskNo = [];
+    $appSelect = bc_fetch_app_werkorders_select();
+
+    foreach (bc_fetch_chunk_string_values($jobNos, DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
+        $filter = bc_fetch_build_odata_or_equals_filter('Job_No', $jobNoChunk);
+        $appWorkordersUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'AppWerkorders', [
+            '$select' => $appSelect,
+            '$filter' => $filter,
+        ]);
+        $appWorkorderRows = odata_get_all($appWorkordersUrl, $auth, $ttl);
+
+        foreach ($appWorkorderRows as $appWorkorderRow) {
+            if (!is_array($appWorkorderRow)) {
+                continue;
+            }
+
+            $componentDescription = trim((string) ($appWorkorderRow['Component_Description'] ?? ''));
+            if ($componentDescription === '') {
+                continue;
+            }
+
+            $rowKey = bc_fetch_werkorder_row_key($appWorkorderRow);
+            if ($rowKey !== '|||') {
+                $componentDescriptionByRowKey[$rowKey] = $componentDescription;
+            }
+
+            $taskNo = trim((string) ($appWorkorderRow['Job_Task_No'] ?? ''));
+            if ($taskNo !== '' && !isset($componentDescriptionByTaskNo[$taskNo])) {
+                $componentDescriptionByTaskNo[$taskNo] = $componentDescription;
+            }
+        }
+    }
+
+    return [
+        'by_row_key' => $componentDescriptionByRowKey,
+        'by_task_no' => $componentDescriptionByTaskNo,
+    ];
+}
+
+/**
+ * Vult Component_Description vanuit AppWerkorders.
+ * Sub_Entity_Description (equipmentsoort) blijft op de rij voor Equipment_Name.
+ *
+ * @param list<array> $rows
+ * @return list<array>
+ */
+function bc_fetch_enrich_workorder_rows_with_component_descriptions(string $company, array $rows, array $auth, int $ttl): array
+{
+    $jobNos = [];
+    foreach ($rows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+
+        $jobNo = trim((string) ($row['Job_No'] ?? ''));
+        if ($jobNo !== '') {
+            $jobNos[$jobNo] = $jobNo;
+        }
+    }
+
+    $byRowKey = [];
+    $byTaskNo = [];
+    if ($jobNos !== []) {
+        $maps = bc_fetch_fetch_app_component_description_maps($company, array_values($jobNos), $auth, $ttl);
+        $byRowKey = $maps['by_row_key'];
+        $byTaskNo = $maps['by_task_no'];
+    }
+
+    return bc_fetch_apply_component_descriptions($rows, $byRowKey, $byTaskNo);
 }
 
 /**
@@ -515,7 +648,7 @@ function bc_fetch_collect_matching_werkorder_rows(
         }
 
         $seenRowKeys[$rowKey] = true;
-        $allRows[] = bc_fetch_apply_sub_entity_component_description($row);
+        $allRows[] = $row;
     }
 }
 
