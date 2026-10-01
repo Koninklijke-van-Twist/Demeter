@@ -6,6 +6,9 @@
 
 /**
  * Werkorders voor lijstweergave, cache en finance-koppeling.
+ *
+ * Sub_Entity_Description is de equipmentsoort. De component-Description komt
+ * van AppWerkorders.Component_Description, niet van dit veld.
  */
 function bc_fetch_werkorders_list_select(): string
 {
@@ -71,7 +74,7 @@ function bc_fetch_werkorders_status_select(): string
 }
 
 /**
- * AppWerkorders voor Component_Description-koppeling.
+ * AppWerkorders: Component_Description is de Description van het component.
  */
 function bc_fetch_app_werkorders_select(): string
 {
