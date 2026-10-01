@@ -72,7 +72,7 @@ $applied = bc_fetch_apply_component_descriptions([
 ], [
     $rowKey => $componentDescription,
 ], [
-    'T-9' => 'Branderdek',
+    demeter_workorder_pair_key('P-1', 'T-9') => 'Branderdek',
 ]);
 
 if (($applied[0]['Component_Description'] ?? '') !== $componentDescription) {
@@ -82,7 +82,7 @@ if (($applied[0]['Sub_Entity_Description'] ?? '') !== $equipmentKind) {
     fail('rij-key match mag Sub_Entity_Description niet overschrijven');
 }
 if (($applied[1]['Component_Description'] ?? '') !== 'Branderdek') {
-    fail('Job_Task_No-fallback moet de component-Description gebruiken');
+    fail('job+taak-fallback moet de component-Description gebruiken');
 }
 if (($applied[1]['Sub_Entity_Description'] ?? '') !== 'Ketel') {
     fail('task-fallback mag de equipmentsoort niet vervangen');
@@ -131,6 +131,60 @@ if (($uiFromKindOnly['Equipment_Name'] ?? '') !== $equipmentKind) {
 $select = bc_fetch_app_werkorders_select();
 if (strpos($select, 'Component_Description') === false) {
     fail('AppWerkorders-select moet Component_Description bevatten');
+}
+
+$GLOBALS['baseUrl'] = 'https://bc.example:7148/';
+$GLOBALS['environment'] = 'Production';
+
+function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
+{
+    if (strpos($url, 'AppWerkorders') === false) {
+        fail('onverwachte OData-call: ' . $url);
+    }
+
+    return [
+        [
+            'No' => 'APP-A',
+            'Job_No' => 'JOB-A',
+            'Job_Task_No' => '100',
+            'Start_Date' => '2026-01-01',
+            'Component_Description' => 'Desc A',
+        ],
+        [
+            'No' => 'APP-B',
+            'Job_No' => 'JOB-B',
+            'Job_Task_No' => '100',
+            'Start_Date' => '2026-01-02',
+            'Component_Description' => 'Desc B',
+        ],
+    ];
+}
+
+$sharedTaskRows = bc_fetch_enrich_workorder_rows_with_component_descriptions('KVT Gas', [
+    [
+        'No' => 'WO-A',
+        'Job_No' => 'JOB-A',
+        'Job_Task_No' => '100',
+        'Start_Date' => '2026-02-01',
+        'Sub_Entity_Description' => 'Soort A',
+    ],
+    [
+        'No' => 'WO-B',
+        'Job_No' => 'JOB-B',
+        'Job_Task_No' => '100',
+        'Start_Date' => '2026-02-02',
+        'Sub_Entity_Description' => 'Soort B',
+    ],
+], ['mode' => 'basic', 'user' => '', 'pass' => ''], 30);
+
+if (($sharedTaskRows[0]['Component_Description'] ?? '') !== 'Desc A') {
+    fail('job A mag niet de component-Description van job B krijgen bij gedeeld taaknummer');
+}
+if (($sharedTaskRows[1]['Component_Description'] ?? '') !== 'Desc B') {
+    fail('job B mag niet de component-Description van job A krijgen bij gedeeld taaknummer');
+}
+if (($sharedTaskRows[0]['Sub_Entity_Description'] ?? '') !== 'Soort A' || ($sharedTaskRows[1]['Sub_Entity_Description'] ?? '') !== 'Soort B') {
+    fail('equipmentsoort moet per job blijven staan');
 }
 
 fwrite(STDOUT, "OK\n");

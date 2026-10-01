@@ -476,21 +476,25 @@ function bc_fetch_build_odata_single_pair_filter(string $jobNo, string $jobTaskN
 }
 
 /**
- * Component_Description uit AppWerkorders-koppeling (rij-key, anders Job_Task_No).
+ * Component_Description uit AppWerkorders-koppeling (rij-key, anders job + taak).
  *
  * @param array<string, string> $byRowKey
- * @param array<string, string> $byTaskNo
+ * @param array<string, string> $byPairKey
  */
-function bc_fetch_component_description_from_maps(array $row, array $byRowKey, array $byTaskNo): string
+function bc_fetch_component_description_from_maps(array $row, array $byRowKey, array $byPairKey): string
 {
     $rowKey = bc_fetch_werkorder_row_key($row);
     if ($rowKey !== '|||' && isset($byRowKey[$rowKey]) && $byRowKey[$rowKey] !== '') {
         return $byRowKey[$rowKey];
     }
 
+    $jobNo = trim((string) ($row['Job_No'] ?? ''));
     $taskNo = trim((string) ($row['Job_Task_No'] ?? ''));
-    if ($taskNo !== '' && isset($byTaskNo[$taskNo]) && $byTaskNo[$taskNo] !== '') {
-        return $byTaskNo[$taskNo];
+    if ($jobNo !== '' && $taskNo !== '') {
+        $pairKey = demeter_workorder_pair_key($jobNo, $taskNo);
+        if (isset($byPairKey[$pairKey]) && $byPairKey[$pairKey] !== '') {
+            return $byPairKey[$pairKey];
+        }
     }
 
     return '';
@@ -521,10 +525,10 @@ function bc_fetch_resolve_component_description(array $row, string $componentDes
 /**
  * @param list<array> $rows
  * @param array<string, string> $byRowKey
- * @param array<string, string> $byTaskNo
+ * @param array<string, string> $byPairKey
  * @return list<array>
  */
-function bc_fetch_apply_component_descriptions(array $rows, array $byRowKey, array $byTaskNo): array
+function bc_fetch_apply_component_descriptions(array $rows, array $byRowKey, array $byPairKey): array
 {
     $updated = [];
     foreach ($rows as $row) {
@@ -534,7 +538,7 @@ function bc_fetch_apply_component_descriptions(array $rows, array $byRowKey, arr
 
         $updated[] = bc_fetch_resolve_component_description(
             $row,
-            bc_fetch_component_description_from_maps($row, $byRowKey, $byTaskNo)
+            bc_fetch_component_description_from_maps($row, $byRowKey, $byPairKey)
         );
     }
 
@@ -543,12 +547,12 @@ function bc_fetch_apply_component_descriptions(array $rows, array $byRowKey, arr
 
 /**
  * @param list<string> $jobNos
- * @return array{by_row_key: array<string, string>, by_task_no: array<string, string>}
+ * @return array{by_row_key: array<string, string>, by_pair_key: array<string, string>}
  */
 function bc_fetch_fetch_app_component_description_maps(string $company, array $jobNos, array $auth, int $ttl): array
 {
     $componentDescriptionByRowKey = [];
-    $componentDescriptionByTaskNo = [];
+    $componentDescriptionByPairKey = [];
     $appSelect = bc_fetch_app_werkorders_select();
 
     foreach (bc_fetch_chunk_string_values($jobNos, DEMETER_WORKORDER_JOB_NO_BATCH_SIZE) as $jobNoChunk) {
@@ -574,16 +578,20 @@ function bc_fetch_fetch_app_component_description_maps(string $company, array $j
                 $componentDescriptionByRowKey[$rowKey] = $componentDescription;
             }
 
+            $jobNo = trim((string) ($appWorkorderRow['Job_No'] ?? ''));
             $taskNo = trim((string) ($appWorkorderRow['Job_Task_No'] ?? ''));
-            if ($taskNo !== '' && !isset($componentDescriptionByTaskNo[$taskNo])) {
-                $componentDescriptionByTaskNo[$taskNo] = $componentDescription;
+            if ($jobNo !== '' && $taskNo !== '') {
+                $pairKey = demeter_workorder_pair_key($jobNo, $taskNo);
+                if (!isset($componentDescriptionByPairKey[$pairKey])) {
+                    $componentDescriptionByPairKey[$pairKey] = $componentDescription;
+                }
             }
         }
     }
 
     return [
         'by_row_key' => $componentDescriptionByRowKey,
-        'by_task_no' => $componentDescriptionByTaskNo,
+        'by_pair_key' => $componentDescriptionByPairKey,
     ];
 }
 
@@ -609,14 +617,14 @@ function bc_fetch_enrich_workorder_rows_with_component_descriptions(string $comp
     }
 
     $byRowKey = [];
-    $byTaskNo = [];
+    $byPairKey = [];
     if ($jobNos !== []) {
         $maps = bc_fetch_fetch_app_component_description_maps($company, array_values($jobNos), $auth, $ttl);
         $byRowKey = $maps['by_row_key'];
-        $byTaskNo = $maps['by_task_no'];
+        $byPairKey = $maps['by_pair_key'];
     }
 
-    return bc_fetch_apply_component_descriptions($rows, $byRowKey, $byTaskNo);
+    return bc_fetch_apply_component_descriptions($rows, $byRowKey, $byPairKey);
 }
 
 /**
