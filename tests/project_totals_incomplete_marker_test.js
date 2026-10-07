@@ -62,6 +62,10 @@ check(cellPlain.getAttribute('title') === null, 'geen tooltip als er geen was');
 check(thProject.children.length === 0, 'badge weg na laden');
 check(modal.children.length === 0, 'popup-notitie verwijderd na laden');
 
+setProjectTotalsIncompleteState('loading-history');
+check(thProject.children.length === 1 && thProject.children[0].textContent.includes('oudere historie'), 'badge: oudere historie laadt nog');
+check(cellPlain.title.includes('oudere historie') && cellPlain.classes.has('project-total-incomplete'), 'cel blijft gemarkeerd tijdens historie');
+
 setProjectTotalsIncompleteState('error');
 check(cellPlain.title.includes('afgebroken') && thProject.children[0].textContent.includes('niet compleet'), 'foutstatus blijft gemarkeerd');
 check(cellPlain.classes.has('project-total-error') && cellPlain.classes.has('project-total-incomplete'), 'foutklasse op cel (⚠ i.p.v. ⏳)');

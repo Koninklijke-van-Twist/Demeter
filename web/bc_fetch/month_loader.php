@@ -700,7 +700,8 @@ function bc_fetch_execute_workorder_date_range_load(
         $includeFutureStartDates
     );
     if ($costCenter !== '') {
-        $startDateWorkorders = bc_fetch_filter_workorders_for_cost_center($startDateWorkorders, [], $costCenter);
+        // Posten zijn hier nog niet geladen: werkorders met lege kop pas later (met posten) beoordelen.
+        $startDateWorkorders = bc_fetch_filter_workorders_for_cost_center($startDateWorkorders, [], $costCenter, true);
     }
 
     $advanceProgress('ProjectPosten');
