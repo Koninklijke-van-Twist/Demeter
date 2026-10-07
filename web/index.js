@@ -4094,12 +4094,23 @@
         return currencyFormatter.format(amount);
     }
 
-    const dutchDateFormatter = new Intl.DateTimeFormat('nl-NL', {
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric',
-        timeZone: 'Europe/Amsterdam'
-    });
+    // Lazy (var + function): renderRows() draait al tijdens init, vóór deze regel;
+    // een top-level const gaf daar een TDZ-ReferenceError en een lege tabel.
+    var dutchDateFormatterInstance = null;
+    function getDutchDateFormatter ()
+    {
+        if (!dutchDateFormatterInstance)
+        {
+            dutchDateFormatterInstance = new Intl.DateTimeFormat('nl-NL', {
+                day: 'numeric',
+                month: 'long',
+                year: 'numeric',
+                timeZone: 'Europe/Amsterdam'
+            });
+        }
+
+        return dutchDateFormatterInstance;
+    }
 
     /**
      * Zet een BC-datum (yyyy-mm-dd of ISO-datetime) om naar bijv. '29 september 2026'.
@@ -4126,7 +4137,7 @@
             return text;
         }
 
-        return dutchDateFormatter.format(date);
+        return getDutchDateFormatter().format(date);
     }
 
     function normalizeStatus (value)
