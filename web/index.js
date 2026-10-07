@@ -55,8 +55,10 @@
         loadStatsUpdatedFromBc += Number(loadMeta.updated_from_bc_count || loadMeta.fetched_workorder_count || 0);
     }
     const error = typeof payload.error === 'string' ? payload.error : null;
-    const invoiceFilter = typeof payload.invoice_filter === 'string' ? payload.invoice_filter : 'both';
-    const showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
+    // Factuurfilter wordt client-side toegepast (geen navigatie): een submit tijdens het laden
+    // stopte de week-lus in de browser. De server stuurt altijd alle rijen.
+    let invoiceFilter = normalizeInvoiceFilter(payload.invoice_filter);
+    let showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
     const baseColumns = [
         { key: 'No', label: 'Werkorder' },
         { key: 'Order_Type', label: 'Ordertype' },
@@ -248,17 +250,9 @@
     summaryRow.className = 'summary-row';
     const summary = document.createElement('div');
     summary.className = 'summary';
-    let summaryPrefix = 'Werkorders (beide): ';
-    if (invoiceFilter === 'invoiced')
-    {
-        summaryPrefix = 'Gefactureerde werkorders: ';
-    }
-    else if (invoiceFilter === 'uninvoiced')
-    {
-        summaryPrefix = 'Niet-gefactureerde werkorders: ';
-    }
+    let summaryPrefix = getInvoiceFilterSummaryPrefix(invoiceFilter);
 
-    summary.textContent = summaryPrefix + rows.length;
+    summary.textContent = summaryPrefix + rows.filter(matchesInvoiceFilter).length;
     summaryRow.appendChild(summary);
 
     if (loadedCostCenter !== '')
@@ -395,6 +389,9 @@
     if (asyncLoadConfig.enabled)
     {
         setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
+        // De verversing is gestart: refresh_now uit de URL, zodat F5 geen nieuwe volledige verversing start.
+        // load_token blijft staan zolang de load loopt (om te kunnen volgen) en gaat eruit bij klaar/fout.
+        stripUrlParams(['refresh_now', 'boot', 'call_time_log_session']);
         startIncrementalMonthLoading()
             .then(function (loadSucceeded)
             {
@@ -578,6 +575,11 @@
     // geen oude load opnieuw volgt of start.
     function stripLoadTokenFromUrl ()
     {
+        stripUrlParams(['load_token', 'refresh_now', 'boot', 'call_time_log_session']);
+    }
+
+    function stripUrlParams (keys)
+    {
         if (!window.history || typeof window.history.replaceState !== 'function')
         {
             return;
@@ -585,7 +587,7 @@
 
         const params = new URLSearchParams(window.location.search);
         let changed = false;
-        for (const key of ['load_token', 'refresh_now', 'boot', 'call_time_log_session'])
+        for (const key of keys)
         {
             if (params.has(key))
             {
@@ -1269,12 +1271,8 @@
             {
                 if (inputElement === invoiceFilterSelect)
                 {
-                    // Het factuurfilter wordt server-side toegepast: zonder submit bleef de overlay eeuwig staan.
-                    showPageLoader('Filter toepassen...');
-                    if (controlsForm)
-                    {
-                        controlsForm.submit();
-                    }
+                    // Client-side: geen navigatie, dus een lopende load in dit tabblad loopt gewoon door.
+                    applyInvoiceFilterClientSide(invoiceFilterSelect.value);
                     return;
                 }
 
@@ -1292,8 +1290,16 @@
             });
         }
 
-        window.addEventListener('beforeunload', function ()
+        window.addEventListener('beforeunload', function (event)
         {
+            if (window.__demeterSuppressUnloadLoader !== true && asyncLoadConfig.enabled && historyLoadRunning)
+            {
+                // Dit tabblad stuurt de week-lus aan: weggaan stopt het laden. Vraag om bevestiging.
+                event.preventDefault();
+                event.returnValue = 'Het laden stopt als je deze pagina verlaat.';
+                return event.returnValue;
+            }
+
             if (window.__demeterSuppressUnloadLoader === true || asyncLoadConfig.enabled)
             {
                 return;
@@ -3105,7 +3111,8 @@
                     const totalAmount = Number(getColumnValueForSorting(row, column.key) || 0);
                     if (totalAmount === 0)
                     {
-                        td.textContent = '';
+                        // Een resultaat van 0 is een echte waarde (bv. factuur -1711 en creditnota +1711).
+                        td.textContent = currencyFormatter.format(0);
                     }
                     else
                     {
@@ -3562,7 +3569,7 @@
 
         for (const row of rows)
         {
-            if (!matchesSelectedCostCenter(row))
+            if (!matchesSelectedCostCenter(row) || !matchesInvoiceFilter(row))
             {
                 continue;
             }
@@ -3579,17 +3586,63 @@
         return counts;
     }
 
+    function normalizeInvoiceFilter (value)
+    {
+        const normalized = String(value || '').trim().toLowerCase();
+        return normalized === 'invoiced' || normalized === 'uninvoiced' ? normalized : 'both';
+    }
+
+    function getInvoiceFilterSummaryPrefix (filterValue)
+    {
+        if (filterValue === 'invoiced')
+        {
+            return 'Gefactureerde werkorders: ';
+        }
+        if (filterValue === 'uninvoiced')
+        {
+            return 'Niet-gefactureerde werkorders: ';
+        }
+
+        return 'Werkorders (beide): ';
+    }
+
+    // Zelfde regel als demeter_filter_display_rows_by_invoice() in PHP: gefactureerd = heeft Invoice_Ids.
+    function matchesInvoiceFilter (row)
+    {
+        if (invoiceFilter === 'both')
+        {
+            return true;
+        }
+
+        const isInvoiced = Array.isArray(row && row.Invoice_Ids) && row.Invoice_Ids.length > 0;
+        return invoiceFilter === 'invoiced' ? isInvoiced : !isInvoiced;
+    }
+
+    function applyInvoiceFilterClientSide (nextFilter)
+    {
+        invoiceFilter = normalizeInvoiceFilter(nextFilter);
+        showInvoiced = invoiceFilter === 'both' || invoiceFilter === 'invoiced';
+        summaryPrefix = getInvoiceFilterSummaryPrefix(invoiceFilter);
+
+        if (window.history && typeof window.history.replaceState === 'function')
+        {
+            const params = new URLSearchParams(window.location.search);
+            params.set('invoice_filter', invoiceFilter);
+            params.delete('gefactureerd');
+            const query = params.toString();
+            window.history.replaceState(window.history.state, '', window.location.pathname + (query !== '' ? '?' + query : '') + window.location.hash);
+        }
+
+        applyPreferencesSelection();
+        refreshStatusFilters();
+    }
+
     function updateSummaryCount ()
     {
-        let count = rows.length;
-
-        if (selectedCostCenter !== 'all')
+        const count = rows.filter(function (row)
         {
-            count = rows.filter(function (row)
-            {
-                return matchesSelectedCostCenter(row);
-            }).length;
-        }
+            return matchesInvoiceFilter(row) && (selectedCostCenter === 'all' || matchesSelectedCostCenter(row));
+        }).length;
 
         summary.textContent = summaryPrefix + count;
     }
@@ -3616,7 +3669,7 @@
     {
         return rows.filter(function (row)
         {
-            if (!matchesSelectedCostCenter(row))
+            if (!matchesSelectedCostCenter(row) || !matchesInvoiceFilter(row))
             {
                 return false;
             }
@@ -4146,7 +4199,7 @@
         const amount = Number(value || 0);
         if (amount === 0)
         {
-            return '';
+            return currencyFormatter.format(0);
         }
 
         const sign = amount > 0 ? '+' : '-';
@@ -6152,7 +6205,8 @@
         params.set('company', String(payload.company || ''));
         params.set('cost_center', loadedCostCenter);
         params.set('year_week', yearWeek);
-        params.set('invoice_filter', invoiceFilter);
+        // Altijd alle rijen ophalen; het factuurfilter wordt client-side toegepast.
+        params.set('invoice_filter', 'both');
         if (options && options.catchUp === true)
         {
             params.set('catch_up', '1');

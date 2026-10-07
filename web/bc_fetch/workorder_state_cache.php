@@ -1091,7 +1091,64 @@ function demeter_workorder_state_cache_save(
 
     $path = demeter_workorder_state_cache_path($company, $costCenter);
 
-    return file_put_contents($path, $json, LOCK_EX) !== false;
+    return demeter_workorder_state_cache_write_atomic($path, $json);
+}
+
+/**
+ * Schrijft via een tijdelijk bestand + rename, zodat een lezer (pagina, parallelle week-load) nooit
+ * een half geschreven of leeg bestand ziet (dat gaf 'Geen cachegegevens' tijdens het laden).
+ */
+function demeter_workorder_state_cache_write_atomic(string $path, string $contents): bool
+{
+    $tmpPath = $path . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
+    if (@file_put_contents($tmpPath, $contents) === false) {
+        @unlink($tmpPath);
+
+        return false;
+    }
+    if (!@rename($tmpPath, $path)) {
+        @unlink($tmpPath);
+
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * Exclusieve lock per bedrijf/kostenplaats voor lezen-samenvoegen-schrijven van de cache.
+ *
+ * @return resource|null
+ */
+function demeter_workorder_state_cache_lock(string $company, string $costCenter)
+{
+    $directory = demeter_workorder_state_cache_directory();
+    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
+        return null;
+    }
+
+    $handle = @fopen(demeter_workorder_state_cache_path($company, $costCenter) . '.lock', 'c');
+    if ($handle === false) {
+        return null;
+    }
+    if (!flock($handle, LOCK_EX)) {
+        fclose($handle);
+
+        return null;
+    }
+
+    return $handle;
+}
+
+/**
+ * @param resource|null $handle
+ */
+function demeter_workorder_state_cache_unlock($handle): void
+{
+    if (is_resource($handle)) {
+        @flock($handle, LOCK_UN);
+        fclose($handle);
+    }
 }
 
 /**
@@ -1192,7 +1249,7 @@ function demeter_workorder_state_cache_save_display_rows(string $company, string
 
     $path = demeter_workorder_state_cache_display_rows_path($company, $costCenter);
 
-    return file_put_contents($path, $json, LOCK_EX) !== false;
+    return demeter_workorder_state_cache_write_atomic($path, $json);
 }
 
 /**
