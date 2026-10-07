@@ -1101,7 +1101,9 @@ function demeter_workorder_state_cache_save(
 function demeter_workorder_state_cache_write_atomic(string $path, string $contents): bool
 {
     $tmpPath = $path . '.tmp.' . getmypid() . '.' . bin2hex(random_bytes(4));
-    if (@file_put_contents($tmpPath, $contents) === false) {
+    $written = @file_put_contents($tmpPath, $contents);
+    if ($written === false || $written !== strlen($contents)) {
+        // Ook een korte schrijfactie (schijf vol) afwijzen: anders vervangt rename een geldige cache door halve JSON.
         @unlink($tmpPath);
 
         return false;

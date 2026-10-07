@@ -206,6 +206,10 @@ function bc_fetch_load_workorder_week_chunk(
     $stateLock = null;
     if ($forceFull) {
         $stateLock = demeter_workorder_state_cache_lock($company, $costCenter);
+        if ($stateLock === null) {
+            // Zonder lock kan een parallelle week onze week (of wij de zijne) overschrijven.
+            throw new RuntimeException('Cache-lock voor ' . $company . ' / ' . $costCenter . ' niet beschikbaar; week ' . $normalizedYearWeek . ' niet opgeslagen.');
+        }
         $freshState = demeter_workorder_state_cache_load($company, $costCenter);
         if (is_array($freshState)) {
             $monthScan = is_array($freshState['month_scan'] ?? null) ? $freshState['month_scan'] : $monthScan;
