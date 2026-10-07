@@ -311,6 +311,44 @@ function bc_fetch_filter_projectposten_rows_by_pair_keys(array $rows, array $all
 }
 
 /**
+ * Houdt ALLE ProjectPosten-rijen van de projecten (Job_No) van de geladen werkorders over,
+ * ook posten zonder LVS_Work_Order_No of met een niet-uniek Job/Task-paar.
+ * Bedoeld voor projecttotalen (Kosten/Opbrengst project), die net als het BC-projecttotaal
+ * elke post van het project moeten meetellen. Werkordertotalen blijven via
+ * bc_fetch_filter_projectposten_rows_for_workorders() lopen.
+ *
+ * @param list<array> $rows
+ * @param list<array> $workorders
+ * @return list<array>
+ */
+function bc_fetch_filter_projectposten_rows_for_projects(array $rows, array $workorders): array
+{
+    $allowedJobs = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+        $jobNo = strtolower(trim((string) ($workorder['Job_No'] ?? '')));
+        if ($jobNo !== '') {
+            $allowedJobs[$jobNo] = true;
+        }
+    }
+
+    if ($allowedJobs === []) {
+        return [];
+    }
+
+    return array_values(array_filter($rows, static function ($row) use ($allowedJobs): bool {
+        if (!is_array($row)) {
+            return false;
+        }
+        $jobNo = strtolower(trim((string) ($row['Job_No'] ?? '')));
+
+        return $jobNo !== '' && isset($allowedJobs[$jobNo]);
+    }));
+}
+
+/**
  * Koppelt ProjectPosten aan bekende werkorders via LVS_Work_Order_No.
  * Lege LVS + uniek Job/Task-paar valt terug op dat ene werkorder.
  *

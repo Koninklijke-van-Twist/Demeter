@@ -3052,10 +3052,6 @@
                     {
                         const rawStartDate = String(row[column.key] || '');
                         td.textContent = formatDutchDate(rawStartDate);
-                        if (rawStartDate !== '')
-                        {
-                            td.title = rawStartDate;
-                        }
                     }
                     else
                     {
@@ -4852,9 +4848,13 @@
             return 'Geen factuurdetails beschikbaar.';
         }
 
-        return ids.length === 1
-            ? 'Klik voor factuurdetails van ' + ids[0] + '.'
-            : 'Klik voor factuurdetails (' + String(ids.length) + ' facturen).';
+        if (ids.length === 1)
+        {
+            return 'Klik voor factuurdetails van ' + ids[0] + '.';
+        }
+
+        // Toon alle factuurnummers: de cel laat er maar 2 zien ('… +6').
+        return String(ids.length) + ' facturen:\n' + ids.join('\n') + '\n\nKlik voor factuurdetails.';
     }
 
     function formatInvoiceIdPreview (invoiceIds, maxVisible)
