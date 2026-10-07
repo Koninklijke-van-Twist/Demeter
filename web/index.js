@@ -4872,6 +4872,11 @@
     function getInvoiceStatusLabel (invoiceId, preferredSourceEntity)
     {
         const sourceFromLine = String(preferredSourceEntity || '').trim();
+        if (sourceFromLine === 'GeboekteVerkoopCreditnotaRegels')
+        {
+            return 'Creditnota';
+        }
+
         if (sourceFromLine === 'SalesLines')
         {
             return 'Voorbereiding';
@@ -4893,6 +4898,11 @@
             ? details.Source_Entities.map(function (source) { return String(source || '').trim(); }).filter(Boolean)
             : [];
 
+        if (sourceEntities.includes('GeboekteVerkoopCreditnotaRegels'))
+        {
+            return 'Creditnota';
+        }
+
         if (sourceEntities.includes('SalesLines'))
         {
             return 'Voorbereiding';
@@ -4904,6 +4914,11 @@
         }
 
         const sourceEntity = String((details && details.Source_Entity) || '').trim();
+        if (sourceEntity === 'GeboekteVerkoopCreditnotaRegels')
+        {
+            return 'Creditnota';
+        }
+
         if (sourceEntity === 'SalesLines')
         {
             return 'Voorbereiding';

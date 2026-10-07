@@ -10,8 +10,8 @@
 require_once __DIR__ . '/helpers.php';
 require_once __DIR__ . '/../project_finance.php';
 
-/** v2: signed factuurbedragen (creditregels negatief i.p.v. abs()). */
-const DEMETER_INVOICE_CACHE_VERSION = 2;
+/** v3: geboekte creditnota's (GeboekteVerkoopCreditnotaRegels) als negatieve bron. */
+const DEMETER_INVOICE_CACHE_VERSION = 3;
 
 /**
  * Pad naar de factuurcache-directory.

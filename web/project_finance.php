@@ -105,6 +105,14 @@ class ProjectFinanceService
                     'amount_field' => 'Line_Amount',
                     'amount_incl_field' => 'Line_Amount',
                 ],
+                [
+                    // BC page 527 Posted Sales Cr. Memo Lines; bedragen zijn positief in BC → negatief tellen.
+                    'entity' => 'GeboekteVerkoopCreditnotaRegels',
+                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
+                    'amount_field' => 'Amount',
+                    'amount_incl_field' => 'Amount_Including_VAT',
+                    'sign' => -1,
+                ],
             ],
             'project' => [
                 'cost_source' => [
@@ -252,6 +260,7 @@ class ProjectFinanceService
             $selectFields = trim((string) ($invoiceSource['select'] ?? ''));
             $amountField = trim((string) ($invoiceSource['amount_field'] ?? ''));
             $amountInclField = trim((string) ($invoiceSource['amount_incl_field'] ?? ''));
+            $sourceSign = ((float) ($invoiceSource['sign'] ?? 1)) < 0 ? -1.0 : 1.0;
 
             if ($entity === '' || $selectFields === '' || $amountField === '') {
                 continue;
@@ -295,7 +304,7 @@ class ProjectFinanceService
                     $normalizedJobNo = self::normalizeMatchValue($jobNo);
                     $amountRaw = $invoiceRow[$amountField] ?? null;
                     // Signed: geen abs(), zodat creditregels negatief blijven.
-                    $creditSign = demeter_sales_document_type_is_credit((string) ($invoiceRow['Document_Type'] ?? '')) ? -1.0 : 1.0;
+                    $creditSign = $sourceSign * (demeter_sales_document_type_is_credit((string) ($invoiceRow['Document_Type'] ?? '')) ? -1.0 : 1.0);
                     $amount = is_numeric($amountRaw) ? $creditSign * (float) $amountRaw : 0.0;
 
                     $amountInclRaw = $amountInclField !== '' ? ($invoiceRow[$amountInclField] ?? null) : null;
