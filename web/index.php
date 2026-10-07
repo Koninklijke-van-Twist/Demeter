@@ -1034,7 +1034,8 @@ try {
             $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
             if ($displayRowsByKey !== []) {
                 $cacheUsedForFirstPaint = true;
-                $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, $invoiceFilter);
+                // Altijd alle rijen: het factuurfilter wordt client-side toegepast (zonder navigatie).
+                $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, 'both');
             } else {
                 $rows = [];
             }

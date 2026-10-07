@@ -197,6 +197,32 @@ function bc_fetch_load_workorder_week_chunk(
     );
 
     $monthScan = is_array($loaded['month_scan_base'] ?? null) ? $loaded['month_scan_base'] : $monthScan;
+
+    // Volledige verversing (force_full): de week is zonder cache opgehaald, maar moet wel worden
+    // samengevoegd met de weken die deze verversing al in de cache zette (de cache is bij de start van
+    // de verversing gewist). Zonder dit bleef na elke week alleen die week op schijf staan: een
+    // herladen pagina toonde dan één week of 'Geen cachegegevens', en consecutive_empty begon elke
+    // week opnieuw (backfill tot 2017). Onder een lock, omdat de browser twee weken parallel laadt.
+    $stateLock = null;
+    if ($forceFull) {
+        $stateLock = demeter_workorder_state_cache_lock($company, $costCenter);
+        if ($stateLock === null) {
+            // Zonder lock kan een parallelle week onze week (of wij de zijne) overschrijven.
+            throw new RuntimeException('Cache-lock voor ' . $company . ' / ' . $costCenter . ' niet beschikbaar; week ' . $normalizedYearWeek . ' niet opgeslagen.');
+        }
+        $freshState = demeter_workorder_state_cache_load($company, $costCenter);
+        if (is_array($freshState)) {
+            $monthScan = is_array($freshState['month_scan'] ?? null) ? $freshState['month_scan'] : $monthScan;
+            $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $normalizedYearWeek);
+            $previousWeekWoTotals = demeter_month_scan_week_workorder_totals($monthScan, $normalizedYearWeek);
+            $loaded['cache_state'] = array_replace(
+                is_array($freshState['workorders'] ?? null) ? $freshState['workorders'] : [],
+                is_array($loaded['cache_state'] ?? null) ? $loaded['cache_state'] : []
+            );
+            $loaded['display_rows_by_key'] = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
+        }
+    }
+
     $workorderTotals = is_array($loaded['workorder_totals_by_project_and_number'] ?? null)
         ? $loaded['workorder_totals_by_project_and_number']
         : [];
@@ -257,6 +283,7 @@ function bc_fetch_load_workorder_week_chunk(
         is_array($loaded['load_session'] ?? null) ? $loaded['load_session'] : demeter_workorder_load_session_defaults()
     );
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
+    demeter_workorder_state_cache_unlock($stateLock);
 
     $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
     $loadMeta = is_array($loaded['load_meta'] ?? null) ? $loaded['load_meta'] : [];
