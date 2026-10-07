@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/bc_enum.php';
 
 /**
  * Functies
@@ -122,9 +123,7 @@ function finance_calculate_result(float $revenue, float $costs): float
  */
 function finance_is_closed_project_status(string $status): bool
 {
-    $normalized = strtolower(trim($status));
-
-    return in_array($normalized, ['completed', 'closed', 'afgesloten', 'gereed', 'geannuleerd', 'cancelled'], true);
+    return demeter_status_is_closed($status);
 }
 
 /**

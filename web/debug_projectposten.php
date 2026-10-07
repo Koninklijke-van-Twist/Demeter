@@ -136,7 +136,7 @@ try {
             $rawRevenueInvSum += (-1 * $lineAmount);
 
             // Revenue only from 'Verkoop' entries
-            if ($entryType === 'Verkoop') {
+            if (demeter_entry_type_canonical((string) $entryType) === 'sale') {
                 $rawRevenueSumVerkoop += $lineAmount;
                 $rawRevenueInvSumVerkoop += (-1 * $lineAmount);
             }

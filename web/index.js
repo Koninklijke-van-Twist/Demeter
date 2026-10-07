@@ -3048,6 +3048,15 @@
                     {
                         td.textContent = getEquipmentDisplayValue(row);
                     }
+                    else if (column.key === 'Start_Date')
+                    {
+                        const rawStartDate = String(row[column.key] || '');
+                        td.textContent = formatDutchDate(rawStartDate);
+                        if (rawStartDate !== '')
+                        {
+                            td.title = rawStartDate;
+                        }
+                    }
                     else
                     {
                         td.textContent = String(row[column.key] || '');
@@ -4085,6 +4094,41 @@
         return currencyFormatter.format(amount);
     }
 
+    const dutchDateFormatter = new Intl.DateTimeFormat('nl-NL', {
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
+        timeZone: 'Europe/Amsterdam'
+    });
+
+    /**
+     * Zet een BC-datum (yyyy-mm-dd of ISO-datetime) om naar bijv. '29 september 2026'.
+     * Onbekende/lege waarden en BC-nuldatum (0001-01-01) blijven ongewijzigd/leeg.
+     */
+    function formatDutchDate (value)
+    {
+        const text = String(value || '').trim();
+        const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+        if (!match)
+        {
+            return text;
+        }
+
+        if (match[1] === '0001')
+        {
+            return '';
+        }
+
+        // Kalenderdatum: middag UTC zodat de dag in Europe/Amsterdam nooit verschuift.
+        const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), 12));
+        if (Number.isNaN(date.getTime()))
+        {
+            return text;
+        }
+
+        return dutchDateFormatter.format(date);
+    }
+
     function normalizeStatus (value)
     {
         const normalized = String(value || '').trim().toLowerCase();
@@ -4096,7 +4140,17 @@
             'gepland': 'planned',
             'onderhanden': 'in-progress',
             'ondertekend': 'signed',
-            'uitgevoerd': 'completed'
+            'uitgevoerd': 'completed',
+            'gefactureerd': 'invoiced',
+            'closed': 'closed',
+            'cancelled': 'cancelled',
+            'canceled': 'cancelled',
+            'completed': 'completed',
+            'invoiced': 'invoiced',
+            'in progress': 'in-progress',
+            'planned': 'planned',
+            'signed': 'signed',
+            'checked': 'checked'
         };
 
         if (aliases[normalized])
