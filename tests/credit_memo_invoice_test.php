@@ -21,7 +21,18 @@ require __DIR__ . '/../web/project_finance.php';
 $r = (new ProjectFinanceService('Hunter van Twist'))->collectProjectInvoicesForProjects(['PRJ5262143'], 0);
 $total = $r['project_invoiced_total_by_job']['prj5262143'] ?? null;
 $ids = $r['project_invoice_ids_by_job']['prj5262143'] ?? [];
-if (abs((float) $total) > 0.0001 || $ids !== ['C526000162', 'S526003816']) {
+$details = is_array($r['invoice_details_by_id'] ?? null) ? $r['invoice_details_by_id'] : [];
+$invoiceAmount = $details['S526003816']['Lines'][0]['Amount'] ?? null;
+$creditAmount = $details['C526000162']['Lines'][0]['Amount'] ?? null;
+$creditSources = is_array($details['C526000162']['Source_Entities'] ?? null) ? $details['C526000162']['Source_Entities'] : [];
+if (
+    !is_numeric($total)
+    || abs((float) $total) > 0.0001
+    || $ids !== ['C526000162', 'S526003816']
+    || !is_numeric($invoiceAmount) || abs((float) $invoiceAmount - 1711) > 0.0001
+    || !is_numeric($creditAmount) || abs((float) $creditAmount + 1711) > 0.0001
+    || !in_array('GeboekteVerkoopCreditnotaRegels', $creditSources, true)
+) {
     fwrite(STDERR, 'FAIL ' . json_encode([$total, $ids]) . PHP_EOL);
     exit(1);
 }
