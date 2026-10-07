@@ -4799,10 +4799,7 @@
         {
             const incompleteNote = document.createElement('div');
             incompleteNote.className = 'project-incomplete-note';
-            incompleteNote.textContent = projectTotalsIncompleteState === 'error'
-                ? 'Let op: het laden van de weken is afgebroken; deze lijst is mogelijk niet compleet.'
-                : 'Nog aan het laden: niet alle weken zijn geladen; deze lijst is mogelijk niet compleet.';
-            incompleteNote.title = getProjectTotalsIncompleteTooltip();
+            updateProjectIncompleteNote(incompleteNote);
             notesBody.appendChild(incompleteNote);
         }
 
@@ -4900,6 +4897,7 @@
 
         const tooltip = getProjectTotalsIncompleteTooltip();
         element.classList.toggle('project-total-incomplete', tooltip !== '');
+        element.classList.toggle('project-total-error', projectTotalsIncompleteState === 'error');
         if (tooltip !== '')
         {
             element.title = tooltip;
@@ -4912,6 +4910,30 @@
         {
             element.removeAttribute('title');
         }
+    }
+
+    // Werkt de notitie in een open ProjectPosten-popup bij; verwijdert hem als het laden klaar is.
+    function updateProjectIncompleteNote (note)
+    {
+        if (!note)
+        {
+            return;
+        }
+
+        if (projectTotalsIncompleteState === '')
+        {
+            if (note.parentNode)
+            {
+                note.remove();
+            }
+            return;
+        }
+
+        note.classList.toggle('project-incomplete-note-error', projectTotalsIncompleteState === 'error');
+        note.textContent = projectTotalsIncompleteState === 'error'
+            ? 'Let op: het laden van de weken is afgebroken; deze lijst is mogelijk niet compleet.'
+            : 'Nog aan het laden: niet alle weken zijn geladen; deze lijst is mogelijk niet compleet.';
+        note.title = getProjectTotalsIncompleteTooltip();
     }
 
     function applyProjectTotalsIncompleteHeaderMarkers ()
@@ -4960,6 +4982,10 @@
             applyProjectTotalIncompleteToElement(element);
         }
         applyProjectTotalsIncompleteHeaderMarkers();
+        for (const note of document.querySelectorAll('.project-incomplete-note'))
+        {
+            updateProjectIncompleteNote(note);
+        }
     }
 
     function buildInvoiceIdTooltip (invoiceIds)

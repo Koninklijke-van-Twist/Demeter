@@ -28,8 +28,15 @@ const cellWithTitle = makeEl('td', { classes: ['project-total-cell'], attrs: { t
 const cellPlain = makeEl('td', { classes: ['project-total-cell'], text: '€ 2,00' });
 const thProject = makeEl('th', { dataset: { sortKey: 'Project_Actual_Costs' } });
 const thOther = makeEl('th', { dataset: { sortKey: 'Actual_Costs' } });
+const modal = makeEl('div', {});
+const note = modal.appendChild(makeEl('div', { classes: ['project-incomplete-note'] }));
+note.parentNode = modal;
 const document = {
-    querySelectorAll (sel) { return sel === '.project-total-cell' ? [cellWithTitle, cellPlain] : [thProject, thOther]; },
+    querySelectorAll (sel) {
+        if (sel === '.project-total-cell') return [cellWithTitle, cellPlain];
+        if (sel === '.project-incomplete-note') return modal.children.filter(c => c.classes.has('project-incomplete-note'));
+        return [thProject, thOther];
+    },
     createElement (tag) { return makeEl(tag, {}); }
 };
 const projectFinancialColumnKeys = new Set(['Project_Actual_Costs', 'Project_Total_Revenue', 'Project_Total']);
@@ -45,14 +52,18 @@ check(cellPlain.title === 'Projecttotaal is nog niet compleet: niet alle weken z
 check(thProject.children.length === 1 && thProject.children[0].textContent.includes('nog aan het laden'), 'badge in projectkolomkop');
 check(thOther.children.length === 0, 'geen badge op werkorderkolom');
 check(cellWithTitle.textContent === '€ 1,00', 'bedrag ongewijzigd');
+check(!cellPlain.classes.has('project-total-error'), 'geen foutklasse tijdens laden');
+check(note.textContent.includes('Nog aan het laden'), 'popup-notitie tijdens laden');
 
 setProjectTotalsIncompleteState('');
 check(!cellWithTitle.classes.has('project-total-incomplete') && !cellPlain.classes.has('project-total-incomplete'), 'markering weg na laden');
 check(cellWithTitle.title === 'basis', 'oorspronkelijke tooltip terug');
 check(cellPlain.getAttribute('title') === null, 'geen tooltip als er geen was');
 check(thProject.children.length === 0, 'badge weg na laden');
+check(modal.children.length === 0, 'popup-notitie verwijderd na laden');
 
 setProjectTotalsIncompleteState('error');
 check(cellPlain.title.includes('afgebroken') && thProject.children[0].textContent.includes('niet compleet'), 'foutstatus blijft gemarkeerd');
+check(cellPlain.classes.has('project-total-error') && cellPlain.classes.has('project-total-incomplete'), 'foutklasse op cel (⚠ i.p.v. ⏳)');
 
 process.exit(failures > 0 ? 1 : 0);

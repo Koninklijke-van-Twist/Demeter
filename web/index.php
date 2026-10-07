@@ -2018,6 +2018,10 @@ $initialData = [
             font-size: 0.8em;
         }
 
+        .project-total-cell.project-total-incomplete.project-total-error::after {
+            content: ' \26A0';
+        }
+
         .project-incomplete-badge {
             display: block;
             font-size: 0.75em;
@@ -2035,6 +2039,12 @@ $initialData = [
             background: #fff8e1;
             color: #5f4b00;
             font-style: italic;
+        }
+
+        .project-incomplete-note.project-incomplete-note-error {
+            border-left-color: #b42318;
+            background: #fef3f2;
+            color: #7a271a;
         }
 
         td.amount-info-clickable:hover {
