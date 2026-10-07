@@ -847,6 +847,18 @@ function bc_fetch_execute_workorder_date_range_load(
     if ($allProjectPostenRows !== []) {
         $filteredProjectPostenRows = bc_fetch_filter_projectposten_rows_for_workorders($allProjectPostenRows, $workorders);
         $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows($filteredProjectPostenRows);
+        // Projecttotalen over ALLE posten van het project (ook zonder werkordernummer of met een
+        // Job/Task-paar dat bij meerdere werkorders hoort), zoals het BC-projecttotaal.
+        // Werkordertotalen blijven op de werkorder-gefilterde rijen hierboven.
+        $projectScopeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows(
+            bc_fetch_filter_projectposten_rows_for_projects($allProjectPostenRows, $workorders)
+        );
+        $rangeFinance['project_totals_by_job'] = is_array($projectScopeFinance['project_totals_by_job'] ?? null)
+            ? $projectScopeFinance['project_totals_by_job']
+            : [];
+        $rangeFinance['projectposten_rows_by_project'] = is_array($projectScopeFinance['projectposten_rows_by_project'] ?? null)
+            ? $projectScopeFinance['projectposten_rows_by_project']
+            : [];
         $extractedKeys = bc_fetch_extract_workorder_keys_from_projectposten_rows($filteredProjectPostenRows);
         $financeKeyByPair = array_merge(
             $extractedKeys['finance_key_by_pair'],
