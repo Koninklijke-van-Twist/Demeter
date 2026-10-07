@@ -60,4 +60,15 @@ check((float) ($again['k1']['Actual_Costs'] ?? 0) === 10.0 && (float) ($again['k
 $loaderSource = (string) file_get_contents(__DIR__ . '/../web/bc_fetch/month_loader.php');
 check(strpos($loaderSource, '$needsConsolidation || $isRepeatOfSavedWeek') !== false, 'week-loader kiest de delta-merge voor een herhaalde week');
 
+// Historie compleet = scan heeft zijn einde bereikt; een afgebroken verversing niet.
+$broken = demeter_workorder_month_scan_defaults();
+$broken = demeter_month_scan_update_after_load('2026-W41', true, false, ['r1'], $broken);
+check(demeter_month_scan_history_complete($broken) === false, 'afgebroken verversing: historie niet compleet');
+$done = $broken;
+$done['stop_before_month'] = '2017-W15';
+check(demeter_month_scan_history_complete($done) === true, 'scan tot het einde: historie compleet');
+$done2 = $broken;
+$done2['consecutive_empty'] = DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT;
+check(demeter_month_scan_history_complete($done2) === true, '52 lege weken op rij: historie compleet');
+
 exit($failures === 0 ? 0 : 1);

@@ -472,9 +472,21 @@ function bc_fetch_load_current_week_by_days(
         'updated_from_bc_count' => 0,
     ];
 
+    // Catch-up (geen eigen week-voortgang van de client): voortgang over alle dagen heen tonen
+    // ("Stap 5 van 16") i.p.v. per dag opnieuw "Stap 1 van 4".
+    $dayProgressTotal = count($daysToLoad);
+    $useDayProgress = (int) ($options['progress_week_total'] ?? 0) <= 0 && $dayProgressTotal > 1;
+    $dayIndex = 0;
+
     foreach ($daysToLoad as $dayYmd) {
+        $dayIndex++;
         $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $yearWeek);
         $previousDayWoTotals = demeter_month_scan_day_workorder_totals($monthScan, $yearWeek, $dayYmd);
+        $dayOptions = $options;
+        if ($useDayProgress) {
+            $dayOptions['progress_week_index'] = $dayIndex;
+            $dayOptions['progress_week_total'] = $dayProgressTotal;
+        }
 
         $dayRange = demeter_day_date_range($dayYmd);
         $loaded = bc_fetch_execute_workorder_date_range_load(
@@ -486,7 +498,7 @@ function bc_fetch_load_current_week_by_days(
             $auth,
             $ttl,
             $progressToken,
-            $options,
+            $dayOptions,
             $cachedState,
             $forceFull,
             $yearWeek

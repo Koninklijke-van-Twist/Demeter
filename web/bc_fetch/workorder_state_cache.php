@@ -1485,6 +1485,19 @@ function demeter_history_weeks_total_for_scan(array $monthScan, string $currentW
 /**
  * Bepaalt of async laden verder moet gaan.
  */
+/**
+ * Heeft de historie-scan zijn einde bereikt (52 lege weken op rij / stop_before_month)?
+ * Zo niet, dan is de laatste volledige verversing niet afgerond en mist de cache weken.
+ */
+function demeter_month_scan_history_complete(array $monthScan): bool
+{
+    if (trim((string) ($monthScan['stop_before_month'] ?? '')) !== '') {
+        return true;
+    }
+
+    return (int) ($monthScan['consecutive_empty'] ?? 0) >= DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT;
+}
+
 function demeter_month_scan_should_continue(array $monthScan, ?string $nextPeriod): bool
 {
     if (!is_string($nextPeriod) || !demeter_is_valid_iso_year_week($nextPeriod)) {

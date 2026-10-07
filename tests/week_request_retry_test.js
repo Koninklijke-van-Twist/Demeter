@@ -64,7 +64,7 @@ function build (responses) {
     check(finalError !== null && t.state.calls.length === 1 && t.state.waits.length === 0, 'echte fout faalt direct');
 
     // De fetch-code leest tekst en gebruikt parseWeekResponseBody; netwerkfouten worden haperend.
-    const fetchFn = src.slice(src.indexOf('    function fetchHistoryWeek ('), src.indexOf('    async function startCatchUpCurrentWeek'));
+    const fetchFn = src.slice(src.indexOf('    function fetchHistoryWeek ('), src.indexOf('    // Tekst tijdens de catch-up'));
     check(fetchFn.includes('response.text()') && fetchFn.includes('parseWeekResponseBody(') && !fetchFn.includes('response.json()'), 'fetch parset zelf (geen response.json())');
     check(fetchFn.includes("createTransientWeekResponseError(yearWeek, fetchError"), 'netwerkfout = haperend');
     check(fetchFn.includes("params.set('load_token', loadToken)"), 'retry gebruikt dezelfde load_token');
