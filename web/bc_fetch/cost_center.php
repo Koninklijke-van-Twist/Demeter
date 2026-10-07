@@ -234,9 +234,15 @@ function bc_fetch_filter_workorders_for_cost_center(
 
     $codesByWorkorder = [];
     $codesByJob = [];
+    // Eigen posten tellen ook zonder kostenplaats: dan geen terugval op andere werkorders van het project.
+    $hasPostsByWorkorder = [];
     foreach ($allPostenRows as $row) {
         if (!is_array($row)) {
             continue;
+        }
+        $lvs = strtolower(trim((string) ($row['LVS_Work_Order_No'] ?? '')));
+        if ($lvs !== '') {
+            $hasPostsByWorkorder[$lvs] = true;
         }
         $code = trim((string) ($row['Global_Dimension_1_Code'] ?? ''));
         if ($code === '') {
@@ -245,7 +251,6 @@ function bc_fetch_filter_workorders_for_cost_center(
         if ($code === '') {
             continue;
         }
-        $lvs = strtolower(trim((string) ($row['LVS_Work_Order_No'] ?? '')));
         if ($lvs !== '') {
             $codesByWorkorder[$lvs][$code] = true;
         }
@@ -275,8 +280,8 @@ function bc_fetch_filter_workorders_for_cost_center(
 
         $no = strtolower(trim((string) ($workorder['No'] ?? '')));
         $job = strtolower(trim((string) ($workorder['Job_No'] ?? '')));
-        $codes = ($no !== '' && isset($codesByWorkorder[$no]))
-            ? $codesByWorkorder[$no]
+        $codes = ($no !== '' && isset($hasPostsByWorkorder[$no]))
+            ? ($codesByWorkorder[$no] ?? [])
             : ($job !== '' && isset($codesByJob[$job]) ? $codesByJob[$job] : []);
 
         foreach (array_keys($codes) as $code) {

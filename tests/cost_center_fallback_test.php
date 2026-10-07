@@ -51,6 +51,19 @@ check(in_array('WOLEEG', $deferred, true) && !in_array('WOKOP15', $deferred, tru
 $none = array_column(bc_fetch_filter_workorders_for_cost_center($workorders, $posten, bc_fetch_cost_center_none_value()), 'No');
 check(in_array('WO52602422', $none, true) && !in_array('WO70', $none, true), "filter 'geen kostenplaats' blijft op de kop");
 
+// Eigen posten zonder kostenplaats: geen terugval op de posten van een andere werkorder in hetzelfde project.
+$postenEigenLeeg = [
+    ['Job_No' => 'PRJ77', 'Job_Task_No' => 'T1', 'LVS_Work_Order_No' => 'WOEIGEN', 'Posting_Date' => '2026-09-24', 'Entry_Type' => 'Usage', 'Total_Cost' => 5, 'Global_Dimension_1_Code' => ''],
+    ['Job_No' => 'PRJ77', 'Job_Task_No' => 'T2', 'LVS_Work_Order_No' => 'WOANDER', 'Posting_Date' => '2026-09-24', 'Entry_Type' => 'Usage', 'Total_Cost' => 5, 'Global_Dimension_1_Code' => '70'],
+];
+$woEigenLeeg = [
+    ['No' => 'WOEIGEN', 'Job_No' => 'PRJ77', 'Job_Task_No' => 'T1', 'Job_Dimension_1_Value' => ''],
+    ['No' => 'WOZONDER', 'Job_No' => 'PRJ77', 'Job_Task_No' => 'T3', 'Job_Dimension_1_Value' => ''],
+];
+$eigenLeeg70 = array_column(bc_fetch_filter_workorders_for_cost_center($woEigenLeeg, $postenEigenLeeg, '70'), 'No');
+check(!in_array('WOEIGEN', $eigenLeeg70, true), 'eigen posten zonder kostenplaats: geen terugval op projectposten');
+check(in_array('WOZONDER', $eigenLeeg70, true), 'zonder eigen posten: terugval op projectposten');
+
 // Opbrengst nett 0 (factuur -1711 + creditnota +1711).
 $service = (new ReflectionClass(ProjectFinanceService::class))->newInstanceWithoutConstructor();
 $finance = $service->aggregateProjectAndWorkorderFinanceFromProjectPostenRows(array_slice($posten, 0, 2));
