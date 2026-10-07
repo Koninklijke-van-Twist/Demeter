@@ -396,8 +396,15 @@
     {
         setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
         startIncrementalMonthLoading()
-            .then(function ()
+            .then(function (loadSucceeded)
             {
+                // Alleen afronden (memo's + 'Laden afgerond' + herladen) als alle weken gelukt zijn;
+                // anders blijft de foutmelding staan i.p.v. een half geladen cache als 'klaar' te markeren.
+                if (loadSucceeded !== true)
+                {
+                    stripLoadTokenFromUrl();
+                    return;
+                }
                 return finalizeRefreshAfterLoad();
             })
             .catch(function (refreshError)
@@ -416,7 +423,13 @@
             console.error(hitchError);
         });
     }
-    else if (asyncLoadConfig.catch_up_enabled)
+    else
+    {
+        // Geen lopende load: een load_token in de URL is achterhaald.
+        stripLoadTokenFromUrl();
+    }
+
+    if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)
     {
         startCatchUpCurrentWeek()
             .catch(function (catchUpError)
@@ -555,8 +568,38 @@
         const redirectParams = new URLSearchParams(window.location.search);
         redirectParams.delete('refresh_now');
         redirectParams.delete('call_time_log_session');
+        redirectParams.delete('load_token');
+        redirectParams.delete('boot');
         window.__demeterSuppressUnloadLoader = true;
         window.location.replace('index.php?' + redirectParams.toString());
+    }
+
+    // Haalt load_token/refresh_now/boot uit de adresbalk (zonder herladen), zodat F5 of een bladwijzer
+    // geen oude load opnieuw volgt of start.
+    function stripLoadTokenFromUrl ()
+    {
+        if (!window.history || typeof window.history.replaceState !== 'function')
+        {
+            return;
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        let changed = false;
+        for (const key of ['load_token', 'refresh_now', 'boot', 'call_time_log_session'])
+        {
+            if (params.has(key))
+            {
+                params.delete(key);
+                changed = true;
+            }
+        }
+        if (!changed)
+        {
+            return;
+        }
+
+        const query = params.toString();
+        window.history.replaceState(window.history.state, '', window.location.pathname + (query !== '' ? '?' + query : '') + window.location.hash);
     }
 
     async function fetchActiveLoadStatus ()
@@ -653,6 +696,7 @@
                         updateHistoryLoadNote(progress && progress.stale === true && message !== ''
                             ? message
                             : 'Bijwerken mislukt.');
+                        stripLoadTokenFromUrl();
                         setRefreshNowButtonDisabled(false, '');
                         resolve();
                     }
@@ -1100,6 +1144,8 @@
         const redirectParams = new URLSearchParams(window.location.search);
         redirectParams.delete('refresh_now');
         redirectParams.delete('call_time_log_session');
+        redirectParams.delete('load_token');
+        redirectParams.delete('boot');
         stopPageLoaderProgress();
         hidePageLoader();
         updateHistoryLoadNote('');
@@ -1111,6 +1157,13 @@
 
     function initializePageLoaderHandlers ()
     {
+        if (loadProgressTokenInput)
+        {
+            // Het verborgen load_token gaat alleen mee met 'Ververs Nu' (zie submit-handler);
+            // bij bedrijf/kostenplaats/factuurfilter zou het een oude token in de URL zetten.
+            loadProgressTokenInput.disabled = true;
+        }
+
         if (controlsForm)
         {
             controlsForm.addEventListener('submit', function (event)
@@ -1130,6 +1183,10 @@
                     if (controlsForm.dataset.refreshConfirmed === '1')
                     {
                         delete controlsForm.dataset.refreshConfirmed;
+                        if (loadProgressTokenInput)
+                        {
+                            loadProgressTokenInput.disabled = false;
+                        }
                         return;
                     }
 
@@ -1213,7 +1270,12 @@
             {
                 if (inputElement === invoiceFilterSelect)
                 {
+                    // Het factuurfilter wordt server-side toegepast: zonder submit bleef de overlay eeuwig staan.
                     showPageLoader('Filter toepassen...');
+                    if (controlsForm)
+                    {
+                        controlsForm.submit();
+                    }
                     return;
                 }
 
@@ -4877,6 +4939,10 @@
         {
             return 'Projecttotaal is nog niet compleet: niet alle weken zijn geladen.';
         }
+        if (projectTotalsIncompleteState === 'loading-history')
+        {
+            return 'Projecttotaal is nog niet compleet: de geschatte periode is geladen, oudere historie laadt nog.';
+        }
         if (projectTotalsIncompleteState === 'error')
         {
             return 'Projecttotaal is niet compleet: het laden van de weken is afgebroken. Ververs om opnieuw te laden.';
@@ -4966,14 +5032,16 @@
                 badge.className = 'project-incomplete-badge';
                 th.appendChild(badge);
             }
-            badge.textContent = projectTotalsIncompleteState === 'error' ? '⚠ niet compleet' : '⏳ nog aan het laden';
+            badge.textContent = projectTotalsIncompleteState === 'error'
+                ? '⚠ niet compleet'
+                : (projectTotalsIncompleteState === 'loading-history' ? '⏳ oudere historie laadt nog' : '⏳ nog aan het laden');
             badge.title = tooltip;
         }
     }
 
     function setProjectTotalsIncompleteState (state)
     {
-        const nextState = state === 'loading' || state === 'error' ? state : '';
+        const nextState = state === 'loading' || state === 'loading-history' || state === 'error' ? state : '';
         if (nextState === projectTotalsIncompleteState)
         {
             return;
@@ -5930,6 +5998,14 @@
 
     function buildHistoryLoadNote (weekToLoad, monthScan, weeksCompleted, isFirstWeek)
     {
+        const estimatedWeeks = resolveHistoryWeeksTotal(monthScan);
+        if (!isFirstWeek && estimatedWeeks && weeksCompleted >= estimatedWeeks)
+        {
+            // Bij een lege cache is het totaal een schatting (52 weken); de scan loopt door tot
+            // 52 lege weken op rij, dus oudere historie kan daarna nog komen.
+            return 'Geschatte periode klaar, oudere historie laadt nog: ' + weekToLoad + '...';
+        }
+
         const prefix = isFirstWeek
             ? ('Huidige week laden: ' + weekToLoad + '...')
             : ('Oudere week laden: ' + weekToLoad + '...');
@@ -6234,7 +6310,7 @@
             : (typeof asyncLoadConfig.current_month === 'string' ? asyncLoadConfig.current_month : null);
         if (!asyncLoadConfig.enabled || historyLoadRunning || !currentWeek)
         {
-            return;
+            return false;
         }
 
         hidePageLoader();
@@ -6306,6 +6382,11 @@
                     }
 
                     weeksCompleted++;
+                    const estimateForMarker = resolveHistoryWeeksTotal(monthScanState);
+                    if (estimateForMarker && weeksCompleted >= estimateForMarker && projectTotalsIncompleteState === 'loading')
+                    {
+                        setProjectTotalsIncompleteState('loading-history');
+                    }
                     if (chunk.should_continue)
                     {
                         shouldContinue = true;
@@ -6358,13 +6439,15 @@
             historyLoadRunning = false;
             setProjectTotalsIncompleteState('error');
             setRefreshNowButtonDisabled(false, '');
-            return;
+            return false;
         }
 
         updateHistoryLoadNote('');
         stopPageLoaderProgress();
         historyLoadRunning = false;
         setProjectTotalsIncompleteState('');
+
+        return true;
     }
 
     function escapeHtml (value)
