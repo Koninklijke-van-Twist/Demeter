@@ -37,6 +37,16 @@ check($stale['status'] === 'error' && $stale['stale'] === true, 'running zonder 
 check(strpos($stale['message'], 'Ververs Nu') !== false && strpos($stale['message'], 'Facturen laden') !== false, 'melding noemt stap en herstart');
 check(preg_match('/\d{4}-\d{2}-\d{2}T/', $stale['message']) !== 1, 'geen ISO-datum in melding');
 
+// 1b) Vrijgeven alleen als het voortgangsbestand onder lock nog steeds stale is.
+$releaseToken = str_repeat('ab', 16);
+$releasePath = odata_load_progress_path_for_token($releaseToken);
+file_put_contents($releasePath, json_encode(['status' => 'running', 'updated_at' => time() - DEMETER_LOAD_PROGRESS_STALE_SECONDS - 5]));
+check(odata_load_progress_release_if_stale($releaseToken) === true, 'stale voortgang → active-load vrijgegeven');
+file_put_contents($releasePath, json_encode(['status' => 'running', 'updated_at' => time()]));
+check(odata_load_progress_release_if_stale($releaseToken) === false, 'net bijgewerkte voortgang → niet vrijgegeven');
+@unlink($releasePath);
+check(odata_load_progress_release_if_stale($releaseToken) === false, 'geen voortgangsbestand → niet vrijgegeven');
+
 $fresh = odata_load_progress_mark_stale(array_merge($running, ['updated_at' => $now - 10]), $now);
 check($fresh['status'] === 'running' && $fresh['stale'] === false, 'verse voortgang blijft running');
 $done = odata_load_progress_mark_stale(array_merge($running, ['status' => 'completed']), $now);

@@ -2458,6 +2458,48 @@ function odata_send_cache_clear_json(): void
     exit;
 }
 
+/**
+ * Geeft de active-load van een dode worker vrij, zodat 'Ververs Nu' een nieuwe load kan starten
+ * i.p.v. opnieuw mee te liften op de vastgelopen load.
+ *
+ * De stale-check en het vrijgeven gebeuren onder een exclusieve lock op het voortgangsbestand
+ * (dezelfde lock als file_put_contents(..., LOCK_EX) van de worker), zodat een worker die net
+ * voortgang schrijft zijn active-load niet kwijtraakt.
+ *
+ * @return bool true als vrijgegeven (nog steeds stale), false als de load weer leeft of niet te locken is
+ */
+function odata_load_progress_release_if_stale(string $token): bool
+{
+    if (!odata_load_progress_is_valid_token($token)) {
+        return false;
+    }
+
+    $handle = @fopen(odata_load_progress_path_for_token($token), 'rb');
+    if ($handle === false) {
+        return false;
+    }
+
+    try {
+        if (!flock($handle, LOCK_EX)) {
+            return false;
+        }
+
+        $raw = stream_get_contents($handle);
+        $payload = is_string($raw) ? json_decode($raw, true) : null;
+        if (!is_array($payload) || empty(odata_load_progress_mark_stale($payload, time())['stale'])) {
+            return false;
+        }
+
+        require_once __DIR__ . '/bc_fetch/active_load.php';
+        demeter_active_load_error_by_token($token);
+
+        return true;
+    } finally {
+        @flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
 function odata_send_load_progress_json(): void
 {
     if (function_exists('xdebug_disable')) {
@@ -2469,11 +2511,9 @@ function odata_send_load_progress_json(): void
 
     $token = trim((string) ($_GET['token'] ?? ''));
     $payload = odata_load_progress_payload($token);
-    if (!empty($payload['stale'])) {
-        // Dode worker: geef de active-load vrij zodat 'Ververs Nu' een nieuwe load kan starten
-        // i.p.v. opnieuw mee te liften op de vastgelopen load.
-        require_once __DIR__ . '/bc_fetch/active_load.php';
-        demeter_active_load_error_by_token($token);
+    if (!empty($payload['stale']) && !odata_load_progress_release_if_stale($token)) {
+        // De worker schreef net nog voortgang: niet vrijgeven en de verse status tonen.
+        $payload = odata_load_progress_payload($token);
     }
     echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
