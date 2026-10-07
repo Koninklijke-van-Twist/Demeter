@@ -1106,6 +1106,11 @@ function demeter_workorder_state_cache_write_atomic(string $path, string $conten
 
         return false;
     }
+    // Rechten van het bestaande bestand behouden (bv. groepsschrijfbaar voor de nightly).
+    $existingPerms = is_file($path) ? @fileperms($path) : false;
+    if ($existingPerms !== false) {
+        @chmod($tmpPath, $existingPerms & 0777);
+    }
     if (!@rename($tmpPath, $path)) {
         @unlink($tmpPath);
 
