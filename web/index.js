@@ -6172,12 +6172,17 @@
         });
     }
 
-    async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt)
+    // Wachttijden tussen pogingen bij een haperend antwoord (afgekapte/ongeldige JSON, lege body,
+    // HTML-foutpagina, netwerkfout of 5xx zonder JSON). Daarna pas de normale foutweergave.
+    const TRANSIENT_WEEK_RETRY_DELAYS_MS = [3000, 10000, 20000];
+
+    async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt, transientRetries)
     {
         const maxAttempts = 4;
         // Verbindingsfouten niet eindeloos herhalen: na ~5 minuten zichtbaar falen.
         const maxConnectionAttempts = 30;
         const currentAttempt = Number(attempt || 1);
+        const transientRetriesDone = Number(transientRetries || 0);
 
         try
         {
@@ -6189,6 +6194,28 @@
                 'load_month week=' + String(yearWeek) + ' client_retry=' + String(currentAttempt),
                 loadError
             );
+
+            // Zelfde week opnieuw met dezelfde load_token: de server voegt een week idempotent samen
+            // (onder lock), dus een herhaling geeft geen dubbele rijen.
+            if (loadError && loadError.transientResponse === true)
+            {
+                if (transientRetriesDone >= TRANSIENT_WEEK_RETRY_DELAYS_MS.length)
+                {
+                    throw loadError;
+                }
+
+                const retryNumber = transientRetriesDone + 1;
+                updateHistoryLoadNote(
+                    'Verbinding hapert, opnieuw proberen ('
+                    + String(retryNumber)
+                    + '/'
+                    + String(TRANSIENT_WEEK_RETRY_DELAYS_MS.length)
+                    + ')...'
+                );
+                await waitForMs(TRANSIENT_WEEK_RETRY_DELAYS_MS[transientRetriesDone]);
+
+                return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt, retryNumber);
+            }
 
             const errorMessage = String(loadError && loadError.message ? loadError.message : loadError);
             const isConnectionError = isConnectionRetryableODataError(errorMessage);
@@ -6215,8 +6242,64 @@
             );
             await waitForMs(delayMs);
 
-            return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt + 1);
+            return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt + 1, transientRetriesDone);
         }
+    }
+
+    // Markeert een fout als 'haperend antwoord' (opnieuw proberen zinvol), met een leesbare melding.
+    function createTransientWeekResponseError (yearWeek, reason, responseStatus)
+    {
+        const statusText = typeof responseStatus === 'number' && responseStatus > 0 ? ' (HTTP ' + String(responseStatus) + ')' : '';
+        const error = new Error('Week ' + String(yearWeek) + ': ongeldig of onvolledig antwoord van de server' + statusText + ': ' + String(reason || 'onbekend'));
+        error.transientResponse = true;
+        if (typeof responseStatus === 'number')
+        {
+            error.responseStatus = responseStatus;
+        }
+
+        return error;
+    }
+
+    // Leest de body als tekst en parset zelf, zodat een lege/afgekapte body of HTML-foutpagina
+    // als haperend antwoord herkend wordt i.p.v. als harde fout.
+    function parseWeekResponseBody (yearWeek, response, text)
+    {
+        const status = Number(response && response.status || 0);
+        const trimmed = String(text || '').trim();
+        if (trimmed === '')
+        {
+            throw createTransientWeekResponseError(yearWeek, 'lege body', status);
+        }
+
+        let body = null;
+        try
+        {
+            body = JSON.parse(trimmed);
+        }
+        catch (parseError)
+        {
+            const looksLikeHtml = trimmed.charAt(0) === '<';
+            throw createTransientWeekResponseError(yearWeek, looksLikeHtml ? 'HTML-pagina i.p.v. JSON' : 'afgekapte of ongeldige JSON', status);
+        }
+
+        if (!body || typeof body !== 'object')
+        {
+            throw createTransientWeekResponseError(yearWeek, 'geen JSON-object', status);
+        }
+
+        if (!response.ok || body.ok !== true)
+        {
+            const errorText = body.error ? body.error : ('HTTP ' + status);
+            const apiError = createDemeterApiError(errorText, body, status);
+            // 502/503/504 van een proxy/gateway zonder eigen foutmelding: tijdelijk.
+            if (!body.error && status >= 500)
+            {
+                apiError.transientResponse = true;
+            }
+            throw apiError;
+        }
+
+        return body;
     }
 
     function fetchHistoryWeek (yearWeek, weekProgressIndex, weekProgressTotal, options)
@@ -6274,27 +6357,29 @@
             {
                 throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
             }
-            throw fetchError;
+            // Netwerkfout (fetch weigert met TypeError): verbinding hapert.
+            throw createTransientWeekResponseError(yearWeek, fetchError && fetchError.message ? fetchError.message : 'netwerkfout', 0);
         }).then(function (response)
         {
-            return response.json().then(function (body)
+            return response.text().then(function (text)
             {
-                if (!response.ok || !body || body.ok !== true)
+                try
                 {
-                    const errorText = body && body.error ? body.error : ('HTTP ' + response.status);
-                    const apiError = createDemeterApiError(errorText, body, response.status);
+                    return parseWeekResponseBody(yearWeek, response, text);
+                }
+                catch (apiError)
+                {
                     logDemeterODataFailure('load_month week=' + String(yearWeek), apiError);
                     throw apiError;
                 }
-
-                return body;
             }, function (parseError)
             {
                 if (parseError && parseError.name === 'AbortError')
                 {
                     throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen volledig antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
                 }
-                throw parseError;
+                // Body afgebroken tijdens het lezen (verbinding weg): haperend antwoord.
+                throw createTransientWeekResponseError(yearWeek, parseError && parseError.message ? parseError.message : 'body niet leesbaar', Number(response.status || 0));
             });
         }).finally(function ()
         {

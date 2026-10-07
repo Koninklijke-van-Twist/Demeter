@@ -24,6 +24,8 @@ const DEMETER_WORKORDER_CURRENT_WEEK_SKIP_MAX_AGE_HOURS = 2;
  * i.p.v. stil te skippen terwijl de banner blijft oplopen.
  */
 const DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES = 9;
+/** Zelfde week binnen dit venster opnieuw gescand = herhaling (retry), geen nieuwe lege week. */
+const DEMETER_MONTH_SCAN_REPEAT_WINDOW_SECONDS = 1800;
 /** Per Job_No: 0 = altijd Job_No-batches (geen pair-first N+1). */
 const DEMETER_WORKORDER_PAIR_FIRST_MAX_PAIRS_PER_JOB = 0;
 /** Aantal Job_No filters per OData-call bij batch ophalen. */
@@ -1502,6 +1504,25 @@ function demeter_month_scan_should_continue(array $monthScan, ?string $nextPerio
 }
 
 /**
+ * Is deze week in de afgelopen DEMETER_MONTH_SCAN_REPEAT_WINDOW_SECONDS al gescand?
+ *
+ * @param array<string, mixed> $weekMeta
+ */
+function demeter_month_scan_week_scanned_recently(array $weekMeta, ?int $now = null): bool
+{
+    $scannedAt = trim((string) ($weekMeta['scanned_at'] ?? ''));
+    if ($scannedAt === '') {
+        return false;
+    }
+    $timestamp = strtotime($scannedAt);
+    if ($timestamp === false) {
+        return false;
+    }
+
+    return (($now ?? time()) - $timestamp) <= DEMETER_MONTH_SCAN_REPEAT_WINDOW_SECONDS;
+}
+
+/**
  * Werkt month_scan bij na het laden van een maand.
  *
  * @param list<string> $rowKeys
@@ -1514,8 +1535,18 @@ function demeter_month_scan_update_after_load(string $yearMonth, bool $hasMonthR
     }
 
     $empty = !$hasMonthRows;
+    $previousMeta = is_array($monthScan['months'][$yearMonth] ?? null) ? $monthScan['months'][$yearMonth] : [];
+
+    // Herhaling van dezelfde lege week kort na elkaar (bv. een client-retry na een afgekapt antwoord,
+    // terwijl de server de week al had opgeslagen) mag consecutive_empty niet nogmaals ophogen.
+    $isRepeatOfEmptyWeek = $empty
+        && !empty($previousMeta['empty'])
+        && demeter_month_scan_week_scanned_recently($previousMeta);
+
     if ($empty) {
-        $monthScan['consecutive_empty'] = (int) ($monthScan['consecutive_empty'] ?? 0) + 1;
+        if (!$isRepeatOfEmptyWeek) {
+            $monthScan['consecutive_empty'] = (int) ($monthScan['consecutive_empty'] ?? 0) + 1;
+        }
     } else {
         $monthScan['consecutive_empty'] = 0;
     }
@@ -1523,8 +1554,6 @@ function demeter_month_scan_update_after_load(string $yearMonth, bool $hasMonthR
     if ((int) ($monthScan['consecutive_empty'] ?? 0) >= DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT) {
         $monthScan['stop_before_month'] = $yearMonth;
     }
-
-    $previousMeta = is_array($monthScan['months'][$yearMonth] ?? null) ? $monthScan['months'][$yearMonth] : [];
 
     $monthScan['months'][$yearMonth] = [
         'scanned_at' => gmdate('c'),

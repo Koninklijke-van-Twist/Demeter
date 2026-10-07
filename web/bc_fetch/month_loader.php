@@ -204,6 +204,7 @@ function bc_fetch_load_workorder_week_chunk(
     // herladen pagina toonde dan één week of 'Geen cachegegevens', en consecutive_empty begon elke
     // week opnieuw (backfill tot 2017). Onder een lock, omdat de browser twee weken parallel laadt.
     $stateLock = null;
+    $isRepeatOfSavedWeek = false;
     if ($forceFull) {
         $stateLock = demeter_workorder_state_cache_lock($company, $costCenter);
         if ($stateLock === null) {
@@ -213,6 +214,9 @@ function bc_fetch_load_workorder_week_chunk(
         $freshState = demeter_workorder_state_cache_load($company, $costCenter);
         if (is_array($freshState)) {
             $monthScan = is_array($freshState['month_scan'] ?? null) ? $freshState['month_scan'] : $monthScan;
+            // Deze verversing heeft de week al opgeslagen (bv. client-retry na een afgekapt antwoord):
+            // bedragen via delta (nieuw - oud) samenvoegen, anders worden ze dubbel opgeteld.
+            $isRepeatOfSavedWeek = trim((string) ($monthScan['months'][$normalizedYearWeek]['scanned_at'] ?? '')) !== '';
             $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $normalizedYearWeek);
             $previousWeekWoTotals = demeter_month_scan_week_workorder_totals($monthScan, $normalizedYearWeek);
             $loaded['cache_state'] = array_replace(
@@ -246,7 +250,7 @@ function bc_fetch_load_workorder_week_chunk(
     $monthScan = demeter_month_scan_close_week($monthScan, $normalizedYearWeek);
 
     $displayRowsByKey = is_array($loaded['display_rows_by_key'] ?? null) ? $loaded['display_rows_by_key'] : $displayRowsByKey;
-    if ($needsConsolidation) {
+    if ($needsConsolidation || $isRepeatOfSavedWeek) {
         $displayRowsByKey = demeter_merge_display_rows_for_open_week_finance_delta(
             $displayRowsByKey,
             is_array($builtRows['rows'] ?? null) ? $builtRows['rows'] : [],
