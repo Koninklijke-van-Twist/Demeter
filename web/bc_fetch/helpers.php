@@ -34,6 +34,45 @@ function bc_fetch_add(float $left, float $right): float
 }
 
 /**
+ * Environment van een company voor directe BC-calls: expliciete map
+ * ($demeter_company_environment_map) eerst, daarna company-discovery.
+ * Nooit afhankelijk van de volgorde van $auth_list.
+ */
+function bc_fetch_company_environment(string $company): ?string
+{
+    $company = trim($company);
+    if ($company === '') {
+        return null;
+    }
+
+    if (function_exists('odata_bc_mapped_environment')) {
+        $mapped = odata_bc_mapped_environment($company);
+        if (is_string($mapped) && trim($mapped) !== '') {
+            return trim($mapped);
+        }
+    }
+
+    // Company-discovery alleen als er echt meerdere BC-environments zijn; met één environment
+    // is er geen keuze (en geen extra Companies-call tijdens een Mímir-storing).
+    $authList = $GLOBALS['auth_list'] ?? null;
+    $configuredEnvironments = is_array($authList) ? array_filter(array_keys($authList), static function ($env): bool {
+        return trim((string) $env) !== '' && strcasecmp((string) $env, 'mimir') !== 0;
+    }) : [];
+    if (count($configuredEnvironments) > 1 && function_exists('auth_get_environment_for_company')) {
+        try {
+            $fromCompany = trim((string) auth_get_environment_for_company($company));
+            if ($fromCompany !== '' && strcasecmp($fromCompany, 'mimir') !== 0) {
+                return $fromCompany;
+            }
+        } catch (Throwable $ignored) {
+            // Onbekende company: caller valt terug op primaire environment.
+        }
+    }
+
+    return null;
+}
+
+/**
  * Bouwt een OData entity URL met query parameters voor het opgegeven bedrijf.
  */
 function company_entity_url_with_query(string $baseUrl, mixed $environment, string $company, string $entitySet, array $query): string
@@ -51,19 +90,17 @@ function company_entity_url_with_query(string $baseUrl, mixed $environment, stri
     $mimirHealthy = function_exists('odata_mimir_enabled') && odata_mimir_enabled() && !$circuitOpen;
 
     // Zolang Mímir gezond is, geen company-discovery (die zou Mímir al aanroepen).
-    // Na een storing: sentinel 'mimir' vervangen door de BC-environment uit auth.php.
-    if (!$mimirHealthy && ($resolvedEnvironment === '' || strcasecmp($resolvedEnvironment, 'mimir') === 0)) {
-        $bcEnv = function_exists('odata_bc_environment') ? odata_bc_environment() : null;
-        if (is_string($bcEnv) && $bcEnv !== '') {
-            $resolvedEnvironment = $bcEnv;
-        } elseif (function_exists('auth_get_environment_for_company')) {
-            try {
-                $fromCompany = auth_get_environment_for_company($company);
-                if (is_string($fromCompany) && trim($fromCompany) !== '' && strcasecmp($fromCompany, 'mimir') !== 0) {
-                    $resolvedEnvironment = $fromCompany;
-                }
-            } catch (Throwable $error) {
-                // Laat bestaande environment-parameter staan als fallback.
+    // Na een storing: altijd de environment van de company zelf gebruiken (bijv. KVT Germany →
+    // kvtgermanylive_aad), ook als de caller de globale primaire $environment meegaf.
+    // Pas als de company niet te mappen is: primaire BC-environment uit auth.php.
+    if (!$mimirHealthy) {
+        $companyEnvironment = bc_fetch_company_environment($company);
+        if ($companyEnvironment !== null) {
+            $resolvedEnvironment = $companyEnvironment;
+        } elseif ($resolvedEnvironment === '' || strcasecmp($resolvedEnvironment, 'mimir') === 0) {
+            $bcEnv = function_exists('odata_bc_environment') ? odata_bc_environment() : null;
+            if (is_string($bcEnv) && $bcEnv !== '') {
+                $resolvedEnvironment = $bcEnv;
             }
         }
     }

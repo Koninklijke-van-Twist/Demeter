@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/finance_calculations.php';
+require_once __DIR__ . '/bc_enum.php';
 require_once __DIR__ . '/bc_fetch/odata_select.php';
 
 const SAP_IMPORT_NOS = [
@@ -100,7 +101,7 @@ class ProjectFinanceService
                 ],
                 [
                     'entity' => 'SalesLines',
-                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No',
+                    'select' => 'Document_Type,Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No',
                     'amount_field' => 'Line_Amount',
                     'amount_incl_field' => 'Line_Amount',
                 ],
@@ -293,10 +294,12 @@ class ProjectFinanceService
 
                     $normalizedJobNo = self::normalizeMatchValue($jobNo);
                     $amountRaw = $invoiceRow[$amountField] ?? null;
-                    $amount = is_numeric($amountRaw) ? abs((float) $amountRaw) : 0.0;
+                    // Signed: geen abs(), zodat creditregels negatief blijven.
+                    $creditSign = demeter_sales_document_type_is_credit((string) ($invoiceRow['Document_Type'] ?? '')) ? -1.0 : 1.0;
+                    $amount = is_numeric($amountRaw) ? $creditSign * (float) $amountRaw : 0.0;
 
                     $amountInclRaw = $amountInclField !== '' ? ($invoiceRow[$amountInclField] ?? null) : null;
-                    $amountIncludingVat = is_numeric($amountInclRaw) ? abs((float) $amountInclRaw) : $amount;
+                    $amountIncludingVat = is_numeric($amountInclRaw) ? $creditSign * (float) $amountInclRaw : $amount;
 
                     $lineDiscountPercentRaw = $invoiceRow['Line_Discount_Percent'] ?? null;
                     $lineDiscountPercent = is_numeric($lineDiscountPercentRaw) ? (float) $lineDiscountPercentRaw : 0.0;
@@ -1001,7 +1004,7 @@ class ProjectFinanceService
         $fields = is_array($sourceConfig['fields'] ?? null) ? $sourceConfig['fields'] : [];
         $rowMode = (string) ($sourceConfig['row_mode'] ?? self::ROW_MODE_FIRST_NUMERIC);
 
-        $selectFields = array_values(array_unique(array_filter(array_merge([$keyField], $fields), static function ($field): bool {
+        $selectFields = array_values(array_unique(array_filter(array_merge([$keyField], $fields, self::sourceFilterFields($sourceFilter)), static function ($field): bool {
             return is_string($field) && trim($field) !== '';
         })));
 
@@ -1017,10 +1020,8 @@ class ProjectFinanceService
                 continue;
             }
 
+            // Bronfilter (Entry_Type) client-side: Mímir levert NL-captions, directe BC EN-enums.
             $queryFilter = '(' . implode(' or ', $filterParts) . ')';
-            if ($sourceFilter !== '') {
-                $queryFilter .= ' and (' . $sourceFilter . ')';
-            }
 
             try {
                 $url = $this->companyEntityUrlWithQuery($entitySet, [
@@ -1036,7 +1037,7 @@ class ProjectFinanceService
                 );
             }
 
-            $chunkTotals = self::aggregateAmountByKey($rows, $keyField, $fields, $rowMode);
+            $chunkTotals = self::aggregateAmountByKeyWithSourceFilter($rows, $keyField, $fields, $rowMode, $sourceFilter);
             foreach ($chunkTotals as $normalizedKey => $amount) {
                 if (!isset($totalsByKey[$normalizedKey])) {
                     $totalsByKey[$normalizedKey] = 0.0;
@@ -1064,15 +1065,12 @@ class ProjectFinanceService
             return [];
         }
 
-        $selectFields = array_values(array_unique(array_filter(array_merge([$keyField], $fields), static function ($field): bool {
+        $selectFields = array_values(array_unique(array_filter(array_merge([$keyField], $fields, self::sourceFilterFields($sourceFilter)), static function ($field): bool {
             return is_string($field) && trim($field) !== '';
         })));
 
         try {
             $queryFilter = $projectField . " eq '" . self::escapeOdataString($projectNumber) . "'";
-            if ($sourceFilter !== '') {
-                $queryFilter = '(' . $queryFilter . ') and (' . $sourceFilter . ')';
-            }
 
             $url = $this->companyEntityUrlWithQuery($entitySet, [
                 '$select' => implode(',', $selectFields),
@@ -1087,7 +1085,21 @@ class ProjectFinanceService
             );
         }
 
-        return self::aggregateAmountByKey($rows, $keyField, $fields, $rowMode);
+        return self::aggregateAmountByKeyWithSourceFilter($rows, $keyField, $fields, $rowMode, $sourceFilter);
+    }
+
+    /**
+     * Veldnamen uit een eenvoudige "Veld eq 'Waarde'"-bronfilter (voor $select).
+     *
+     * @return list<string>
+     */
+    private static function sourceFilterFields(string $sourceFilter): array
+    {
+        if (preg_match("/^([A-Za-z0-9_]+)\s+eq\s+'/", trim($sourceFilter), $matches) !== 1) {
+            return [];
+        }
+
+        return [(string) $matches[1]];
     }
 
     /**
@@ -1256,7 +1268,7 @@ class ProjectFinanceService
 
             // Filter on Entry_Type
             $entryType = trim((string) ($row[$entryTypeField] ?? ''));
-            if ($entryType !== $entryTypeValue) {
+            if (!demeter_enum_values_equal($entryType, $entryTypeValue)) {
                 continue;
             }
 
@@ -1289,7 +1301,8 @@ class ProjectFinanceService
         $expectedValue = str_replace("''", "'", (string) ($matches[2] ?? ''));
         $actualValue = trim((string) ($row[$fieldName] ?? ''));
 
-        return $actualValue === $expectedValue;
+        // NL (Mímir-caption) en EN (directe BC-enum) gelijkwaardig behandelen.
+        return demeter_enum_values_equal($actualValue, $expectedValue);
     }
 
     private static function descriptionStartsWithImportSap(string $description): bool

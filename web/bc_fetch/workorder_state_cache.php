@@ -7,9 +7,11 @@
  */
 
 require_once __DIR__ . '/cost_center.php';
+require_once __DIR__ . '/../bc_enum.php';
 
 /** v8: Component_Description is de component-Description, niet Sub_Entity_Description (equipmentsoort). */
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 8;
+/** v9: status/Entry_Type NL+EN (Usage/Sale, Closed/Invoiced), signed factuurtotalen. */
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 9;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */
@@ -125,20 +127,7 @@ function demeter_workorder_state_record_status_checked_pairs(array $loadSession,
  */
 function demeter_workorder_status_is_closed(string $status): bool
 {
-    $normalized = strtolower(trim($status));
-    $aliases = [
-        'afgesloten' => 'closed',
-        'geannuleerd' => 'closed',
-        'uitgevoerd' => 'completed',
-        'gecancelled' => 'closed',
-        'cancelled' => 'closed',
-    ];
-
-    if (isset($aliases[$normalized])) {
-        $normalized = $aliases[$normalized];
-    }
-
-    return in_array($normalized, ['closed', 'completed'], true);
+    return demeter_status_is_closed($status);
 }
 
 /**
