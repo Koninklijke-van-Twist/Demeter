@@ -202,20 +202,94 @@ function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCen
 }
 
 /**
- * Filtert werkorders strikt op de werkorderkop (Job_Dimension_1_Value).
+ * Filtert werkorders op de werkorderkop (Job_Dimension_1_Value).
  *
- * ProjectPosten Global Dimension 1 telt niet mee. Een werkorder met kop 70
- * hoort niet bij filter 15, ook als een projectpost die dimensie wel heeft.
+ * Is de kop gevuld, dan telt alleen de kop: een werkorder met kop 70 hoort niet bij filter 15,
+ * ook als een projectpost die dimensie wel heeft.
+ *
+ * Is de kop LEEG, dan valt de werkorder terug op de kostenplaats van zijn ProjectPosten
+ * (Global_Dimension_1_Code): hij hoort bij het filter als minstens één eigen post
+ * (LVS_Work_Order_No = werkordernummer) die kostenplaats heeft. Heeft de werkorder in de geladen
+ * posten geen eigen posten, dan tellen de posten van zijn project (Job_No). Bij een match krijgt de
+ * werkorder die kostenplaats als Job_Dimension_1_Value (Cost_Center_Source = 'projectposten'),
+ * zodat de kolom Kostenplaats en het cachefilter hem ook tonen.
+ * Filter 'geen kostenplaats' blijft strikt op de lege kop.
  *
  * @param list<array> $workorders
- * @param list<array> $allPostenRows Ongebruikt; aanroepers blijven de posten meegeven.
+ * @param list<array> $allPostenRows ProjectPosten van het geladen bereik (voor de fallback).
+ * @param bool $deferEmptyHeader Werkorders met lege kop (nog) niet wegfilteren, omdat de posten nog
+ *                               niet geladen zijn; de definitieve filtering volgt later.
  * @return list<array>
  */
-function bc_fetch_filter_workorders_for_cost_center(array $workorders, array $allPostenRows, string $costCenter): array
-{
-    unset($allPostenRows);
+function bc_fetch_filter_workorders_for_cost_center(
+    array $workorders,
+    array $allPostenRows,
+    string $costCenter,
+    bool $deferEmptyHeader = false
+): array {
+    $normalized = bc_fetch_normalize_cost_center($costCenter);
+    if ($normalized === '' || $normalized === bc_fetch_cost_center_none_value()) {
+        return bc_fetch_filter_workorders_by_cost_center($workorders, $costCenter);
+    }
 
-    return bc_fetch_filter_workorders_by_cost_center($workorders, $costCenter);
+    $codesByWorkorder = [];
+    $codesByJob = [];
+    foreach ($allPostenRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $code = trim((string) ($row['Global_Dimension_1_Code'] ?? ''));
+        if ($code === '') {
+            $code = trim((string) ($row['LVS_Global_Dimension_1_Code'] ?? ''));
+        }
+        if ($code === '') {
+            continue;
+        }
+        $lvs = strtolower(trim((string) ($row['LVS_Work_Order_No'] ?? '')));
+        if ($lvs !== '') {
+            $codesByWorkorder[$lvs][$code] = true;
+        }
+        $job = strtolower(trim((string) ($row['Job_No'] ?? '')));
+        if ($job !== '') {
+            $codesByJob[$job][$code] = true;
+        }
+    }
+
+    $result = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+
+        if (trim((string) ($workorder['Job_Dimension_1_Value'] ?? '')) !== '') {
+            if (bc_fetch_workorder_matches_cost_center($workorder, $normalized)) {
+                $result[] = $workorder;
+            }
+            continue;
+        }
+
+        if ($deferEmptyHeader) {
+            $result[] = $workorder;
+            continue;
+        }
+
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        $job = strtolower(trim((string) ($workorder['Job_No'] ?? '')));
+        $codes = ($no !== '' && isset($codesByWorkorder[$no]))
+            ? $codesByWorkorder[$no]
+            : ($job !== '' && isset($codesByJob[$job]) ? $codesByJob[$job] : []);
+
+        foreach (array_keys($codes) as $code) {
+            if (bc_fetch_cost_centers_match((string) $code, $normalized)) {
+                $workorder['Job_Dimension_1_Value'] = (string) $code;
+                $workorder['Cost_Center_Source'] = 'projectposten';
+                $result[] = $workorder;
+                break;
+            }
+        }
+    }
+
+    return $result;
 }
 
 /**
