@@ -18,9 +18,27 @@ if (!defined('DEMETER_ODATA_RETRY_BASE_DELAY_MS')) {
 if (!defined('DEMETER_ODATA_RETRY_MAX_DELAY_MS')) {
     define('DEMETER_ODATA_RETRY_MAX_DELAY_MS', 15000);
 }
-/** Vast interval voor transport/cURL-fouten (geen pogingslimiet). */
+/** Vast interval voor transport/cURL-fouten. */
 if (!defined('DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS')) {
     define('DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS', 10000);
+}
+/**
+ * Maximale totale duur (s) van verbindings-retries per OData-call. Daarna faalt de call zichtbaar
+ * i.p.v. eindeloos door te proberen (en intussen de active-load-heartbeat vers te houden).
+ */
+if (!defined('DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_WEB')) {
+    define('DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_WEB', 300);
+}
+if (!defined('DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_CLI')) {
+    define('DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_CLI', 1800);
+}
+/** Een 'running' laadvoortgang zonder update na dit aantal seconden geldt als vastgelopen. */
+if (!defined('DEMETER_LOAD_PROGRESS_STALE_SECONDS')) {
+    define('DEMETER_LOAD_PROGRESS_STALE_SECONDS', 300);
+}
+/** Heartbeat-interval (s) tijdens een lopende cURL-call, zodat lange calls niet als vastgelopen gelden. */
+if (!defined('DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS')) {
+    define('DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS', 30);
 }
 
 require_once __DIR__ . '/bc_fetch/call_time_log.php';
@@ -740,6 +758,7 @@ function odata_mimir_request(string $method, string $path, ?array $jsonBody = nu
         $opts[CURLOPT_POSTFIELDS] = $payload;
     }
     curl_setopt_array($ch, $opts);
+    odata_attach_load_progress_heartbeat($ch);
     $raw = curl_exec($ch);
     if ($raw === false) {
         $err = curl_error($ch);
@@ -1450,6 +1469,8 @@ function odata_get_json(string $url, array $auth): array
     $maxHttpAttempts = max(1, (int) DEMETER_ODATA_RETRY_MAX_ATTEMPTS);
     $httpAttempt = 0;
     $attempt = 0;
+    $callStartedAt = microtime(true);
+    $connectionRetryMaxSeconds = odata_connection_retry_max_seconds_for_sapi(PHP_SAPI);
     odata_error_context_begin_call($url);
 
     while (true) {
@@ -1461,6 +1482,18 @@ function odata_get_json(string $url, array $auth): array
             return $result;
         } catch (Exception $error) {
             if (odata_exception_is_connection_retryable($error)) {
+                $elapsedSeconds = (int) round(microtime(true) - $callStartedAt);
+                if ($elapsedSeconds >= $connectionRetryMaxSeconds) {
+                    odata_error_context_record_attempt($url, $error, $attempt, false);
+                    consolelog("OData connection retries exhausted after {$attempt} attempts / {$elapsedSeconds}s for {$url}\n");
+                    throw new Exception(
+                        'Verbinding met Business Central blijft mislukken na ' . $attempt . ' pogingen ('
+                        . $elapsedSeconds . ' s): ' . $error->getMessage(),
+                        0,
+                        $error
+                    );
+                }
+
                 odata_error_context_record_attempt($url, $error, $attempt, true);
                 $delayMs = (int) DEMETER_ODATA_CONNECTION_RETRY_DELAY_MS;
                 consolelog(
@@ -1511,6 +1544,57 @@ function odata_get_json(string $url, array $auth): array
     }
 }
 
+function odata_connection_retry_max_seconds_for_sapi(string $sapi): int
+{
+    return strtolower($sapi) === 'cli'
+        ? (int) DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_CLI
+        : (int) DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_WEB;
+}
+
+/**
+ * Zet een heartbeat-callback op een cURL-handle: zolang de call loopt (ook als BC/Mímir traag is)
+ * wordt de laadvoortgang elke DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS ververst.
+ * Zo blijft 'vastgelopen' (geen update > DEMETER_LOAD_PROGRESS_STALE_SECONDS) betekenen: de worker is weg.
+ *
+ * @param resource|\CurlHandle $ch
+ */
+function odata_attach_load_progress_heartbeat($ch): void
+{
+    if (!defined('CURLOPT_XFERINFOFUNCTION') || odata_get_active_load_progress_token() === '') {
+        return;
+    }
+
+    curl_setopt($ch, CURLOPT_NOPROGRESS, false);
+    curl_setopt($ch, CURLOPT_XFERINFOFUNCTION, static function (): int {
+        odata_load_progress_heartbeat_throttled();
+
+        return 0;
+    });
+}
+
+function odata_load_progress_heartbeat_throttled(): void
+{
+    static $lastBeatAt = 0;
+    $now = time();
+    if ($now - $lastBeatAt < (int) DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS) {
+        return;
+    }
+    $lastBeatAt = $now;
+
+    $token = odata_get_active_load_progress_token();
+    if ($token === '' || !odata_load_progress_is_valid_token($token)) {
+        return;
+    }
+
+    $existing = odata_load_progress_payload($token, false);
+    if (($existing['status'] ?? '') !== 'running') {
+        return;
+    }
+
+    // Lege payload: status/teksten blijven gelijk, alleen updated_at (+ active-load heartbeat) ververst.
+    odata_load_progress_write($token, []);
+}
+
 function odata_exception_is_retryable(Exception $error): bool
 {
     if (odata_exception_is_connection_retryable($error)) {
@@ -1538,6 +1622,7 @@ function odata_get_json_once(string $url, array $auth): array
         CURLOPT_CONNECTTIMEOUT => DEMETER_ODATA_CURL_CONNECT_TIMEOUT_SECONDS,
         CURLOPT_TIMEOUT => DEMETER_ODATA_MAX_EXECUTION_SECONDS,
         CURLOPT_USERAGENT => $userAgent,
+        CURLOPT_NOSIGNAL => true,
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
             "Accept-Language: nl-NL,nl;q=0.9,en;q=0.8",
@@ -1553,6 +1638,8 @@ function odata_get_json_once(string $url, array $auth): array
         curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_NTLM);
         curl_setopt($ch, CURLOPT_USERPWD, $auth['user'] . ":" . $auth['pass']);
     }
+
+    odata_attach_load_progress_heartbeat($ch);
 
     // (optioneel) als je met interne CA/self-signed werkt:
     // curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
@@ -1761,7 +1848,8 @@ function odata_load_progress_write(string $token, array $payload): void
 
     odata_load_progress_cleanup();
 
-    $existingPayload = odata_load_progress_payload($token);
+    // Ruwe payload (zonder stale-markering) om velden over te nemen.
+    $existingPayload = odata_load_progress_payload($token, false);
     $now = time();
     $normalizedPayload = [
         'token' => $token,
@@ -1782,7 +1870,14 @@ function odata_load_progress_write(string $token, array $payload): void
         return;
     }
 
-    @file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX);
+    if (@file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX) === false) {
+        // Bv. rechten op cache/ na een deploy: zonder log zou de voortgang ongemerkt bevriezen.
+        static $loggedWriteFailure = false;
+        if (!$loggedWriteFailure) {
+            $loggedWriteFailure = true;
+            error_log('Demeter: laadvoortgang niet schrijfbaar: ' . odata_load_progress_path_for_token($token));
+        }
+    }
 
     if (function_exists('demeter_active_load_heartbeat_by_token')
         && (string) ($normalizedPayload['status'] ?? '') === 'running'
@@ -1887,7 +1982,7 @@ function odata_load_progress_error(string $token, int $totalMonths, int $current
     }
 }
 
-function odata_load_progress_payload(string $token): array
+function odata_load_progress_payload(string $token, bool $detectStale = true): array
 {
     if (!odata_load_progress_is_valid_token($token)) {
         return [
@@ -1956,7 +2051,7 @@ function odata_load_progress_payload(string $token): array
         ];
     }
 
-    return [
+    $normalized = [
         'token' => (string) ($payload['token'] ?? $token),
         'status' => (string) ($payload['status'] ?? 'idle'),
         'total_months' => max(0, (int) ($payload['total_months'] ?? 0)),
@@ -1969,6 +2064,50 @@ function odata_load_progress_payload(string $token): array
         'completed_at' => max(0, (int) ($payload['completed_at'] ?? 0)),
         'error' => trim((string) ($payload['error'] ?? '')),
     ];
+
+    return $detectStale ? odata_load_progress_mark_stale($normalized, time()) : $normalized;
+}
+
+/**
+ * Leesbare Nederlandse tijd (Europe/Amsterdam) voor meldingen, bv. '7 oktober 21:25'.
+ */
+function odata_format_dutch_datetime(int $timestamp): string
+{
+    $months = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
+    $date = (new DateTimeImmutable('@' . $timestamp))->setTimezone(new DateTimeZone('Europe/Amsterdam'));
+
+    return (int) $date->format('j') . ' ' . $months[(int) $date->format('n') - 1] . ' ' . $date->format('H:i');
+}
+
+/**
+ * Een 'running' voortgang die al DEMETER_LOAD_PROGRESS_STALE_SECONDS niet is bijgewerkt hoort bij een
+ * worker die niet meer leeft (afgebroken request, deploy, fatal error). Meld dat als fout, zodat
+ * wachtende pagina's stoppen en de gebruiker opnieuw kan starten.
+ *
+ * @param array<string, mixed> $payload
+ * @return array<string, mixed>
+ */
+function odata_load_progress_mark_stale(array $payload, int $now): array
+{
+    $updatedAt = (int) ($payload['updated_at'] ?? 0);
+    if (($payload['status'] ?? '') !== 'running' || $updatedAt <= 0
+        || ($now - $updatedAt) <= (int) DEMETER_LOAD_PROGRESS_STALE_SECONDS
+    ) {
+        $payload['stale'] = false;
+
+        return $payload;
+    }
+
+    $lastStep = trim((string) ($payload['message'] ?? ''));
+    $message = 'Laden is vastgelopen: geen voortgang sinds ' . odata_format_dutch_datetime($updatedAt)
+        . ($lastStep !== '' ? ' (' . $lastStep . ')' : '')
+        . '. Klik op "Ververs Nu" om opnieuw te starten.';
+    $payload['status'] = 'error';
+    $payload['stale'] = true;
+    $payload['message'] = $message;
+    $payload['error'] = $message;
+
+    return $payload;
 }
 
 function cache_cleanup_marker_path(): string
@@ -2329,7 +2468,14 @@ function odata_send_load_progress_json(): void
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
 
     $token = trim((string) ($_GET['token'] ?? ''));
-    echo json_encode(odata_load_progress_payload($token), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    $payload = odata_load_progress_payload($token);
+    if (!empty($payload['stale'])) {
+        // Dode worker: geef de active-load vrij zodat 'Ververs Nu' een nieuwe load kan starten
+        // i.p.v. opnieuw mee te liften op de vastgelopen load.
+        require_once __DIR__ . '/bc_fetch/active_load.php';
+        demeter_active_load_error_by_token($token);
+    }
+    echo json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     exit;
 }
 

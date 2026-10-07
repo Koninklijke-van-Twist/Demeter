@@ -649,7 +649,10 @@
                         stopPageLoaderProgress();
                         hitchhikeLoadRunning = false;
                         setProjectTotalsIncompleteState('error');
-                        updateHistoryLoadNote('Bijwerken mislukt.');
+                        // Bij een vastgelopen load (geen voortgang meer) staat de uitleg in progress.message.
+                        updateHistoryLoadNote(progress && progress.stale === true && message !== ''
+                            ? message
+                            : 'Bijwerken mislukt.');
                         setRefreshNowButtonDisabled(false, '');
                         resolve();
                     }
@@ -5968,6 +5971,12 @@
     function isConnectionRetryableODataError (message)
     {
         const normalized = String(message || '').toLowerCase();
+        if (normalized.indexOf('blijft mislukken') !== -1)
+        {
+            // Server heeft zelf al minutenlang opnieuw geprobeerd: niet nog eens herhalen.
+            return false;
+        }
+
         return normalized.indexOf('curl error') !== -1
             || normalized.indexOf('curl fout') !== -1
             || normalized.indexOf('recv failure') !== -1
@@ -6017,6 +6026,8 @@
     async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt)
     {
         const maxAttempts = 4;
+        // Verbindingsfouten niet eindeloos herhalen: na ~5 minuten zichtbaar falen.
+        const maxConnectionAttempts = 30;
         const currentAttempt = Number(attempt || 1);
 
         try
@@ -6035,6 +6046,10 @@
             if (!isConnectionError && (currentAttempt >= maxAttempts || !isRetryableODataError(errorMessage)))
             {
                 throw loadError;
+            }
+            if (isConnectionError && currentAttempt >= maxConnectionAttempts)
+            {
+                throw new Error('Week ' + String(yearWeek) + ' laden blijft mislukken na ' + String(currentAttempt) + ' pogingen: ' + errorMessage);
             }
 
             const delayMs = isConnectionError ? 10000 : Math.min(15000, 2000 * currentAttempt);
@@ -6089,11 +6104,32 @@
             params.set('call_time_log_session', callTimeLogSession);
         }
 
+        // Server stopt na max. 600 s (max_execution_time); zonder antwoord na 11 minuten is de request dood.
+        const weekTimeoutMs = 11 * 60 * 1000;
+        const abortController = typeof AbortController === 'function' ? new AbortController() : null;
+        const abortTimer = abortController
+            ? window.setTimeout(function () { abortController.abort(); }, weekTimeoutMs)
+            : 0;
+
         return fetch('index.php?' + params.toString(), {
             method: 'GET',
             credentials: 'same-origin',
             headers: {
                 Accept: 'application/json'
+            },
+            signal: abortController ? abortController.signal : undefined
+        }).catch(function (fetchError)
+        {
+            if (fetchError && fetchError.name === 'AbortError')
+            {
+                throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
+            }
+            throw fetchError;
+        }).finally(function ()
+        {
+            if (abortTimer)
+            {
+                window.clearTimeout(abortTimer);
             }
         }).then(function (response)
         {
@@ -6321,6 +6357,7 @@
             stopPageLoaderProgress();
             historyLoadRunning = false;
             setProjectTotalsIncompleteState('error');
+            setRefreshNowButtonDisabled(false, '');
             return;
         }
 
