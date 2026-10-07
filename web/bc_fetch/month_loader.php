@@ -449,7 +449,8 @@ function bc_fetch_load_current_week_by_days(
     $aggregatedProjectInvoiceIds = [];
     $aggregatedProjectInvoicedTotal = [];
     $aggregatedFinanceKeyByPair = [];
-    $lastCacheState = is_array($cachedState) ? $cachedState : [];
+    // cache_state is de werkordermap zelf (bc_fetch_build_workorder_state_cache), niet de volledige payload.
+    $lastCacheState = is_array($cachedState) && is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
     $lastLoadSession = is_array($cachedState)
         ? demeter_workorder_state_normalize_load_session($cachedState['load_session'] ?? null)
         : demeter_workorder_load_session_defaults();
@@ -532,7 +533,8 @@ function bc_fetch_load_current_week_by_days(
         $lastCacheState = is_array($loaded['cache_state'] ?? null) ? $loaded['cache_state'] : $lastCacheState;
         $lastLoadSession = is_array($loaded['load_session'] ?? null) ? $loaded['load_session'] : $lastLoadSession;
         $cachedState = array_merge(is_array($cachedState) ? $cachedState : [], [
-            'workorders' => is_array($lastCacheState['workorders'] ?? null) ? $lastCacheState['workorders'] : [],
+            // Volgende dag bouwt verder op de werkordermap van deze dag (niet leeg beginnen).
+            'workorders' => $lastCacheState,
             'load_session' => $lastLoadSession,
         ]);
 
