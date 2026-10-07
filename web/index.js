@@ -5507,8 +5507,13 @@
         }
     }
 
+    // Zet de projecttotalen op ALLE rijen van een project en geeft de rijen terug waarvan ze wijzigden.
+    // Die moeten ook opnieuw getekend worden: anders hield bv. een werkorder die in een eerdere week
+    // binnenkwam lege/oude projectcellen, terwijl alleen de rij die deze week binnenkwam de nieuwe
+    // totalen toonde.
     function applyCumulativeProjectTotalsToRows ()
     {
+        const changedRows = [];
         for (const row of rows)
         {
             const normalizedJobNo = String(row.Job_No || '').trim().toLowerCase();
@@ -5517,9 +5522,18 @@
                 continue;
             }
 
-            row.Project_Actual_Costs = cumulativeProjectTotals[normalizedJobNo].costs;
-            row.Project_Total_Revenue = cumulativeProjectTotals[normalizedJobNo].revenue;
+            const nextCosts = cumulativeProjectTotals[normalizedJobNo].costs;
+            const nextRevenue = cumulativeProjectTotals[normalizedJobNo].revenue;
+            if (Number(row.Project_Actual_Costs || 0) !== Number(nextCosts || 0)
+                || Number(row.Project_Total_Revenue || 0) !== Number(nextRevenue || 0))
+            {
+                changedRows.push(row);
+            }
+            row.Project_Actual_Costs = nextCosts;
+            row.Project_Total_Revenue = nextRevenue;
         }
+
+        return changedRows;
     }
 
     function mergeFinanceAmount (left, right)
@@ -5924,7 +5938,14 @@
         }
 
         coalesceDuplicateRowsByBusinessKey();
-        applyCumulativeProjectTotalsToRows();
+        const projectTotalsChangedRows = applyCumulativeProjectTotalsToRows();
+        for (const changedRow of projectTotalsChangedRows)
+        {
+            if (touchedRows.indexOf(changedRow) < 0)
+            {
+                touchedRows.push(changedRow);
+            }
+        }
         sortRowsInPlace();
         renderHeader();
         applyChunkRowsToDom(touchedRows);
