@@ -692,10 +692,9 @@
                         stopPageLoaderProgress();
                         hitchhikeLoadRunning = false;
                         setProjectTotalsIncompleteState('error');
-                        // Bij een vastgelopen load (geen voortgang meer) staat de uitleg in progress.message.
-                        updateHistoryLoadNote(progress && progress.stale === true && message !== ''
-                            ? message
-                            : 'Bijwerken mislukt.');
+                        // Toon de uitleg van de server (bij een vastgelopen load staat die in progress.message).
+                        const serverError = progress && typeof progress.error === 'string' ? progress.error.trim() : '';
+                        updateHistoryLoadNote(serverError !== '' ? serverError : (message !== '' ? message : 'Bijwerken mislukt.'));
                         stripLoadTokenFromUrl();
                         setRefreshNowButtonDisabled(false, '');
                         resolve();
@@ -6201,12 +6200,6 @@
                 throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
             }
             throw fetchError;
-        }).finally(function ()
-        {
-            if (abortTimer)
-            {
-                window.clearTimeout(abortTimer);
-            }
         }).then(function (response)
         {
             return response.json().then(function (body)
@@ -6220,7 +6213,21 @@
                 }
 
                 return body;
+            }, function (parseError)
+            {
+                if (parseError && parseError.name === 'AbortError')
+                {
+                    throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen volledig antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
+                }
+                throw parseError;
             });
+        }).finally(function ()
+        {
+            // Pas na het volledig inlezen van de body: een haperende body valt ook onder de timeout.
+            if (abortTimer)
+            {
+                window.clearTimeout(abortTimer);
+            }
         });
     }
 
