@@ -1999,6 +1999,44 @@ $initialData = [
             cursor: pointer;
         }
 
+        /* Projecttotalen tijdens het laden van weken: nog niet compleet. */
+        .project-total-cell.project-total-incomplete {
+            color: #6b7280;
+            font-style: italic;
+        }
+
+        .project-total-cell.project-total-incomplete .amount-positive,
+        .project-total-cell.project-total-incomplete .amount-negative,
+        td.project-total-cell.project-total-incomplete.amount-positive,
+        td.project-total-cell.project-total-incomplete.amount-negative {
+            opacity: 0.6;
+        }
+
+        .project-total-cell.project-total-incomplete::after {
+            content: ' \23F3';
+            font-style: normal;
+            font-size: 0.8em;
+        }
+
+        .project-incomplete-badge {
+            display: block;
+            font-size: 0.75em;
+            font-weight: normal;
+            font-style: italic;
+            color: #6b7280;
+            white-space: nowrap;
+            cursor: help;
+        }
+
+        .project-incomplete-note {
+            margin-bottom: 8px;
+            padding: 6px 10px;
+            border-left: 3px solid #d1a000;
+            background: #fff8e1;
+            color: #5f4b00;
+            font-style: italic;
+        }
+
         td.amount-info-clickable:hover {
             filter: brightness(0.96);
         }

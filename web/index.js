@@ -140,6 +140,8 @@
         : { consecutive_empty: 0, stop_before_month: null, months: {} };
     let nextHistoryMonth = typeof asyncLoadConfig.next_month === 'string' ? asyncLoadConfig.next_month : null;
     let historyLoadRunning = false;
+    // '' = compleet, 'loading' = weken worden nog geladen, 'error' = laden afgebroken.
+    let projectTotalsIncompleteState = '';
     let rowAnimationObserver = null;
     const cumulativeProjectTotals = {};
 
@@ -593,6 +595,7 @@
         }
 
         hitchhikeLoadRunning = true;
+        setProjectTotalsIncompleteState('loading');
         setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
         if (loadProgressTokenInput)
         {
@@ -645,6 +648,7 @@
                         window.clearInterval(pollId);
                         stopPageLoaderProgress();
                         hitchhikeLoadRunning = false;
+                        setProjectTotalsIncompleteState('error');
                         updateHistoryLoadNote('Bijwerken mislukt.');
                         setRefreshNowButtonDisabled(false, '');
                         resolve();
@@ -2382,6 +2386,8 @@
 
             label.appendChild(totalLine);
         }
+
+        applyProjectTotalsIncompleteHeaderMarkers();
     }
 
     function getHeaderSearchTotals ()
@@ -2679,11 +2685,13 @@
                 '<div class="project-group-summary-content">',
                 '<strong>Project: </strong><a href="#" class="project-posten-link project-posten-project-link">' + escapeHtml(summary.projectLabel) + '</a>',
                 '<span class="project-group-summary-sep">|</span>',
+                '<span class="project-total-cell project-group-summary-totals">',
                 '<strong>Kosten: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalCosts)),
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Opbrengst: </strong>' + escapeHtml(formatCurrencyOrZero(summary.totalRevenue)),
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Resultaat: </strong>' + projectResultSpan,
+                '</span>',
                 '<span class="project-group-summary-sep">|</span>',
                 '<strong>Project taakregels: </strong>' + escapeHtml(String(summary.taskLineCount)),
                 '<span class="project-group-summary-sep">|</span>',
@@ -2699,11 +2707,18 @@
             summaryParts.push('</div>');
             headerCell.innerHTML = summaryParts.join(' ');
 
+            const summaryTotals = headerCell.querySelector('.project-group-summary-totals');
+            if (summaryTotals)
+            {
+                applyProjectTotalIncompleteToElement(summaryTotals);
+            }
+
             if (summary.hasInvoiceLink)
             {
                 const detailsLink = headerCell.querySelector('.project-invoice-details-link');
                 if (detailsLink)
                 {
+                    detailsLink.title = buildInvoiceIdTooltip(summary.invoiceIds);
                     detailsLink.addEventListener('click', function (event)
                     {
                         event.preventDefault();
@@ -3058,6 +3073,12 @@
                         td.textContent = String(row[column.key] || '');
                     }
                 }
+            }
+
+            if (projectFinancialColumnKeys.has(column.key))
+            {
+                td.classList.add('project-total-cell');
+                applyProjectTotalIncompleteToElement(td);
             }
 
             if (amountColumnKeys.has(column.key))
@@ -4756,11 +4777,12 @@
         const safeProjectNo = String(projectNo || '').trim();
         const lines = getProjectPostenRowsForProject(safeProjectNo);
         const title = 'ProjectPosten - Project ' + (safeProjectNo !== '' ? safeProjectNo : '(leeg)');
-        openProjectPostenModal(title, lines);
+        openProjectPostenModal(title, lines, { projectScope: true });
     }
 
-    function openProjectPostenModal (title, lines)
+    function openProjectPostenModal (title, lines, options)
     {
+        const showIncompleteNote = Boolean(options && options.projectScope) && projectTotalsIncompleteState !== '';
         if (!notesBody)
         {
             return;
@@ -4772,6 +4794,17 @@
         }
 
         notesBody.innerHTML = '';
+
+        if (showIncompleteNote)
+        {
+            const incompleteNote = document.createElement('div');
+            incompleteNote.className = 'project-incomplete-note';
+            incompleteNote.textContent = projectTotalsIncompleteState === 'error'
+                ? 'Let op: het laden van de weken is afgebroken; deze lijst is mogelijk niet compleet.'
+                : 'Nog aan het laden: niet alle weken zijn geladen; deze lijst is mogelijk niet compleet.';
+            incompleteNote.title = getProjectTotalsIncompleteTooltip();
+            notesBody.appendChild(incompleteNote);
+        }
 
         const normalizedLines = Array.isArray(lines) ? lines.filter(function (line)
         {
@@ -4814,7 +4847,7 @@
             const tr = document.createElement('tr');
             const cellValues = [
                 String((line && line.Workorder) || ''),
-                String((line && line.Posting_Date) || ''),
+                formatDutchDate(String((line && line.Posting_Date) || '')),
                 String((line && line.Entry_Type) || ''),
                 String((line && line.Type) || ''),
                 String((line && line.No) || ''),
@@ -4836,6 +4869,97 @@
         table.appendChild(tbodyElement);
         notesBody.appendChild(table);
         notesOverlay.style.display = '';
+    }
+
+    function getProjectTotalsIncompleteTooltip ()
+    {
+        if (projectTotalsIncompleteState === 'loading')
+        {
+            return 'Projecttotaal is nog niet compleet: niet alle weken zijn geladen.';
+        }
+        if (projectTotalsIncompleteState === 'error')
+        {
+            return 'Projecttotaal is niet compleet: het laden van de weken is afgebroken. Ververs om opnieuw te laden.';
+        }
+
+        return '';
+    }
+
+    // Markeert een projecttotaal-cel (of samenvatting) als onvolledig; bewaart de oorspronkelijke title.
+    function applyProjectTotalIncompleteToElement (element)
+    {
+        if (!element)
+        {
+            return;
+        }
+
+        if (element.dataset.projectBaseTitle === undefined)
+        {
+            element.dataset.projectBaseTitle = element.getAttribute('title') || '';
+        }
+
+        const tooltip = getProjectTotalsIncompleteTooltip();
+        element.classList.toggle('project-total-incomplete', tooltip !== '');
+        if (tooltip !== '')
+        {
+            element.title = tooltip;
+        }
+        else if (element.dataset.projectBaseTitle !== '')
+        {
+            element.title = element.dataset.projectBaseTitle;
+        }
+        else
+        {
+            element.removeAttribute('title');
+        }
+    }
+
+    function applyProjectTotalsIncompleteHeaderMarkers ()
+    {
+        const tooltip = getProjectTotalsIncompleteTooltip();
+        for (const th of document.querySelectorAll('table.workorders-table th[data-sort-key]'))
+        {
+            if (!projectFinancialColumnKeys.has(th.dataset.sortKey || ''))
+            {
+                continue;
+            }
+
+            let badge = th.querySelector('.project-incomplete-badge');
+            th.classList.toggle('project-total-incomplete', tooltip !== '');
+            if (tooltip === '')
+            {
+                if (badge)
+                {
+                    badge.remove();
+                }
+                continue;
+            }
+
+            if (!badge)
+            {
+                badge = document.createElement('span');
+                badge.className = 'project-incomplete-badge';
+                th.appendChild(badge);
+            }
+            badge.textContent = projectTotalsIncompleteState === 'error' ? '⚠ niet compleet' : '⏳ nog aan het laden';
+            badge.title = tooltip;
+        }
+    }
+
+    function setProjectTotalsIncompleteState (state)
+    {
+        const nextState = state === 'loading' || state === 'error' ? state : '';
+        if (nextState === projectTotalsIncompleteState)
+        {
+            return;
+        }
+
+        projectTotalsIncompleteState = nextState;
+        for (const element of document.querySelectorAll('.project-total-cell'))
+        {
+            applyProjectTotalIncompleteToElement(element);
+        }
+        applyProjectTotalsIncompleteHeaderMarkers();
     }
 
     function buildInvoiceIdTooltip (invoiceIds)
@@ -6053,6 +6177,7 @@
 
         hidePageLoader();
         historyLoadRunning = true;
+        setProjectTotalsIncompleteState('loading');
         startBackgroundLoadProgressPolling();
         let weekBatch = [currentWeek];
         let isFirstBatch = true;
@@ -6169,12 +6294,14 @@
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             stopPageLoaderProgress();
             historyLoadRunning = false;
+            setProjectTotalsIncompleteState('error');
             return;
         }
 
         updateHistoryLoadNote('');
         stopPageLoaderProgress();
         historyLoadRunning = false;
+        setProjectTotalsIncompleteState('');
     }
 
     function escapeHtml (value)
