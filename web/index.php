@@ -84,6 +84,34 @@ function demeter_render_progress_screen_html(string $title, string $statusUrl, s
         . '})();</script></body></html>';
 }
 
+/**
+ * Controleert of de cachemappen waar een week-load in schrijft schrijfbaar zijn.
+ *
+ * @throws RuntimeException
+ */
+function demeter_assert_cache_dirs_writable(): void
+{
+    $dirs = [
+        load_progress_base_dir(),
+        demeter_workorder_state_cache_directory(),
+        function_exists('demeter_invoice_cache_directory') ? demeter_invoice_cache_directory() : '',
+    ];
+    foreach ($dirs as $dir) {
+        if ($dir === '') {
+            continue;
+        }
+        if (!is_dir($dir)) {
+            @mkdir($dir, 0777, true);
+        }
+        if (!is_dir($dir) || !is_writable($dir)) {
+            throw new RuntimeException(
+                'Demeter kan niet schrijven in de cachemap ' . basename($dir)
+                . '. Controleer de rechten op de server (web/cache moet schrijfbaar zijn voor de webserver).'
+            );
+        }
+    }
+}
+
 ob_start();
 register_shutdown_function(function () {
     $error = error_get_last();
@@ -497,6 +525,33 @@ if (($_GET['action'] ?? '') === 'load_month') {
             odata_set_active_load_progress_token($loadProgressTokenRaw);
             $chunkProgressToken = $loadProgressTokenRaw;
         }
+        $GLOBALS['demeter_load_month_progress_token'] = $chunkProgressToken;
+        $GLOBALS['demeter_load_month_label'] = $yearWeek;
+
+        // Sterft deze worker (fatal, parse error tijdens een deploy, timeout), zet de voortgang dan op
+        // 'error' i.p.v. hem eeuwig op 'running' te laten staan.
+        register_shutdown_function(static function (): void {
+            $error = error_get_last();
+            $fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
+            if (!$error || !in_array((int) ($error['type'] ?? 0), $fatalTypes, true)) {
+                return;
+            }
+            $token = $GLOBALS['demeter_load_month_progress_token'] ?? null;
+            if (!is_string($token) || $token === '' || !function_exists('odata_load_progress_error')) {
+                return;
+            }
+            $current = odata_load_progress_payload($token, false);
+            odata_load_progress_error(
+                $token,
+                (int) ($current['total_months'] ?? 0),
+                (int) ($current['current_month_index'] ?? 0),
+                'Laden van week ' . (string) ($GLOBALS['demeter_load_month_label'] ?? '') . ' afgebroken door een serverfout: '
+                    . (string) ($error['message'] ?? 'onbekend')
+            );
+        });
+
+        // Zonder schrijfrechten (bv. na een deploy) bevriest de voortgang ongemerkt: faal dan direct en zichtbaar.
+        demeter_assert_cache_dirs_writable();
 
         if ($catchUp) {
             $catchUpToken = $chunkProgressToken !== null
@@ -636,6 +691,18 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'cache_age_hours' => demeter_cache_age_hours($cacheUpdatedAt),
         ]);
     } catch (Throwable $error) {
+        $failedToken = $GLOBALS['demeter_load_month_progress_token'] ?? null;
+        if (is_string($failedToken) && $failedToken !== '') {
+            if (!empty($catchUp)) {
+                // Catch-up is één request: meteen definitief mislukt.
+                odata_load_progress_error($failedToken, 4, 0, $error->getMessage());
+            } else {
+                // De browser beslist over opnieuw proberen; leg de fout wel vast in de voortgang.
+                odata_load_progress_write($failedToken, [
+                    'current_call_label' => 'Fout: ' . substr($error->getMessage(), 0, 200),
+                ]);
+            }
+        }
         demeter_send_json_response(odata_append_debug_to_payload([
             'ok' => false,
             'error' => $error->getMessage(),
