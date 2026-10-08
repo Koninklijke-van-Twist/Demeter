@@ -256,6 +256,37 @@ try {
         }
     }
 
+    // Fase 1 (SHADOW): werkorder-store per bedrijf. Volledige snapshot, alleen ingewisseld als de BC-counts
+    // (afdeling × status) kloppen, plus reconciliatie van de vorige store tegen deze snapshot. Het scherm
+    // leest hier nog niet uit. Uitzetten: define('DEMETER_STORE_NIGHTLY', false) in auth.php.
+    if (!defined('DEMETER_STORE_NIGHTLY') || DEMETER_STORE_NIGHTLY) {
+        require_once __DIR__ . '/bc_fetch/store_transport.php';
+        require_once __DIR__ . '/bc_fetch/store_reconcile.php';
+        foreach ($companies as $company) {
+            if (!is_string($company) || trim($company) === '') {
+                continue;
+            }
+            $company = trim($company);
+            $storeStartedAt = microtime(true);
+            demeter_nightly_log("Werkorder-store (shadow): {$company}\n");
+            try {
+                $storeResult = demeter_store_nightly_snapshot($company, demeter_store_live_transport($company), static function (string $m): void {
+                    demeter_nightly_log($m);
+                });
+                $stats['companies'][$company]['store'] = [
+                    'status' => $storeResult['status'],
+                    'workorders' => $storeResult['workorders'] ?? null,
+                    'count_diffs' => array_slice($storeResult['verification']['diffs'] ?? [], 0, 20),
+                    'duration_seconds' => round(microtime(true) - $storeStartedAt, 1),
+                ];
+            } catch (Throwable $storeError) {
+                $stats['companies'][$company]['store'] = ['status' => 'error', 'error' => substr($storeError->getMessage(), 0, 300)];
+                demeter_nightly_log("  Werkorder-store {$company}: fout: " . substr($storeError->getMessage(), 0, 300) . "\n", true);
+            }
+            demeter_nightly_stats_save($stats);
+        }
+    }
+
     $stats['last_run_finished_at'] = gmdate('c');
     demeter_nightly_stats_save($stats);
     demeter_nightly_log('[' . gmdate('Y-m-d H:i:s') . "] Nightly voltooid\n");
