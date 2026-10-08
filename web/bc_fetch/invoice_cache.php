@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Permanente factuurcache per bedrijf (geen TTL).
+ * Factuurcache per bedrijf; project-entries verlopen na demeter_invoice_cache_max_age_seconds().
  *
  * Factuurdata is project-lifetime; wordt één keer opgehaald en hergebruikt
  * over alle week-chunks heen.
@@ -208,6 +208,22 @@ function demeter_invoice_cache_merge_fetched(array &$cache, array $fetched, arra
 }
 
 /**
+ * Maximale leeftijd van een project-entry in de factuurcache (seconden). 0 = permanent (oud gedrag).
+ * Standaard gelijk aan de werkorder-TTL (180 s): de data voor de gebruiker is hooguit 3 minuten oud.
+ */
+function demeter_invoice_cache_max_age_seconds(): int
+{
+    if (defined('DEMETER_INVOICE_CACHE_MAX_AGE_SECONDS')) {
+        return max(0, (int) DEMETER_INVOICE_CACHE_MAX_AGE_SECONDS);
+    }
+    if (defined('DEMETER_WORKORDER_MAX_AGE_SECONDS')) {
+        return max(0, (int) DEMETER_WORKORDER_MAX_AGE_SECONDS);
+    }
+
+    return 180;
+}
+
+/**
  * Voegt factuurregels samen zonder dezelfde BC-regel (bron + Line_No) twee keer op te nemen.
  * Regels zonder Line_No (oude cache) worden vervangen zodra er regels mét Line_No binnenkomen.
  *
@@ -290,10 +306,20 @@ function bc_fetch_resolve_invoices_for_projects(
     $missingProjectNumbers = [];
     $fromCacheCount = 0;
 
+    $maxAge = demeter_invoice_cache_max_age_seconds();
+    $now = time();
     foreach ($normalizedProjects as $normalizedKey => $originalProjectNo) {
         if ($forceRefresh || !isset($cachedProjects[$normalizedKey])) {
             $missingProjectNumbers[] = $originalProjectNo;
             continue;
+        }
+        if ($maxAge > 0) {
+            $cachedAt = strtotime((string) ($cachedProjects[$normalizedKey]['cached_at'] ?? ''));
+            if ($cachedAt === false || ($now - $cachedAt) > $maxAge) {
+                // Nieuwe facturen/creditnota's komen er anders nooit in (cache was permanent).
+                $missingProjectNumbers[] = $originalProjectNo;
+                continue;
+            }
         }
 
         $fromCacheCount++;
