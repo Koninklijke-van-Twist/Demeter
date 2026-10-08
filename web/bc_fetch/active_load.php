@@ -437,3 +437,44 @@ function demeter_active_load_status_payload(string $company, string $costCenter)
         'cache_age_seconds' => $ageSeconds,
     ];
 }
+
+/**
+ * De aansturende browser geeft het op (report_load_failure): de claim met dit token direct vrijgeven,
+ * zodat een herlaad/Ververs Nu meteen een nieuwe load kan starten en niet 3-5 minuten 'Er loopt al een
+ * verversing' ziet. Alleen een lopende claim met precies dit token wordt vrijgegeven.
+ */
+function demeter_active_load_release_by_token(string $token): bool
+{
+    $token = trim($token);
+    $tokenValid = function_exists('odata_load_progress_is_valid_token')
+        ? odata_load_progress_is_valid_token($token)
+        : (preg_match('/^[a-f0-9]{32}$/', $token) === 1);
+    if ($token === '' || !$tokenValid) {
+        return false;
+    }
+
+    $dir = demeter_active_load_base_dir();
+    if (!is_dir($dir)) {
+        return false;
+    }
+
+    $iterator = new FilesystemIterator($dir, FilesystemIterator::SKIP_DOTS);
+    foreach ($iterator as $fileInfo) {
+        if (!$fileInfo->isFile() || pathinfo($fileInfo->getFilename(), PATHINFO_EXTENSION) !== 'json') {
+            continue;
+        }
+
+        $existing = demeter_active_load_normalize(demeter_active_load_read_file($fileInfo->getPathname()));
+        if ($existing === null || ($existing['token'] ?? '') !== $token || ($existing['status'] ?? '') !== 'running') {
+            continue;
+        }
+
+        $existing['status'] = 'error';
+        $existing['updated_at'] = time();
+        demeter_active_load_write_file($fileInfo->getPathname(), $existing);
+
+        return true;
+    }
+
+    return false;
+}
