@@ -167,6 +167,39 @@ $index = file_get_contents(__DIR__ . '/../web/index.php');
 check(strpos($index, '$displayRowsByKey = demeter_page_apply_full_project_totals($selectedCompany, $displayRowsByKey);') !== false, 'pagina-render zet de volledige projecttotalen');
 check(strpos($index, "'project_totals_cumulative_by_job' => demeter_load_month_full_project_totals(") !== false, 'load_month stuurt de volledige totalen als cumulatief');
 check(strpos(file_get_contents(__DIR__ . '/../web/nightly.php'), 'demeter_project_totals_full_sync(') !== false, 'nightly werkt de volledige projecttotalen bij');
+
+// ensure: bouwt als het bestand ontbreekt, en raakt BC niet aan als het er al is.
+$ensureCalls = 0;
+$ensureTransport = ['fetch' => static function (string $entity, array $query) use (&$ensureCalls, &$bc): array {
+    $ensureCalls++;
+    if (($query['$top'] ?? '') === '1') {
+        return [['Entry_No' => 9]];
+    }
+    if (!preg_match('/Entry_No gt (\d+)(?: and Entry_No le (\d+))?/', (string) ($query['$filter'] ?? ''), $m)) {
+        return [];
+    }
+    $from = (int) $m[1];
+    $to = isset($m[2]) ? (int) $m[2] : PHP_INT_MAX;
+    return array_values(array_filter($bc, static fn ($p) => $p['Entry_No'] > $from && $p['Entry_No'] <= $to && $p['Entry_No'] <= 9));
+}];
+@unlink(demeter_project_totals_full_path($company));
+$ensured = demeter_project_totals_full_ensure($company, $ensureTransport, 1.0);
+check(($ensured['available'] ?? false) === true && $ensureCalls > 0, 'ensure bouwt het bestand als het ontbreekt: ' . json_encode($ensured));
+$ensureCalls = 0;
+$throwing = ['fetch' => static function (): array { throw new RuntimeException('BC mag niet geraakt worden'); }];
+$ensured2 = demeter_project_totals_full_ensure($company, $throwing, 1.0);
+check(($ensured2['status'] ?? '') === 'exists' && ($ensured2['available'] ?? false) === true, 'ensure met bestaand bestand doet geen BC-call');
+
+$index = file_get_contents(__DIR__ . '/../web/index.php');
+check(strpos($index, "=== 'ensure_project_totals'") !== false, 'endpoint ensure_project_totals aanwezig');
+check(strpos($index, "'project_totals_full_missing' =>") !== false, 'de pagina meldt aan de browser of de volledige totalen ontbraken');
+$js = file_get_contents(__DIR__ . '/../web/index.js');
+$boot = substr($js, (int) strpos($js, 'if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)'), 1500);
+check(strpos($boot, 'ensureFullProjectTotals();') !== false && strpos($boot, 'ensureFullProjectTotals();') > strpos($boot, 'return syncChangesAndReloadWeeks();'),
+    'ensure draait bij het laden, niet pas nadat de catch-up klaar is');
+check(strpos($js, "action', 'ensure_project_totals'") !== false && strpos($js, '300 * 1000') !== false, 'client wacht lang genoeg op de opbouw (300 s) en herlaadt één keer');
+check(strpos(file_get_contents(__DIR__ . '/../web/bc_fetch/project_totals_full.php'), 'ignore_user_abort(true)') !== false, 'een afgebroken verzoek doodt de opbouw niet');
+
 $syncPos = strpos($index, "=== 'sync_changes'");
 $syncBlock = $syncPos !== false ? substr($index, $syncPos, 3000) : '';
 check(strpos($syncBlock, 'demeter_project_totals_full_read($deltaCompany) === null') !== false

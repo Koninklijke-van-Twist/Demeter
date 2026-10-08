@@ -215,6 +215,10 @@ function demeter_page_apply_full_project_totals(string $company, array $displayR
         error_log('Demeter projecttotalen (volledig): ' . $error->getMessage());
     }
 
+    // Kon de pagina de volledige totalen (nog) niet toepassen, dan vraagt de browser ze één keer na
+    // (action=ensure_project_totals) en herlaadt hij zodra ze er zijn (anders bleef bv. KvT/70 de weeksom tonen).
+    $GLOBALS['demeter_project_totals_full_applied'] = demeter_project_totals_full_read($company) !== null;
+
     return demeter_project_totals_full_apply_to_rows($company, $displayRowsByKey);
 }
 
@@ -904,6 +908,32 @@ if (($_GET['action'] ?? '') === 'sync_changes') {
     }
 }
 
+if (($_GET['action'] ?? '') === 'ensure_project_totals') {
+    // Eenmalig vanuit de browser (geen polling) als de pagina zonder volledige projecttotalen werd getoond:
+    // het bestand opbouwen of op een lopende opbouw wachten (begrensd). De browser herlaadt daarna één keer.
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+    $GLOBALS['demeter_json_action'] = true;
+    try {
+        $ensureCompany = trim((string) ($_GET['company'] ?? ''));
+        if ($ensureCompany === '') {
+            throw new InvalidArgumentException('Ongeldige parameters voor ensure_project_totals.');
+        }
+        @set_time_limit(330);
+        auth_set_current_company_context($ensureCompany, 300);
+        require_once __DIR__ . '/bc_fetch/store_transport.php';
+        $ensureResult = demeter_project_totals_full_ensure(
+            $ensureCompany,
+            demeter_store_live_transport($ensureCompany, ['request_timeout' => 60]),
+            240.0
+        );
+        demeter_send_json_response(['ok' => true] + $ensureResult);
+    } catch (Throwable $ensureError) {
+        error_log('Demeter ensure_project_totals: ' . $ensureError->getMessage());
+        demeter_send_json_response(['ok' => false, 'available' => false, 'error' => $ensureError->getMessage()]);
+    }
+}
+
 if (($_GET['action'] ?? '') === 'report_load_failure') {
     // De browser die een verversing aanstuurt geeft het op (week blijft mislukken): leg de fout vast in de
     // laadvoortgang, zodat meeliftende tabs de echte fout zien i.p.v. na 5 minuten 'vastgelopen'.
@@ -1381,6 +1411,8 @@ $initialData = [
         'catch_up_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
         'catch_up_week' => $syncLoadWeek,
         // Na de catch-up: page-open BC-delta (action=sync_changes) en daarna de geraakte weken opnieuw lezen.
+        'project_totals_full_missing' => $cacheUsedForFirstPaint && $selectedCostCenter !== ''
+            && demeter_project_totals_full_enabled() && empty($GLOBALS['demeter_project_totals_full_applied']),
         'sync_changes_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== ''
             && (!defined('DEMETER_WORKORDER_DELTA_ENABLED') || DEMETER_WORKORDER_DELTA_ENABLED),
         'hitchhike_enabled' => $hitchhikeActiveLoad,

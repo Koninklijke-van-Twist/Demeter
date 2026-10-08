@@ -468,6 +468,10 @@
             });
     }
 
+    // Los van de catch-up (die bij KvT/70 minuten op stap 4 kan blijven hangen): als de pagina zonder de
+    // volledige projecttotalen werd getoond, die nu opbouwen en daarna precies één keer herladen.
+    ensureFullProjectTotals();
+
     startActiveLoadAndIdleCatchUpPolling();
 
     function renderCacheAgeBanner ()
@@ -6839,6 +6843,77 @@
      * beeld staan heeft de server direct in de cache bijgewerkt. Lukt iets niet, dan blijft de bestaande data
      * staan en probeert de volgende page-open het opnieuw.
      */
+    const PROJECT_TOTALS_RELOAD_GUARD_KEY = 'demeterProjectTotalsReloadAt';
+
+    /**
+     * De pagina toonde de weeksommen omdat het projecttotalen-bestand er nog niet was (de opbouw na de pagina
+     * kan alleen onder php-fpm, en sync_changes wacht op de catch-up). Eén verzoek bouwt het bestand of wacht
+     * op de lopende opbouw; daarna één herlaadbeurt. Geen timer, geen herhaling.
+     */
+    function ensureFullProjectTotals ()
+    {
+        if (asyncLoadConfig.project_totals_full_missing !== true || loadedCostCenter === '')
+        {
+            return;
+        }
+        let alreadyReloaded = false;
+        try
+        {
+            const at = Number(window.sessionStorage.getItem(PROJECT_TOTALS_RELOAD_GUARD_KEY) || 0);
+            alreadyReloaded = at > 0 && (Date.now() - at) < 10 * 60 * 1000;
+        }
+        catch (storageError)
+        {
+            alreadyReloaded = false;
+        }
+        if (alreadyReloaded)
+        {
+            return;
+        }
+
+        const params = new URLSearchParams();
+        params.set('action', 'ensure_project_totals');
+        params.set('company', String(payload.company || ''));
+        const abortController = typeof AbortController === 'function' ? new AbortController() : null;
+        // De opbouw duurt ~40 s (KvT) en kan tot 4 minuten op een andere opbouw wachten.
+        const abortTimer = abortController ? window.setTimeout(function () { abortController.abort(); }, 300 * 1000) : 0;
+        fetch('index.php?' + params.toString(), {
+            method: 'GET',
+            credentials: 'same-origin',
+            headers: { Accept: 'application/json' },
+            signal: abortController ? abortController.signal : undefined
+        }).then(function (response)
+        {
+            return response.json();
+        }).then(function (body)
+        {
+            if (!body || body.ok !== true || body.available !== true)
+            {
+                return;
+            }
+            try
+            {
+                window.sessionStorage.setItem(PROJECT_TOTALS_RELOAD_GUARD_KEY, String(Date.now()));
+            }
+            catch (storageError)
+            {
+                // zonder sessionStorage zou een mislukte toepassing een herlaad-lus geven: dan niet herladen
+                return;
+            }
+            window.__demeterSuppressUnloadLoader = true;
+            window.location.reload();
+        }).catch(function (ensureError)
+        {
+            console.error(ensureError);
+        }).finally(function ()
+        {
+            if (abortTimer)
+            {
+                window.clearTimeout(abortTimer);
+            }
+        });
+    }
+
     async function syncChangesAndReloadWeeks ()
     {
         if (asyncLoadConfig.sync_changes_enabled !== true || historyLoadRunning || hitchhikeLoadRunning || loadedCostCenter === '')

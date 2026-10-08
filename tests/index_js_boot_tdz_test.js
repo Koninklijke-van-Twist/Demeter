@@ -35,16 +35,17 @@ function makeStub (name)
     });
 }
 
-function runScenario (label, asyncLoad)
+function runScenario (label, asyncLoad, expectFetch)
 {
     const errors = [];
+    const urls = [];
     const pending = new Promise(() => {}); // fetch blijft hangen: alleen het synchrone deel + eerste stap
     const storage = { getItem () { return null; }, setItem () {}, removeItem () {} };
     const windowObj = {
         workorderOverviewData: {
             company: 'Koninklijke van Twist',
             cost_center: '70',
-            rows: [],
+            rows: [{ Row_Key: 'k1', No: 'WO2606204', Bc_No: 'WO2606204', Job_No: 'PRJ2605385', Job_Task_No: 'WO2606204', Status: 'Closed', Start_Date: '2026-04-29', Project_Actual_Costs: 1387.54, Project_Total_Revenue: 0, Actual_Costs: 105.2, Total_Revenue: 0 }],
             cache_meta: { has_data: true, history_complete: true, updated_at: new Date().toISOString(), age_seconds: 400 },
             async_load: Object.assign({
                 current_week: '2026-W41', current_month: '2026-W41', catch_up_week: '2026-W41',
@@ -79,7 +80,7 @@ function runScenario (label, asyncLoad)
             log () {}, info () {}, warn () {}, debug () {},
             error (...args) { errors.push(args.map((a) => (a && a.message) ? a.message : JSON.stringify(a)).join(' ')); }
         },
-        fetch () { return pending; },
+        fetch (url) { urls.push(String(url)); return pending; },
         URL, URLSearchParams, AbortController, Date, Math, JSON, Promise, Set, Map, Intl, Number, String, Array, Object,
         setTimeout () { return 1; }, clearTimeout () {}, setInterval () { return 1; }, clearInterval () {},
         requestAnimationFrame () { return 1; },
@@ -115,7 +116,8 @@ function runScenario (label, asyncLoad)
         {
             const tdz = errors.filter((e) => /before initialization|is not defined/.test(e));
             const thrownTdz = thrown && /before initialization|is not defined/.test(String(thrown && thrown.message));
-            resolve({ label, ok: tdz.length === 0 && !thrownTdz, detail: thrownTdz ? String(thrown.message) : tdz.join(' | '), thrown });
+            const fetchOk = !expectFetch || urls.some((u) => u.indexOf(expectFetch) !== -1);
+            resolve({ label, ok: tdz.length === 0 && !thrownTdz && fetchOk, detail: thrownTdz ? String(thrown.message) : (fetchOk ? tdz.join(' | ') : 'geen fetch met ' + expectFetch + ' (wel: ' + urls.join(', ') + ')'), thrown });
         });
     });
 }
@@ -129,10 +131,14 @@ function runScenario (label, asyncLoad)
         ['cacheversie-herbouw zonder vorige rijen', { enabled: true, force_full: true, cache_version_rebuild: true, keep_display_rows: false }],
         ['catch-up bij openen', { enabled: false, catch_up_enabled: true }],
         ['meeliften op een lopende load', { enabled: false, hitchhike_enabled: true, hitchhike_kind: 'refresh' }],
+        // KvT/70 8 okt: projecttotalen-bestand ontbrak bij het renderen; de catch-up hing op stap 4, dus
+        // sync_changes (dat het bestand bouwt) kwam nooit. ensure moet direct bij het laden gaan.
+        ['volledige projecttotalen ontbreken, catch-up hangt', { enabled: false, catch_up_enabled: true, project_totals_full_missing: true }, 'action=ensure_project_totals'],
+        ['volledige projecttotalen ontbreken, meeliften op vastgelopen catch-up', { enabled: false, hitchhike_enabled: true, hitchhike_kind: 'catch_up', project_totals_full_missing: true }, 'action=ensure_project_totals'],
     ];
-    for (const [label, cfg] of scenarios)
+    for (const [label, cfg, expectFetch] of scenarios)
     {
-        const r = await runScenario(label, cfg);
+        const r = await runScenario(label, cfg, expectFetch);
         console.log((r.ok ? 'ok   ' : 'FAIL ') + label + (r.ok ? '' : ': ' + r.detail));
         if (!r.ok) { failures++; }
     }

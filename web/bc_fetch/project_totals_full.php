@@ -179,6 +179,9 @@ function demeter_project_totals_full_sync(string $company, array $transport, boo
             if (!$allowFull) {
                 return ['status' => 'needs_full'];
             }
+            // Een herlaad of de abort van de browser (sync_changes stopt na 90 s) mag de opbouw niet doden:
+            // anders bleef het bestand ontbreken en toonde de pagina de weeksommen.
+            @ignore_user_abort(true);
             $last = $fetch('ProjectPosten', ['$select' => 'Entry_No', '$orderby' => 'Entry_No desc', '$top' => '1']);
             $maxInBc = (int) ($last[0]['Entry_No'] ?? 0);
             $state = ['version' => DEMETER_PROJECT_TOTALS_FULL_VERSION, 'company' => $company, 'max_entry_no' => 0, 'built_at' => 0, 'synced_at' => 0, 'totals' => []];
@@ -283,3 +286,47 @@ function demeter_project_totals_full_apply_to_rows(string $company, array $rowsB
 
     return demeter_apply_project_totals_to_display_rows($rowsByKey, $full);
 }
+
+/**
+ * Zorgt dat het bestand bestaat (eenmalig vanuit de browser als de pagina zonder volledige totalen werd
+ * getoond). Bouwt het zelf op, of wacht (begrensd) op een andere opbouw die de lock al heeft, bv. de opbouw
+ * na de pagina. Geen polling van BC: hooguit één opbouw tegelijk, daarna alleen het bestand lezen.
+ *
+ * @return array{available: bool, status: string, error?: string}
+ */
+function demeter_project_totals_full_ensure(string $company, array $transport, float $waitSeconds = 240.0): array
+{
+    if (!demeter_project_totals_full_enabled()) {
+        return ['available' => false, 'status' => 'disabled'];
+    }
+    if (demeter_project_totals_full_read($company) !== null) {
+        return ['available' => true, 'status' => 'exists'];
+    }
+    $result = demeter_project_totals_full_sync($company, $transport, true);
+    if (($result['status'] ?? '') === 'busy') {
+        // Een andere opbouw loopt: wachten tot de lock vrij is (of het bestand er is).
+        $deadline = microtime(true) + max(0.0, $waitSeconds);
+        $lock = @fopen(demeter_project_totals_full_path($company) . '.lock', 'c');
+        while ($lock !== false && microtime(true) < $deadline) {
+            if (demeter_project_totals_full_read($company) !== null) {
+                break;
+            }
+            if (flock($lock, LOCK_EX | LOCK_NB)) {
+                flock($lock, LOCK_UN);
+                break;
+            }
+            usleep(500000);
+        }
+        if ($lock !== false) {
+            fclose($lock);
+        }
+        if (demeter_project_totals_full_read($company) === null) {
+            // De andere opbouw is mislukt of nog bezig: nu zelf (als de lock vrij is).
+            $result = demeter_project_totals_full_sync($company, $transport, true);
+        }
+    }
+    $available = demeter_project_totals_full_read($company) !== null;
+
+    return ['available' => $available, 'status' => (string) ($result['status'] ?? '')] + (isset($result['error']) ? ['error' => (string) $result['error']] : []);
+}
+
