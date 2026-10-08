@@ -207,25 +207,34 @@ function bc_fetch_pair_keys_from_projectposten_rows(array $rows, string $costCen
  * Is de kop gevuld, dan telt alleen de kop: een werkorder met kop 70 hoort niet bij filter 15,
  * ook als een projectpost die dimensie wel heeft.
  *
- * Is de kop LEEG, dan valt de werkorder terug op de kostenplaats van zijn ProjectPosten
- * (Global_Dimension_1_Code): hij hoort bij het filter als minstens één eigen post
- * (LVS_Work_Order_No = werkordernummer) die kostenplaats heeft. Heeft de werkorder in de geladen
- * posten geen eigen posten, dan tellen de posten van zijn project (Job_No). Bij een match krijgt de
- * werkorder die kostenplaats als Job_Dimension_1_Value (Cost_Center_Source = 'projectposten'),
- * zodat de kolom Kostenplaats en het cachefilter hem ook tonen.
+ * Is de kop LEEG, dan geldt (in deze volgorde):
+ *  1. de kostenplaats van zijn EIGEN ProjectPosten (LVS_Work_Order_No = werkordernummer,
+ *     Global_Dimension_1_Code): hij hoort bij het filter als minstens één eigen post die
+ *     kostenplaats heeft (Cost_Center_Source = 'projectposten');
+ *  2. geven de eigen posten geen kostenplaats (geen eigen posten, of alleen posten zonder code),
+ *     dan de projectkaart: Projecten.LVS_Global_Dimension_1_Code van Job_No
+ *     (Cost_Center_Source = 'project'). Zo telt ook BC/Ariadne;
+ *  3. is de projectkaart leeg of niet opgehaald, en heeft de werkorder geen eigen posten, dan de
+ *     posten van andere werkorders van hetzelfde project (Job_No) in het geladen bereik
+ *     (Cost_Center_Source = 'projectposten').
+ * Bij een match krijgt de werkorder die kostenplaats als Job_Dimension_1_Value, zodat de kolom
+ * Kostenplaats en het cachefilter hem ook tonen.
  * Filter 'geen kostenplaats' blijft strikt op de lege kop.
  *
  * @param list<array> $workorders
  * @param list<array> $allPostenRows ProjectPosten van het geladen bereik (voor de fallback).
  * @param bool $deferEmptyHeader Werkorders met lege kop (nog) niet wegfilteren, omdat de posten nog
  *                               niet geladen zijn; de definitieve filtering volgt later.
+ * @param array<string, string> $projectCardCodesByJob Kostenplaats van de projectkaart per Job_No
+ *                               (sleutel lowercase), zie bc_fetch_project_card_cost_centers().
  * @return list<array>
  */
 function bc_fetch_filter_workorders_for_cost_center(
     array $workorders,
     array $allPostenRows,
     string $costCenter,
-    bool $deferEmptyHeader = false
+    bool $deferEmptyHeader = false,
+    array $projectCardCodesByJob = []
 ): array {
     $normalized = bc_fetch_normalize_cost_center($costCenter);
     if ($normalized === '' || $normalized === bc_fetch_cost_center_none_value()) {
@@ -280,14 +289,33 @@ function bc_fetch_filter_workorders_for_cost_center(
 
         $no = strtolower(trim((string) ($workorder['No'] ?? '')));
         $job = strtolower(trim((string) ($workorder['Job_No'] ?? '')));
-        $codes = ($no !== '' && isset($hasPostsByWorkorder[$no]))
-            ? ($codesByWorkorder[$no] ?? [])
-            : ($job !== '' && isset($codesByJob[$job]) ? $codesByJob[$job] : []);
+        $hasOwnPosts = $no !== '' && isset($hasPostsByWorkorder[$no]);
+        $ownCodes = $hasOwnPosts ? ($codesByWorkorder[$no] ?? []) : [];
+
+        if ($ownCodes !== []) {
+            // 1. Eigen posten met kostenplaats: die zijn bepalend.
+            $codes = $ownCodes;
+            $source = 'projectposten';
+        } else {
+            $cardCode = $job !== '' ? trim((string) ($projectCardCodesByJob[$job] ?? '')) : '';
+            if ($cardCode !== '') {
+                // 2. Projectkaart (Projecten.LVS_Global_Dimension_1_Code).
+                $codes = [$cardCode => true];
+                $source = 'project';
+            } elseif (!$hasOwnPosts && $job !== '' && isset($codesByJob[$job])) {
+                // 3. Posten van andere werkorders van hetzelfde project.
+                $codes = $codesByJob[$job];
+                $source = 'projectposten';
+            } else {
+                $codes = [];
+                $source = '';
+            }
+        }
 
         foreach (array_keys($codes) as $code) {
             if (bc_fetch_cost_centers_match((string) $code, $normalized)) {
                 $workorder['Job_Dimension_1_Value'] = (string) $code;
-                $workorder['Cost_Center_Source'] = 'projectposten';
+                $workorder['Cost_Center_Source'] = $source;
                 $result[] = $workorder;
                 break;
             }
@@ -295,6 +323,52 @@ function bc_fetch_filter_workorders_for_cost_center(
     }
 
     return $result;
+}
+
+/**
+ * Job_No's (origineel geschreven) van werkorders met lege kop waarvan de eigen ProjectPosten geen
+ * kostenplaats geven: voor die werkorders is de projectkaart nodig.
+ *
+ * @param list<array> $workorders
+ * @param list<array> $allPostenRows
+ * @return list<string>
+ */
+function bc_fetch_job_nos_needing_project_card_cost_center(array $workorders, array $allPostenRows): array
+{
+    $ownCodeNos = [];
+    foreach ($allPostenRows as $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $lvs = strtolower(trim((string) ($row['LVS_Work_Order_No'] ?? '')));
+        if ($lvs === '' || isset($ownCodeNos[$lvs])) {
+            continue;
+        }
+        $code = trim((string) ($row['Global_Dimension_1_Code'] ?? ''));
+        if ($code === '') {
+            $code = trim((string) ($row['LVS_Global_Dimension_1_Code'] ?? ''));
+        }
+        if ($code !== '') {
+            $ownCodeNos[$lvs] = true;
+        }
+    }
+
+    $jobs = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder) || trim((string) ($workorder['Job_Dimension_1_Value'] ?? '')) !== '') {
+            continue;
+        }
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        if ($no !== '' && isset($ownCodeNos[$no])) {
+            continue;
+        }
+        $job = trim((string) ($workorder['Job_No'] ?? ''));
+        if ($job !== '') {
+            $jobs[strtolower($job)] = $job;
+        }
+    }
+
+    return array_values($jobs);
 }
 
 /**

@@ -855,7 +855,13 @@ function bc_fetch_execute_workorder_date_range_load(
     ));
 
     if ($costCenter !== '') {
-        $workorders = bc_fetch_filter_workorders_for_cost_center($workorders, $allProjectPostenRows, $costCenter);
+        $workorders = bc_fetch_filter_workorders_for_cost_center(
+            $workorders,
+            $allProjectPostenRows,
+            $costCenter,
+            false,
+            bc_fetch_project_card_cost_centers_for_workorders($company, $workorders, $allProjectPostenRows, $auth, $ttl, $costCenter)
+        );
     }
 
     if ($allProjectPostenRows === [] && $workorders === []) {
@@ -985,7 +991,13 @@ function bc_fetch_execute_workorder_date_range_load(
         ? $rangeFinance['import_sap_workorder_rows']
         : [];
     if ($costCenter !== '') {
-        $importSapWorkorderRows = bc_fetch_filter_workorders_for_cost_center($importSapWorkorderRows, $allProjectPostenRows, $costCenter);
+        $importSapWorkorderRows = bc_fetch_filter_workorders_for_cost_center(
+            $importSapWorkorderRows,
+            $allProjectPostenRows,
+            $costCenter,
+            false,
+            bc_fetch_project_card_cost_centers_for_workorders($company, $importSapWorkorderRows, $allProjectPostenRows, $auth, $ttl, $costCenter)
+        );
     }
     $workorders = bc_fetch_dedupe_workorders_by_identity(
         bc_fetch_merge_workorder_rows($workorders, $importSapWorkorderRows)
