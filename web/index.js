@@ -215,6 +215,10 @@
     let statusHintTimeoutId = null;
     let pageLoaderProgressTimerId = 0;
     let pageLoaderProgressRequestToken = '';
+    // Afgeronde/mislukte voortgang die er al stond toen het volgen begon (bv. de 409 van de catch-up van de
+    // vorige pagina bij een herlaad): niet opnieuw tonen. Alleen een overgang tijdens het volgen telt.
+    let pageLoaderProgressFirstPoll = false;
+    let pageLoaderStaleTerminalKey = '';
     let pageLoaderProgressFetchToken = 0;
     let pageLoaderShakeTimerId = 0;
     let pageLoaderShakePercent = 0;
@@ -1721,6 +1725,19 @@
             const totalMonths = Number(progress.total_months || 0);
             const currentMonthIndex = Number(progress.current_month_index || 0);
             const status = String(progress.status || 'idle');
+            const terminalKey = (status === 'error' || status === 'completed')
+                ? status + '|' + String(progress.completed_at || progress.updated_at || '') + '|' + String(progress.error || progress.message || '')
+                : '';
+            if (pageLoaderProgressFirstPoll)
+            {
+                pageLoaderProgressFirstPoll = false;
+                pageLoaderStaleTerminalKey = terminalKey;
+            }
+            if (terminalKey !== '' && terminalKey === pageLoaderStaleTerminalKey)
+            {
+                // Oude uitkomst van vóór deze navigatie (zelfde token): niet tonen, gewoon 'Gegevens laden...'.
+                return;
+            }
             const currentCallLabel = String(progress.current_call_label || '').trim();
             let text = String(progress.message || '').trim();
             let percent = 0;
@@ -1798,6 +1815,8 @@
 
         stopPageLoaderProgress();
         pageLoaderProgressRequestToken = token;
+        pageLoaderProgressFirstPoll = true;
+        pageLoaderStaleTerminalKey = '';
         updatePageLoaderProgress();
         pageLoaderProgressTimerId = window.setInterval(updatePageLoaderProgress, 700);
     }
@@ -1826,6 +1845,8 @@
 
         stopPageLoaderProgress();
         pageLoaderProgressRequestToken = token;
+        pageLoaderProgressFirstPoll = true;
+        pageLoaderStaleTerminalKey = '';
         updatePageLoaderProgress();
         pageLoaderProgressTimerId = window.setInterval(updatePageLoaderProgress, 700);
     }
