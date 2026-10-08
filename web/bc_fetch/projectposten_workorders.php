@@ -224,7 +224,7 @@ function bc_fetch_workorders_by_numbers(string $company, array $numbers, array $
  * Global_Dimension_1_Code) voor de gegeven projecten. Alleen de gevraagde projecten worden
  * opgehaald, in OR-batches op No, met dezelfde TTL/max_age als de rest van de load
  * (nightly 4u, UI eigen TTL). Binnen één PHP-proces wordt per project maar één keer opgehaald.
- * Faalt de fetch, dan volgt een lege map (filter valt dan terug op de projectposten).
+ * Faalt de fetch (na de OData-retries), dan faalt de load: geen half geladen week in de cache.
  *
  * @param list<string> $jobNos
  * @return array<string, string> Job_No (lowercase) => kostenplaatscode van de kaart ('' = leeg)
@@ -255,8 +255,11 @@ function bc_fetch_project_card_cost_centers(string $company, array $jobNos, arra
             ]);
             $rows = odata_get_all($url, $auth, $ttl);
         } catch (Throwable $exception) {
+            // Niet stil doorgaan: zonder kaartdata vallen werkorders met een lege kop weg en zou de week
+            // half geladen als 'gescand' worden opgeslagen (en daarna nooit opnieuw gelezen). De week-load
+            // faalt nu zichtbaar en wordt opnieuw geprobeerd (client-retry / hervatten / nightly).
             error_log('Demeter: projectkaart-kostenplaats ophalen mislukt: ' . $exception->getMessage());
-            continue;
+            throw new RuntimeException('Projectkaarten (kostenplaats) ophalen mislukt; week niet opgeslagen: ' . $exception->getMessage(), 0, $exception);
         }
 
         foreach ($chunk as $jobNo) {
