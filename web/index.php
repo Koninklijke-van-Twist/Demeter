@@ -1103,6 +1103,15 @@ try {
             $cacheVersionRebuild = true;
         }
 
+        // Nog nooit geladen kostenplaats (geen cachebestand): bij openen zelf de eerste volledige load starten
+        // (zelfde als 'Ververs Nu'); 'alleen verversen bij openen' blijft gelden, de nightly houdt hem daarna bij.
+        if (!$refreshNowRequested && !$refreshBlocked
+            && demeter_cost_center_needs_initial_load($selectedCompany, $selectedCostCenter, $departmentCostCenterOptions)
+        ) {
+            $refreshNowRequested = true;
+            $forceFullReload = true;
+        }
+
         // Onderbroken volledige verversing (de aansturende browser is gestopt): automatisch verder gaan
         // waar hij bleef (al gelezen weken worden overgeslagen), niet opnieuw beginnen en niets wissen.
         if (!$refreshNowRequested && !$refreshBlocked
