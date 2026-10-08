@@ -824,7 +824,8 @@
             return;
         }
 
-        await startCatchUpCurrentWeek();
+        // Geen eigen BC-catch-up meer vanuit een openstaand tabblad: BC wordt alleen ververst door de nightly,
+        // het uurlijkse script of het openen van de pagina (eis Tim). Wel herladen zodra een ander de cache ververst heeft.
     }
 
     async function pollActiveLoadForButton ()
