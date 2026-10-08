@@ -40,6 +40,10 @@
     const asyncLoadConfig = payload && typeof payload.async_load === 'object' && payload.async_load !== null
         ? payload.async_load
         : {};
+    // Rijen uit de cache staan al in beeld (vorige gegevens tijdens een herbouw, of een hervatte herbouw).
+    // Moet vóór het opstartdeel gedeclareerd zijn: startIncrementalMonthLoading() draait al tijdens het laden
+    // van het script en leest deze waarde synchroon (anders TDZ: 'Cannot access … before initialization').
+    const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
     let loadStatsFromCache = 0;
     let loadStatsUpdatedFromBc = 0;
     let loadStatsNote = null;
@@ -6773,8 +6777,7 @@
         }
     }
 
-    // Rijen uit de cache staan al in beeld (vorige gegevens tijdens een herbouw, of een hervatte herbouw).
-    const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
+    // keepDisplayRowsDuringLoad: bovenaan gedeclareerd (TDZ-fix, zie daar).
 
     function decorateRebuildLoadNote (text)
     {
