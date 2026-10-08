@@ -1133,6 +1133,18 @@ function demeter_persist_workorder_memos_to_display_cache(string $company, strin
         return false;
     }
 
+    // Lezen-wijzigen-schrijven onder de cache-lock: anders overschrijft deze (oude) kopie het werk van
+    // een parallelle week/herbouw.
+    return (bool) demeter_workorder_state_cache_with_lock($company, $costCenter, static function () use ($company, $costCenter, $memosByRowKey): bool {
+        return demeter_persist_workorder_memos_to_display_cache_unlocked($company, $costCenter, $memosByRowKey);
+    });
+}
+
+/**
+ * @param array<string, array{notes?: list<array>, notes_search?: string, memos_loaded?: bool}> $memosByRowKey
+ */
+function demeter_persist_workorder_memos_to_display_cache_unlocked(string $company, string $costCenter, array $memosByRowKey): bool
+{
     $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
     if ($displayRowsByKey === []) {
         return false;

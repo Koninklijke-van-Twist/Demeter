@@ -220,9 +220,11 @@ function bc_fetch_load_workorder_week_chunk(
     // de verversing gewist). Zonder dit bleef na elke week alleen die week op schijf staan: een
     // herladen pagina toonde dan één week of 'Geen cachegegevens', en consecutive_empty begon elke
     // week opnieuw (backfill tot 2017). Onder een lock, omdat de browser twee weken parallel laadt.
+    // Fase 0: ook het incrementele pad (nightly, hervatten) schrijft alleen onder de lock en voegt samen
+    // met de actuele state (anders overschreef een oude kopie het werk van een parallelle herbouw).
     $stateLock = null;
     $isRepeatOfSavedWeek = false;
-    if ($forceFull) {
+    if (true) {
         $stateLock = demeter_workorder_state_cache_lock($company, $costCenter);
         if ($stateLock === null) {
             // Zonder lock kan een parallelle week onze week (of wij de zijne) overschrijven.
@@ -239,7 +241,7 @@ function bc_fetch_load_workorder_week_chunk(
             $monthScan = is_array($freshState['month_scan'] ?? null) ? $freshState['month_scan'] : $monthScan;
             // Deze verversing heeft de week al opgeslagen (bv. client-retry na een afgekapt antwoord):
             // bedragen via delta (nieuw - oud) samenvoegen, anders worden ze dubbel opgeteld.
-            $isRepeatOfSavedWeek = trim((string) ($monthScan['months'][$normalizedYearWeek]['scanned_at'] ?? '')) !== '';
+            $isRepeatOfSavedWeek = $forceFull && trim((string) ($monthScan['months'][$normalizedYearWeek]['scanned_at'] ?? '')) !== '';
             $previousWeekProjectTotals = demeter_month_scan_week_project_totals($monthScan, $normalizedYearWeek);
             $previousWeekWoTotals = demeter_month_scan_week_workorder_totals($monthScan, $normalizedYearWeek);
             $loaded['cache_state'] = array_replace(
@@ -421,6 +423,24 @@ function bc_fetch_resume_skipped_week_chunk(string $yearWeek, array $monthScan, 
  * @param array<string, mixed> $options
  */
 function bc_fetch_load_current_week_by_days(
+    string $company,
+    string $yearWeek,
+    array $auth,
+    int $ttl,
+    ?string $progressToken = null,
+    array $options = []
+): array {
+    // Fase 0: het dagpad (catch-up, nightly, huidige week) leest de state, haalt BC op en schrijft
+    // state + display. Dat gebeurt nu in zijn geheel onder de (re-entrante) cache-lock, zodat een
+    // parallelle herbouw/nightly elkaars werk niet meer overschrijven.
+    $costCenterForLock = bc_fetch_normalize_cost_center((string) ($options['cost_center'] ?? ''));
+
+    return demeter_workorder_state_cache_with_lock($company, $costCenterForLock, static function () use ($company, $yearWeek, $auth, $ttl, $progressToken, $options): array {
+        return bc_fetch_load_current_week_by_days_unlocked($company, $yearWeek, $auth, $ttl, $progressToken, $options);
+    });
+}
+
+function bc_fetch_load_current_week_by_days_unlocked(
     string $company,
     string $yearWeek,
     array $auth,
@@ -835,7 +855,8 @@ function bc_fetch_execute_workorder_date_range_load(
         $rangeEndExclusive,
         $auth,
         $ttl,
-        $includeFutureStartDates
+        $includeFutureStartDates,
+        $costCenter
     );
     if ($costCenter !== '') {
         // Posten zijn hier nog niet geladen: werkorders met lege kop pas later (met posten) beoordelen.

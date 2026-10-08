@@ -523,7 +523,26 @@
             ageText = 'geen cache';
         }
 
-        return 'Huidige gegevens zijn ' + ageText + ' oud.';
+        const updatedAtLabel = formatCacheUpdatedAtClock();
+
+        return (updatedAtLabel !== '' ? 'Bijgewerkt om ' + updatedAtLabel + ' · ' : '') + 'Huidige gegevens zijn ' + ageText + ' oud.';
+    }
+
+    // 'bijgewerkt om hh:mm:ss' (lokale tijd van de browser) uit cacheMeta.updated_at.
+    function formatCacheUpdatedAtClock ()
+    {
+        if (typeof cacheMeta.updated_at !== 'string' || cacheMeta.updated_at.trim() === '')
+        {
+            return '';
+        }
+        const parsed = new Date(cacheMeta.updated_at);
+        if (!Number.isFinite(parsed.getTime()))
+        {
+            return '';
+        }
+        const pad = (n) => String(n).padStart(2, '0');
+
+        return pad(parsed.getHours()) + ':' + pad(parsed.getMinutes()) + ':' + pad(parsed.getSeconds());
     }
 
     function updateCacheAgeBannerFromMeta ()

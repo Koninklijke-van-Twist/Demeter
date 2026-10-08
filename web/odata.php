@@ -1285,24 +1285,20 @@ function odata_append_debug_to_payload(array $payload): array
     return $payload;
 }
 
+if (!defined('DEMETER_ODATA_MAX_PAGE_SIZE')) {
+    define('DEMETER_ODATA_MAX_PAGE_SIZE', 5000);
+}
+
 /**
- * Zet een grotere pagina-grootte op de eerste OData-URL (niet op @odata.nextLink).
- * Minder round-trips bij grote resultsets; BC mag $top begrensen.
+ * Vroeger zette dit `$top=5000` op de eerste URL. In OData begrenst `$top` echter het TOTAAL (BC geeft
+ * dan geen @odata.nextLink), dus directe BC-fallbacks kapten resultaten boven 5000 rijen stil af.
+ * De paginagrootte gaat nu via de header `Prefer: odata.maxpagesize` (zie odata_get_json_once) en er
+ * wordt volledig gepagineerd via @odata.nextLink. Deze functie laat de URL daarom ongewijzigd
+ * (een expliciete `$top` van de aanroeper blijft gewoon staan).
  */
 function odata_ensure_preferred_page_size(string $url, int $top = 5000): string
 {
-    $url = trim($url);
-    if ($url === '' || $top <= 0) {
-        return $url;
-    }
-
-    if (stripos($url, '$top=') !== false || stripos($url, '%24top=') !== false) {
-        return $url;
-    }
-
-    $separator = strpos($url, '?') === false ? '?' : '&';
-
-    return $url . $separator . '$top=' . $top;
+    return trim($url);
 }
 
 function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
@@ -1315,7 +1311,8 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
         return odata_mimir_or_direct(
             static function () use ($url, $ttlSeconds, $startedAt): array {
                 // Mímir beheert de BC-cache (max_age); Demeter-filecache / live-paginering worden overgeslagen.
-                $rows = odata_mimir_fetch_all_impl($url, $ttlSeconds === 0 ? 3600 : $ttlSeconds);
+                // ttl 0 = echt live (max_age 0); vroeger werd dat stil 3600 s.
+                $rows = odata_mimir_fetch_all_impl($url, $ttlSeconds);
                 $durationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
                 if (function_exists('odata_call_time_log_record')) {
                     odata_call_time_log_record($url, $durationMs, false, count($rows));
@@ -1394,7 +1391,11 @@ function odata_get_all_direct(string $url, array $auth, $ttlSeconds = 300): arra
         }
 
         $all = array_merge($all, $resp['value']);
+        $previous = $next;
         $next = $resp['@odata.nextLink'] ?? null;
+        if (is_string($next) && $next === $previous) {
+            throw new Exception('OData nextLink herhaalt zichzelf; paginering afgebroken.');
+        }
         consolelog("Reading next chunk...\n");
     }
 
@@ -1643,6 +1644,8 @@ function odata_get_json_once(string $url, array $auth): array
         CURLOPT_HTTPHEADER => [
             "Accept: application/json",
             "Accept-Language: nl-NL,nl;q=0.9,en;q=0.8",
+            // Paginagrootte zonder totaal-cap: BC levert @odata.nextLink voor de rest.
+            'Prefer: odata.maxpagesize=' . (int) DEMETER_ODATA_MAX_PAGE_SIZE,
         ],
     ]);
 
