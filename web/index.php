@@ -184,6 +184,52 @@ require_once __DIR__ . "/logincheck.php";
 demeter_release_session_lock_if_active();
 require_once __DIR__ . "/odata.php";
 require_once __DIR__ . "/bc_fetch/active_load.php";
+require_once __DIR__ . "/bc_fetch/project_totals_full.php";
+
+/**
+ * Pagina-open: volledige projecttotalen bijwerken (delta op Entry_No, max één keer per 180 s, harde timeout)
+ * en op de rijen zetten. Bestaat het bestand nog niet, dan de eerste volledige opbouw NA het versturen van
+ * de pagina (fastcgi_finish_request), zodat niemand wacht; tot dan blijven de weektotalen staan.
+ */
+function demeter_page_apply_full_project_totals(string $company, array $displayRowsByKey): array
+{
+    if (!demeter_project_totals_full_enabled() || $company === '') {
+        return $displayRowsByKey;
+    }
+    try {
+        require_once __DIR__ . '/bc_fetch/store_transport.php';
+        if (demeter_project_totals_full_read($company) !== null) {
+            demeter_project_totals_full_sync($company, demeter_store_live_transport($company, ['request_timeout' => 8]), false);
+        } elseif (function_exists('fastcgi_finish_request') && empty($GLOBALS['demeter_project_totals_full_build_scheduled'])) {
+            $GLOBALS['demeter_project_totals_full_build_scheduled'] = true;
+            register_shutdown_function(static function () use ($company): void {
+                @fastcgi_finish_request();
+                @set_time_limit(600);
+                $result = demeter_project_totals_full_sync($company, demeter_store_live_transport($company, ['request_timeout' => 120]), true);
+                if (($result['status'] ?? '') === 'error') {
+                    error_log('Demeter projecttotalen (volledig): ' . ($result['error'] ?? 'fout'));
+                }
+            });
+        }
+    } catch (Throwable $error) {
+        error_log('Demeter projecttotalen (volledig): ' . $error->getMessage());
+    }
+
+    return demeter_project_totals_full_apply_to_rows($company, $displayRowsByKey);
+}
+
+/** load_month: de cumulatieve weeksom vervangen door de volledige totalen (voor de jobs in de map en de rijen). */
+function demeter_load_month_full_project_totals(string $company, array $cumulative, array $rows): array
+{
+    $jobs = [];
+    foreach ($rows as $row) {
+        if (is_array($row) && trim((string) ($row['Job_No'] ?? '')) !== '') {
+            $jobs[] = strtolower(trim((string) $row['Job_No']));
+        }
+    }
+
+    return demeter_project_totals_full_overlay_map($company, $cumulative, $jobs);
+}
 require_once __DIR__ . "/project_finance.php";
 require_once __DIR__ . "/bc_fetch/month_loader.php";
 require_once __DIR__ . "/bc_fetch/cost_centers.php";
@@ -775,7 +821,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'catch_up' => $catchUp,
             'hitchhiked' => false,
             'load_progress_token' => $catchUp && $chunkProgressToken !== null ? $chunkProgressToken : null,
-            'rows' => $built['rows'],
+            'rows' => is_array($built['rows'] ?? null) ? demeter_project_totals_full_apply_to_rows($company, $built['rows']) : $built['rows'],
             'row_keys' => !empty($chunk['skipped'])
                 ? demeter_month_scan_expected_row_keys($monthScan, $yearWeek)
                 : $built['row_keys'],
@@ -786,7 +832,11 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'next_month' => $nextWeek,
             'should_continue' => !empty($chunk['should_continue']),
             'project_totals_by_job' => is_array($chunk['project_totals_by_job'] ?? null) ? $chunk['project_totals_by_job'] : [],
-            'project_totals_cumulative_by_job' => demeter_month_scan_cumulative_project_totals($monthScan),
+            'project_totals_cumulative_by_job' => demeter_load_month_full_project_totals(
+                $company,
+                demeter_month_scan_cumulative_project_totals($monthScan),
+                is_array($built['rows'] ?? null) ? $built['rows'] : []
+            ),
             'projectposten_rows_by_project' => is_array($chunk['projectposten_rows_by_project'] ?? null) ? $chunk['projectposten_rows_by_project'] : [],
             'projectposten_rows_by_project_and_workorder' => is_array($chunk['projectposten_rows_by_project_and_workorder'] ?? null) ? $chunk['projectposten_rows_by_project_and_workorder'] : [],
             'invoice_details_by_id' => is_array($chunk['invoice_details_by_id'] ?? null) ? $chunk['invoice_details_by_id'] : [],
@@ -1233,6 +1283,8 @@ try {
         $displayRowsByKey = is_array($pageDisplay['rows'] ?? null) ? $pageDisplay['rows'] : [];
         if ($displayRowsByKey !== []) {
             $cacheUsedForFirstPaint = true;
+            // Projecttotalen over ALLE ProjectPosten van het project (niet alleen de geladen weken).
+            $displayRowsByKey = demeter_page_apply_full_project_totals($selectedCompany, $displayRowsByKey);
             // Altijd alle rijen: het factuurfilter wordt client-side toegepast (zonder navigatie).
             $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, 'both');
         } else {
