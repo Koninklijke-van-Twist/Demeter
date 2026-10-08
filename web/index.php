@@ -815,6 +815,38 @@ if (($_GET['action'] ?? '') === 'load_month') {
     }
 }
 
+if (($_GET['action'] ?? '') === 'sync_changes') {
+    // Page-open BC-delta (alleen vanuit de pagina na het openen; nooit als polling): wat is er sinds de laatste
+    // sync in BC veranderd (posten, nieuwe werkorders, statuswijzigingen)? Geraakte weken (ook gesloten)
+    // worden 'opnieuw laden'; de browser leest ze daarna via load_month (force_full + resume). Doet niets als
+    // de laatste sync < 180 s oud is, de cache niet compleet is of er een load loopt. Harde timeout per
+    // BC-request; bij een fout blijft alles staan en probeert de volgende page-open het opnieuw.
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+    $GLOBALS['demeter_json_action'] = true;
+    try {
+        $deltaCompany = trim((string) ($_GET['company'] ?? ''));
+        $deltaCostCenter = trim((string) ($_GET['cost_center'] ?? ''));
+        if ($deltaCompany === '' || $deltaCostCenter === '') {
+            throw new InvalidArgumentException('Ongeldige parameters voor sync_changes.');
+        }
+        if (defined('DEMETER_WORKORDER_DELTA_ENABLED') && !DEMETER_WORKORDER_DELTA_ENABLED) {
+            demeter_send_json_response(['ok' => true, 'status' => 'disabled', 'dirty_weeks' => []]);
+        }
+        @set_time_limit(90);
+        auth_set_current_company_context($deltaCompany, 300);
+        require_once __DIR__ . '/bc_fetch/workorder_delta.php';
+        require_once __DIR__ . '/bc_fetch/store_transport.php';
+        $deltaResult = demeter_workorder_delta_page_open($deltaCompany, $deltaCostCenter, static function () use ($deltaCompany): array {
+            return demeter_store_live_transport($deltaCompany, ['request_timeout' => DEMETER_WORKORDER_DELTA_REQUEST_TIMEOUT]);
+        });
+        demeter_send_json_response(['ok' => true] + $deltaResult);
+    } catch (Throwable $deltaError) {
+        error_log('Demeter sync_changes: ' . $deltaError->getMessage());
+        demeter_send_json_response(['ok' => false, 'error' => $deltaError->getMessage(), 'dirty_weeks' => []]);
+    }
+}
+
 if (($_GET['action'] ?? '') === 'report_load_failure') {
     // De browser die een verversing aanstuurt geeft het op (week blijft mislukken): leg de fout vast in de
     // laadvoortgang, zodat meeliftende tabs de echte fout zien i.p.v. na 5 minuten 'vastgelopen'.
@@ -1289,6 +1321,9 @@ $initialData = [
         'enabled' => $asyncLoadEnabled,
         'catch_up_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
         'catch_up_week' => $syncLoadWeek,
+        // Na de catch-up: page-open BC-delta (action=sync_changes) en daarna de geraakte weken opnieuw lezen.
+        'sync_changes_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== ''
+            && (!defined('DEMETER_WORKORDER_DELTA_ENABLED') || DEMETER_WORKORDER_DELTA_ENABLED),
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
         'refresh_blocked' => $refreshBlocked || $asyncLoadEnabled || $hitchhikeActiveLoad,

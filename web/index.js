@@ -44,6 +44,9 @@
     // Moet vóór het opstartdeel gedeclareerd zijn: startIncrementalMonthLoading() draait al tijdens het laden
     // van het script en leest deze waarde synchroon (anders TDZ: 'Cannot access … before initialization').
     const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
+    // Herlaad-guard van de page-open BC-delta (bovenaan i.v.m. TDZ, zie #30).
+    const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
+    const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
     let loadStatsFromCache = 0;
     let loadStatsUpdatedFromBc = 0;
     let loadStatsNote = null;
@@ -452,6 +455,16 @@
             .catch(function (catchUpError)
             {
                 console.error(catchUpError);
+            })
+            .then(function ()
+            {
+                // Eenmalig per page-open (geen polling): BC-wijzigingen sinds de laatste sync ophalen en
+                // de geraakte (ook gesloten) weken opnieuw lezen.
+                return syncChangesAndReloadWeeks();
+            })
+            .catch(function (syncError)
+            {
+                console.error(syncError);
             });
     }
 
@@ -6523,7 +6536,14 @@
         {
             params.set('catch_up', '1');
         }
-        if (asyncLoadConfig.force_full === true)
+        if (options && options.reloadChanged === true)
+        {
+            // Week opnieuw lezen na een BC-wijziging (page-open delta): volledig uit BC, samengevoegd met de
+            // cache; niet-gemarkeerde weken slaat de server over (resume).
+            params.set('force_full', '1');
+            params.set('resume', '1');
+        }
+        else if (asyncLoadConfig.force_full === true)
         {
             params.set('force_full', '1');
             if (asyncLoadConfig.rebuild_resume === true && !(options && options.catchUp === true))
@@ -6777,7 +6797,146 @@
         }
     }
 
-    // keepDisplayRowsDuringLoad: bovenaan gedeclareerd (TDZ-fix, zie daar).
+    // keepDisplayRowsDuringLoad en CHANGES_RELOAD_GUARD_*: bovenaan gedeclareerd (TDZ-fix #30).
+    function changesReloadRecentlyDone ()
+    {
+        try
+        {
+            const at = Number(window.sessionStorage.getItem(CHANGES_RELOAD_GUARD_KEY) || 0);
+            return at > 0 && (Date.now() - at) < CHANGES_RELOAD_GUARD_MS;
+        }
+        catch (storageError)
+        {
+            return false;
+        }
+    }
+
+    function reloadAfterChanges (note)
+    {
+        // Hooguit één automatische herlaadbeurt per 3 minuten (nooit een herlaad-lus).
+        if (changesReloadRecentlyDone())
+        {
+            updateHistoryLoadNote('');
+            return;
+        }
+        try
+        {
+            window.sessionStorage.setItem(CHANGES_RELOAD_GUARD_KEY, String(Date.now()));
+        }
+        catch (storageError)
+        {
+            // geen sessionStorage: dan alleen de serverkant (sync max. 1x per 180 s)
+        }
+        updateHistoryLoadNote(note);
+        window.__demeterSuppressUnloadLoader = true;
+        window.location.reload();
+    }
+
+    /**
+     * Page-open BC-delta: één call naar de server (die doet niets als de laatste sync < 180 s oud is). Geraakte
+     * weken (achteraf gedateerde posten, nieuwe werkorders met een startdatum in het verleden, verzette
+     * startdatums) worden daarna één voor één opnieuw gelezen. Statuswijzigingen van werkorders die al in
+     * beeld staan heeft de server direct in de cache bijgewerkt. Lukt iets niet, dan blijft de bestaande data
+     * staan en probeert de volgende page-open het opnieuw.
+     */
+    async function syncChangesAndReloadWeeks ()
+    {
+        if (asyncLoadConfig.sync_changes_enabled !== true || historyLoadRunning || hitchhikeLoadRunning || loadedCostCenter === '')
+        {
+            return;
+        }
+
+        let body = null;
+        const params = new URLSearchParams();
+        params.set('action', 'sync_changes');
+        params.set('company', String(payload.company || ''));
+        params.set('cost_center', loadedCostCenter);
+        const abortController = typeof AbortController === 'function' ? new AbortController() : null;
+        const abortTimer = abortController ? window.setTimeout(function () { abortController.abort(); }, 90 * 1000) : 0;
+        try
+        {
+            const response = await fetch('index.php?' + params.toString(), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+                signal: abortController ? abortController.signal : undefined
+            });
+            body = await response.json();
+        }
+        catch (syncError)
+        {
+            console.error(syncError);
+            return;
+        }
+        finally
+        {
+            if (abortTimer)
+            {
+                window.clearTimeout(abortTimer);
+            }
+        }
+
+        if (!body || body.ok !== true)
+        {
+            return;
+        }
+
+        const weeks = Array.isArray(body.dirty_weeks)
+            ? body.dirty_weeks.filter(function (week) { return typeof week === 'string' && /^\d{4}-W\d{2}$/.test(week); })
+            : [];
+        if (weeks.length === 0)
+        {
+            if (body.rows_changed === true)
+            {
+                reloadAfterChanges('Statuswijzigingen uit BC verwerkt; pagina wordt ververst...');
+            }
+            return;
+        }
+        if (historyLoadRunning || hitchhikeLoadRunning)
+        {
+            return;
+        }
+
+        historyLoadRunning = true;
+        setRefreshNowButtonDisabled(true, 'Wijzigingen uit BC worden verwerkt; Ververs Nu kan zodra dit klaar is');
+        let failed = 0;
+        for (let index = 0; index < weeks.length; index++)
+        {
+            const week = weeks[index];
+            updateHistoryLoadNote('Wijzigingen uit BC verwerken: week ' + week + ' opnieuw lezen (' + String(index + 1) + '/' + String(weeks.length) + ')...');
+            let done = false;
+            for (let attempt = 1; attempt <= 2 && !done; attempt++)
+            {
+                try
+                {
+                    await fetchHistoryWeek(week, 0, 0, { reloadChanged: true });
+                    done = true;
+                }
+                catch (weekError)
+                {
+                    logDemeterODataFailure('sync_changes week=' + String(week) + ' attempt=' + String(attempt), weekError);
+                    if (attempt < 2)
+                    {
+                        await waitForMs(3000);
+                    }
+                }
+            }
+            if (!done)
+            {
+                failed++;
+            }
+        }
+        historyLoadRunning = false;
+        setRefreshNowButtonDisabled(false, '');
+
+        if (failed === 0)
+        {
+            reloadAfterChanges('Wijzigingen uit BC verwerkt; pagina wordt ververst...');
+            return;
+        }
+        updateHistoryLoadNote(String(failed) + ' van ' + String(weeks.length) + ' gewijzigde weken konden niet opnieuw worden gelezen; dat gebeurt bij de volgende keer openen.');
+    }
+
 
     function decorateRebuildLoadNote (text)
     {

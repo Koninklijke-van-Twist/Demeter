@@ -6,6 +6,7 @@
 require_once __DIR__ . '/invoice_cache.php';
 require_once __DIR__ . '/cost_center.php';
 require_once __DIR__ . '/workorder_state_cache.php';
+require_once __DIR__ . '/workorder_delta_state.php';
 require_once __DIR__ . '/projectposten_workorders.php';
 require_once __DIR__ . '/../project_finance.php';
 require_once __DIR__ . '/../workorder_rows.php';
@@ -106,7 +107,10 @@ function bc_fetch_load_workorder_week_chunk(
         $resumeState = demeter_workorder_state_cache_load($company, $costCenter);
         $resumeScan = is_array($resumeState['month_scan'] ?? null) ? $resumeState['month_scan'] : null;
         $resumeWeekMeta = is_array($resumeScan['months'][$normalizedYearWeek] ?? null) ? $resumeScan['months'][$normalizedYearWeek] : null;
-        if (is_array($resumeScan) && is_array($resumeWeekMeta) && trim((string) ($resumeWeekMeta['scanned_at'] ?? '')) !== '') {
+        // Een week die de page-open BC-delta als 'opnieuw laden' markeerde, wordt niet overgeslagen.
+        if (is_array($resumeScan) && is_array($resumeWeekMeta) && trim((string) ($resumeWeekMeta['scanned_at'] ?? '')) !== ''
+            && !demeter_workorder_delta_week_is_dirty($company, $costCenter, $normalizedYearWeek)
+        ) {
             return bc_fetch_resume_skipped_week_chunk($normalizedYearWeek, $resumeScan, $costCenter, $progressToken, $options);
         }
     }
@@ -318,6 +322,8 @@ function bc_fetch_load_workorder_week_chunk(
         odata_load_progress_heartbeat_throttled(true);
     }
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
+    // Week is (opnieuw) volledig gelezen en opgeslagen: niet meer 'opnieuw laden' (page-open delta).
+    demeter_workorder_delta_clear_dirty_week($company, $costCenter, $normalizedYearWeek);
     if (demeter_month_scan_history_complete($monthScan)) {
         // Volledige herbouw is klaar (einde historie bereikt): nu pas wisselen naar de nieuwe rijen.
         demeter_workorder_state_cache_finish_rebuild($company, $costCenter);
@@ -749,6 +755,11 @@ function bc_fetch_load_current_week_by_days_unlocked(
         $loadMeta['days_loaded'][] = $dayYmd;
         $loadMeta['from_cache_count'] += (int) ($dayMeta['from_cache_count'] ?? 0);
         $loadMeta['updated_from_bc_count'] += (int) ($dayMeta['updated_from_bc_count'] ?? 0);
+    }
+
+    if ($daysToLoad !== [] && $forceFull) {
+        // Alle dagen van de huidige week zijn opnieuw gelezen: niet meer 'opnieuw laden' (page-open delta).
+        demeter_workorder_delta_clear_dirty_week($company, $costCenter, $yearWeek);
     }
 
     $nextWeek = demeter_previous_iso_year_week($yearWeek);
