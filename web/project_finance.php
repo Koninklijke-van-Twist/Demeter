@@ -95,20 +95,17 @@ class ProjectFinanceService
             'invoice_sources' => [
                 [
                     'entity' => 'SalesInvoiceLines',
-                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
+                    'select' => 'Document_No,Line_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
                     'amount_field' => 'Amount',
                     'amount_incl_field' => 'Amount_Including_VAT',
                 ],
-                [
-                    'entity' => 'SalesLines',
-                    'select' => 'Document_Type,Document_No,Sell_to_Customer_No,Variant_Code,Description,Line_Amount,Line_Discount_Percent,Job_No',
-                    'amount_field' => 'Line_Amount',
-                    'amount_incl_field' => 'Line_Amount',
-                ],
+                // Geen SalesLines-bron: die select vroeg Line_Discount_Percent op (bestaat niet op SalesLines → HTTP 400,
+                // stil genegeerd), dus droeg nooit iets bij. Open orders/offertes zijn bovendien geen facturen en
+                // deels gefactureerde orders zouden dubbel tellen naast de geboekte factuurregels.
                 [
                     // BC page 527 Posted Sales Cr. Memo Lines; bedragen zijn positief in BC → negatief tellen.
                     'entity' => 'GeboekteVerkoopCreditnotaRegels',
-                    'select' => 'Document_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
+                    'select' => 'Document_No,Line_No,Sell_to_Customer_No,Variant_Code,Description,Amount,Amount_Including_VAT,Line_Discount_Percent,Line_Discount_Amount,Job_No',
                     'amount_field' => 'Amount',
                     'amount_incl_field' => 'Amount_Including_VAT',
                     'sign' => -1,
@@ -251,6 +248,7 @@ class ProjectFinanceService
         $invoiceDetailsById = [];
         $projectInvoiceIdsByJob = [];
         $projectInvoicedTotalByJob = [];
+        $failedProjectKeys = [];
 
         $projectNumberChunks = self::chunkValues($projectNumbers, 25);
         $invoiceSources = self::getInvoiceSourcesConfig();
@@ -286,7 +284,15 @@ class ProjectFinanceService
                         '$filter' => implode(' or ', $jobFilters),
                     ]);
                     $invoiceRows = odata_get_all($invoiceUrl, $this->auth, $ttl);
-                } catch (Throwable $ignoredSalesInvoiceSourceError) {
+                } catch (Throwable $invoiceSourceError) {
+                    // Niet meer stil: deze projecten zijn onvolledig en mogen niet als "0 gefactureerd" gecachet worden.
+                    foreach ($projectChunk as $failedProjectNo) {
+                        $failedKey = self::normalizeMatchValue(trim((string) $failedProjectNo));
+                        if ($failedKey !== '') {
+                            $failedProjectKeys[$failedKey] = true;
+                        }
+                    }
+                    error_log('[Demeter] Factuurbron ' . $entity . ' mislukt voor ' . count($projectChunk) . ' projecten: ' . substr($invoiceSourceError->getMessage(), 0, 200));
                     continue;
                 }
 
@@ -331,9 +337,12 @@ class ProjectFinanceService
                     }
 
                     $invoiceDetailsById[$invoiceId]['Source_Entities'][$entity] = true;
+                    $lineNo = trim((string) ($invoiceRow['Line_No'] ?? ''));
 
                     $linePayload = [
                         'Source_Entity' => $entity,
+                        'Line_No' => $lineNo,
+                        'Job_No' => $jobNo,
                         'Customer_No' => $customerNo,
                         'Variant_Code' => $variantCode,
                         'Description' => $description,
@@ -342,7 +351,11 @@ class ProjectFinanceService
                         'Line_Discount_Percent' => $lineDiscountPercent,
                         'Line_Discount_Amount' => $lineDiscountAmount,
                     ];
-                    $lineDedupKey = implode('|', [
+                    // Dedup alleen op de echte regelsleutel (bron + Line_No): twee identieke regels op één factuur
+                    // (of dezelfde regeltekst voor verschillende projecten) zijn echte, aparte bedragen.
+                    $lineDedupKey = $lineNo !== '' ? implode('|', [$entity, $lineNo]) : implode('|', [
+                        $entity,
+                        $jobNo,
                         $customerNo,
                         $variantCode,
                         $description,
@@ -410,6 +423,7 @@ class ProjectFinanceService
             'invoice_details_by_id' => $invoiceDetailsById,
             'project_invoice_ids_by_job' => $projectInvoiceIdsByJob,
             'project_invoiced_total_by_job' => $projectInvoicedTotalByJob,
+            'failed_project_keys' => array_keys($failedProjectKeys),
         ];
     }
 
