@@ -26,11 +26,23 @@ if (!defined('DEMETER_WORKORDER_DELTA_REQUEST_TIMEOUT')) {
     define('DEMETER_WORKORDER_DELTA_REQUEST_TIMEOUT', 15);
 }
 if (!defined('DEMETER_WORKORDER_DELTA_MAX_CHANGED_WORKORDERS')) {
-    // Per sync hooguit zoveel gewijzigde werkorders nalopen (20 per call); de rest volgt bij de volgende open.
-    define('DEMETER_WORKORDER_DELTA_MAX_CHANGED_WORKORDERS', 200);
+    // Per sync hooguit zoveel gewijzigde werkorders nalopen (40 per call); de rest volgt bij de volgende open.
+    define('DEMETER_WORKORDER_DELTA_MAX_CHANGED_WORKORDERS', 400);
+}
+if (!defined('DEMETER_WORKORDER_DELTA_NO_CHUNK')) {
+    // Werkorders per No-call ('No eq .. or ..'); de latency per BC-call domineert, niet de lengte.
+    define('DEMETER_WORKORDER_DELTA_NO_CHUNK', 40);
 }
 if (!defined('DEMETER_WORKORDER_DELTA_MAX_ROWS')) {
     define('DEMETER_WORKORDER_DELTA_MAX_ROWS', 5000);
+}
+if (!defined('DEMETER_WORKORDER_DELTA_BACKFILL_MAX_SECONDS')) {
+    // Terugkijken bij (her)initialisatie: vanaf de oudste weekscan, maar nooit verder terug dan dit.
+    define('DEMETER_WORKORDER_DELTA_BACKFILL_MAX_SECONDS', 48 * 3600);
+}
+if (!defined('DEMETER_WORKORDER_DELTA_BACKFILL_VERSION')) {
+    // Ophogen dwingt bestaande checkpoints één keer opnieuw terug te kijken (logboek + nieuwe werkorders).
+    define('DEMETER_WORKORDER_DELTA_BACKFILL_VERSION', 1);
 }
 if (!defined('DEMETER_BC_WORK_ORDER_TABLE_NO')) {
     define('DEMETER_BC_WORK_ORDER_TABLE_NO', 11332939);
@@ -71,36 +83,76 @@ function demeter_workorder_delta_week_of(string $ymd): ?string
 function demeter_workorder_delta_fetch(array $transport, string $costCenter, array $checkpoint): array
 {
     $fetch = $transport['fetch'];
-    $out = ['init' => false, 'postings' => [], 'changes' => [], 'workorders' => [], 'posten_entry_no' => null, 'changelog_entry_no' => null];
+    $out = ['init' => false, 'backfill' => false, 'posten_init' => false, 'postings' => [], 'changes' => [], 'workorders' => [], 'posten_entry_no' => null, 'changelog_entry_no' => null];
 
     $postenFrom = $checkpoint['posten_entry_no'];
     $changelogFrom = $checkpoint['changelog_entry_no'];
-    if ($postenFrom === null || $changelogFrom === null) {
-        // Eerste keer: alleen het checkpoint zetten (de cache is net volledig gelezen), niets markeren.
-        $out['init'] = true;
+    $createdSince = trim((string) ($checkpoint['created_since'] ?? ''));
+    $backfillSince = trim((string) ($checkpoint['backfill_since'] ?? ''));
+    $backfillTs = $backfillSince !== '' ? strtotime($backfillSince) : false;
+    $needsBackfill = (int) ($checkpoint['backfill_version'] ?? 0) < DEMETER_WORKORDER_DELTA_BACKFILL_VERSION;
+
+    if ($changelogFrom === null || $needsBackfill) {
+        // (Her)initialisatie: NIET vanaf 'nu' beginnen. Wat in BC veranderde tussen de weekscan van een week
+        // en de eerste delta-sync (statussen, documentstatus, nieuwe werkorders zoals WO2610905) moet ook
+        // binnenkomen. Daarom terugkijken vanaf de oudste weekscan (backfill_since, door de aanroeper begrensd).
+        $out['backfill'] = true;
+        $from = null;
+        if ($backfillTs !== false) {
+            $first = $fetch('ChangeLogEntries', [
+                '$select' => 'Entry_No',
+                '$filter' => 'Table_No eq ' . DEMETER_BC_WORK_ORDER_TABLE_NO . ' and Date_and_Time ge ' . gmdate('Y-m-d\TH:i:s\Z', $backfillTs),
+                '$orderby' => 'Entry_No asc',
+                '$top' => '1',
+            ]);
+            if (isset($first[0]['Entry_No'])) {
+                $from = max(0, (int) $first[0]['Entry_No'] - 1);
+            }
+        }
+        if ($from === null) {
+            $lastChange = $fetch('ChangeLogEntries', [
+                '$select' => 'Entry_No',
+                '$filter' => 'Table_No eq ' . DEMETER_BC_WORK_ORDER_TABLE_NO,
+                '$orderby' => 'Entry_No desc',
+                '$top' => '1',
+            ]);
+            $from = (int) ($lastChange[0]['Entry_No'] ?? 0);
+        }
+        $changelogFrom = $changelogFrom === null ? $from : min((int) $changelogFrom, $from);
+        if ($backfillTs !== false) {
+            $createdTs0 = $createdSince !== '' ? strtotime($createdSince) : false;
+            if ($createdTs0 === false || $backfillTs < $createdTs0) {
+                $createdSince = gmdate('Y-m-d\TH:i:s\Z', $backfillTs);
+            }
+        }
+    }
+    if ($postenFrom === null) {
+        // Posten hebben geen tijdstempel in OData: checkpoint op de hoogste Entry_No. Bedragen van achteraf
+        // gedateerde posten komen via de volledige totalen (project_totals_full), niet via weekherlading.
+        $out['posten_init'] = true;
         $last = $fetch('ProjectPosten', ['$select' => 'Entry_No', '$orderby' => 'Entry_No desc', '$top' => '1']);
         $out['posten_entry_no'] = (int) ($last[0]['Entry_No'] ?? 0);
-        $lastChange = $fetch('ChangeLogEntries', [
-            '$select' => 'Entry_No',
-            '$filter' => 'Table_No eq ' . DEMETER_BC_WORK_ORDER_TABLE_NO,
-            '$orderby' => 'Entry_No desc',
-            '$top' => '1',
-        ]);
-        $out['changelog_entry_no'] = (int) ($lastChange[0]['Entry_No'] ?? 0);
+    }
+    if ($postenFrom === null && $backfillTs === false && $checkpoint['changelog_entry_no'] === null) {
+        // Geen weekscan-tijd bekend: alleen het checkpoint zetten (oud gedrag).
+        $out['init'] = true;
+        $out['changelog_entry_no'] = (int) $changelogFrom;
 
         return $out;
     }
 
-    $out['postings'] = $fetch('ProjectPosten', [
-        '$select' => 'Entry_No,Posting_Date,LVS_Work_Order_No,Job_No,Global_Dimension_1_Code,LVS_Global_Dimension_1_Code',
-        '$filter' => 'Entry_No gt ' . (int) $postenFrom,
-        '$orderby' => 'Entry_No asc',
-        // Begrensd: na lange tijd niet geopend volgt de rest bij de volgende page-open (checkpoint = laatst verwerkt).
-        '$top' => (string) DEMETER_WORKORDER_DELTA_MAX_ROWS,
-    ]);
-    $out['posten_entry_no'] = (int) $postenFrom;
-    foreach ($out['postings'] as $posting) {
-        $out['posten_entry_no'] = max($out['posten_entry_no'], (int) ($posting['Entry_No'] ?? 0));
+    if ($postenFrom !== null) {
+        $out['postings'] = $fetch('ProjectPosten', [
+            '$select' => 'Entry_No,Posting_Date,LVS_Work_Order_No,Job_No,Global_Dimension_1_Code,LVS_Global_Dimension_1_Code',
+            '$filter' => 'Entry_No gt ' . (int) $postenFrom,
+            '$orderby' => 'Entry_No asc',
+            // Begrensd: na lange tijd niet geopend volgt de rest bij de volgende page-open (checkpoint = laatst verwerkt).
+            '$top' => (string) DEMETER_WORKORDER_DELTA_MAX_ROWS,
+        ]);
+        $out['posten_entry_no'] = (int) $postenFrom;
+        foreach ($out['postings'] as $posting) {
+            $out['posten_entry_no'] = max($out['posten_entry_no'], (int) ($posting['Entry_No'] ?? 0));
+        }
     }
 
     $changes = $fetch('ChangeLogEntries', [
@@ -115,8 +167,18 @@ function demeter_workorder_delta_fetch(array $transport, string $costCenter, arr
     // Begrensd en hervatbaar: het checkpoint gaat alleen tot de laatst verwerkte logregel.
     $changedNos = [];
     $out['changelog_entry_no'] = (int) $changelogFrom;
+    // Het logboek is bedrijfsbreed: alleen werkorders nalopen die in beeld staan, plus nieuwe werkorders en
+    // verzette startdatums (die kunnen in beeld komen). Scheelt calls en de begrenzing raakt minder snel vol.
+    $knownNos = is_array($checkpoint['known_nos'] ?? null) ? $checkpoint['known_nos'] : null;
     foreach ($changes as $entry) {
         $no = trim((string) ($entry['Primary_Key_Field_1_Value'] ?? ''));
+        if ($no !== '' && $knownNos !== null && !isset($knownNos[strtolower($no)])
+            && strcasecmp(trim((string) ($entry['Type_of_Change'] ?? '')), 'Insertion') !== 0
+            && !in_array(strtolower(trim((string) ($entry['Field_Caption'] ?? ''))), ['start date', 'startdatum'], true)
+        ) {
+            $out['changelog_entry_no'] = max($out['changelog_entry_no'], (int) ($entry['Entry_No'] ?? 0));
+            continue;
+        }
         if ($no !== '' && demeter_workorder_delta_relevant_change($entry) && !isset($changedNos[strtolower($no)])) {
             if (count($changedNos) >= DEMETER_WORKORDER_DELTA_MAX_CHANGED_WORKORDERS) {
                 break;
@@ -131,7 +193,7 @@ function demeter_workorder_delta_fetch(array $transport, string $costCenter, arr
         ? bc_fetch_werkorders_list_select()
         : 'No,Status,KVT_Document_Status,Job_No,Job_Task_No,Start_Date,Job_Dimension_1_Value,Created_Date_Time';
     $byNo = [];
-    $createdSince = trim((string) ($checkpoint['created_since'] ?? ''));
+    $out['created_since_used'] = $createdSince;
     $createdTs = $createdSince !== '' ? strtotime($createdSince) : false;
     if ($createdTs !== false) {
         $filter = 'Created_Date_Time gt ' . gmdate('Y-m-d\TH:i:s\Z', $createdTs - 300);
@@ -146,7 +208,7 @@ function demeter_workorder_delta_fetch(array $transport, string $costCenter, arr
         }
     }
     $missing = array_values(array_diff_key($changedNos, $byNo));
-    foreach (array_chunk($missing, 20) as $chunk) {
+    foreach (array_chunk($missing, DEMETER_WORKORDER_DELTA_NO_CHUNK) as $chunk) {
         $parts = array_map(static function (string $no): string {
             return "No eq '" . str_replace("'", "''", $no) . "'";
         }, $chunk);
@@ -274,6 +336,28 @@ function demeter_workorder_delta_apply(array $fetched, array $displayRowsByKey, 
 }
 
 /**
+ * Vanaf wanneer terugkijken bij (her)initialisatie: de oudste weekscan (wat daarna in BC veranderde kan in
+ * een al gelezen week ontbreken), begrensd op DEMETER_WORKORDER_DELTA_BACKFILL_MAX_SECONDS. Null zonder scans.
+ */
+function demeter_workorder_delta_backfill_since(array $monthScan, int $now): ?string
+{
+    $oldest = null;
+    foreach ((is_array($monthScan['months'] ?? null) ? $monthScan['months'] : []) as $entry) {
+        $ts = is_array($entry) ? strtotime((string) ($entry['scanned_at'] ?? '')) : false;
+        if ($ts !== false && $ts > 0 && ($oldest === null || $ts < $oldest)) {
+            $oldest = $ts;
+        }
+    }
+    if ($oldest === null) {
+        return null;
+    }
+    // Marge voor klokverschil en voor een week-load die tijdens de scan liep.
+    $since = max($oldest - 300, $now - DEMETER_WORKORDER_DELTA_BACKFILL_MAX_SECONDS);
+
+    return gmdate('Y-m-d\TH:i:s\Z', $since);
+}
+
+/**
  * Page-open: alleen voor een complete cache van de huidige versie zonder lopende (her)bouw, en alleen als
  * de laatste geslaagde delta ouder is dan DEMETER_WORKORDER_DELTA_MAX_AGE_SECONDS.
  *
@@ -313,6 +397,15 @@ function demeter_workorder_delta_page_open(string $company, string $costCenter, 
         }
 
         return ['status' => 'busy', 'dirty_weeks' => demeter_workorder_delta_dirty_weeks($company, $costCenter)] + $result;
+    }
+
+    $checkpoint['backfill_since'] = demeter_workorder_delta_backfill_since($monthScan, $now);
+    $checkpoint['known_nos'] = [];
+    foreach (demeter_workorder_state_cache_load_display_rows($company, $costCenter) as $row) {
+        $bcNo = is_array($row) ? strtolower(trim((string) ($row['Bc_No'] ?? $row['No'] ?? ''))) : '';
+        if ($bcNo !== '') {
+            $checkpoint['known_nos'][$bcNo] = true;
+        }
     }
 
     try {
@@ -373,13 +466,22 @@ function demeter_workorder_delta_apply_locked(string $company, string $costCente
                 }
             }
             $checkpoint['posten_entry_no'] = max((int) ($checkpoint['posten_entry_no'] ?? 0), (int) $fetched['posten_entry_no']);
-            $checkpoint['changelog_entry_no'] = max((int) ($checkpoint['changelog_entry_no'] ?? 0), (int) $fetched['changelog_entry_no']);
+            if (!empty($fetched['backfill'])) {
+                // Terugkijken: checkpoint = laatst verwerkte logregel (kan lager zijn dan het oude checkpoint;
+                // bij de begrenzing volgt de rest bij de volgende page-open).
+                $checkpoint['changelog_entry_no'] = (int) $fetched['changelog_entry_no'];
+                $checkpoint['backfill_version'] = DEMETER_WORKORDER_DELTA_BACKFILL_VERSION;
+            } else {
+                $checkpoint['changelog_entry_no'] = max((int) ($checkpoint['changelog_entry_no'] ?? 0), (int) $fetched['changelog_entry_no']);
+            }
             $checkpoint['created_since'] = $startedIso;
             $checkpoint['synced_at'] = $now;
             $checkpoint['dirty_weeks'] = array_replace(is_array($checkpoint['dirty_weeks']) ? $checkpoint['dirty_weeks'] : [], $applied['dirty']);
             $checkpoint['last'] = [
                 'at' => $now,
                 'init' => (bool) $fetched['init'],
+                'backfill' => !empty($fetched['backfill']),
+                'created_since_used' => (string) ($fetched['created_since_used'] ?? ''),
                 'postings' => count($fetched['postings']),
                 'changed_workorders' => count($fetched['changes']),
                 'workorders' => count($fetched['workorders']),
