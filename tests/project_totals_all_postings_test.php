@@ -167,6 +167,12 @@ $index = file_get_contents(__DIR__ . '/../web/index.php');
 check(strpos($index, '$displayRowsByKey = demeter_page_apply_full_project_totals($selectedCompany, $displayRowsByKey);') !== false, 'pagina-render zet de volledige projecttotalen');
 check(strpos($index, "'project_totals_cumulative_by_job' => demeter_load_month_full_project_totals(") !== false, 'load_month stuurt de volledige totalen als cumulatief');
 check(strpos(file_get_contents(__DIR__ . '/../web/nightly.php'), 'demeter_project_totals_full_sync(') !== false, 'nightly werkt de volledige projecttotalen bij');
+$syncPos = strpos($index, "=== 'sync_changes'");
+$syncBlock = $syncPos !== false ? substr($index, $syncPos, 3000) : '';
+check(strpos($syncBlock, 'demeter_project_totals_full_read($deltaCompany) === null') !== false
+    && strpos($syncBlock, 'demeter_project_totals_full_sync($deltaCompany') !== false
+    && strpos($syncBlock, 'demeter_project_totals_full_sync($deltaCompany') < strpos($syncBlock, 'demeter_workorder_delta_page_open('),
+    'sync_changes bouwt de volledige projecttotalen op als ze ontbreken (vangnet zonder php-fpm), vóór de delta');
 
 array_map('unlink', glob($tmpDir . '/*') ?: []);
 @rmdir($tmpDir);
