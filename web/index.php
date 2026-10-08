@@ -835,6 +835,8 @@ if (($_GET['action'] ?? '') === 'report_load_failure') {
                 . ' Herlaad de pagina om verder te gaan waar de verversing bleef.'
         );
     }
+    // Claim direct vrijgeven: anders blokkeert de opgegeven load nog 3-5 minuten elke herlaad/Ververs Nu.
+    demeter_active_load_release_by_token($failToken);
     demeter_send_json_response(['ok' => true]);
 }
 
