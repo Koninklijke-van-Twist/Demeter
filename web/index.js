@@ -389,6 +389,11 @@
     updateSummaryCount();
     syncTableScrollWrapMaxHeight();
     hidePageLoader();
+    if (!asyncLoadConfig.enabled && cacheMeta.has_data === true && cacheMeta.history_complete === false)
+    {
+        // Cache van een niet afgeronde volledige verversing: niet als compleet tonen.
+        setProjectTotalsIncompleteState(asyncLoadConfig.hitchhike_enabled ? 'loading' : 'partial-cache');
+    }
     if (asyncLoadConfig.enabled)
     {
         setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
@@ -5064,8 +5069,18 @@
         {
             return 'Projecttotaal is niet compleet: het laden van de weken is afgebroken. Ververs om opnieuw te laden.';
         }
+        if (projectTotalsIncompleteState === 'partial-cache')
+        {
+            return 'Projecttotaal is niet compleet: de laatste volledige verversing is niet afgerond, de cache bevat niet alle weken. Klik op "Ververs Nu" om alles opnieuw te laden.';
+        }
 
         return '';
+    }
+
+    // 'error' (laden afgebroken) en 'partial-cache' (cache van een niet afgeronde verversing) tonen ⚠.
+    function isProjectTotalsIncompleteWarningState ()
+    {
+        return projectTotalsIncompleteState === 'error' || projectTotalsIncompleteState === 'partial-cache';
     }
 
     // Markeert een projecttotaal-cel (of samenvatting) als onvolledig; bewaart de oorspronkelijke title.
@@ -5083,7 +5098,7 @@
 
         const tooltip = getProjectTotalsIncompleteTooltip();
         element.classList.toggle('project-total-incomplete', tooltip !== '');
-        element.classList.toggle('project-total-error', projectTotalsIncompleteState === 'error');
+        element.classList.toggle('project-total-error', isProjectTotalsIncompleteWarningState());
         if (tooltip !== '')
         {
             element.title = tooltip;
@@ -5115,10 +5130,17 @@
             return;
         }
 
-        note.classList.toggle('project-incomplete-note-error', projectTotalsIncompleteState === 'error');
-        note.textContent = projectTotalsIncompleteState === 'error'
-            ? 'Let op: het laden van de weken is afgebroken; deze lijst is mogelijk niet compleet.'
-            : 'Nog aan het laden: niet alle weken zijn geladen; deze lijst is mogelijk niet compleet.';
+        note.classList.toggle('project-incomplete-note-error', isProjectTotalsIncompleteWarningState());
+        if (projectTotalsIncompleteState === 'partial-cache')
+        {
+            note.textContent = 'Let op: de laatste volledige verversing is niet afgerond; deze lijst is mogelijk niet compleet.';
+        }
+        else
+        {
+            note.textContent = projectTotalsIncompleteState === 'error'
+                ? 'Let op: het laden van de weken is afgebroken; deze lijst is mogelijk niet compleet.'
+                : 'Nog aan het laden: niet alle weken zijn geladen; deze lijst is mogelijk niet compleet.';
+        }
         note.title = getProjectTotalsIncompleteTooltip();
     }
 
@@ -5149,7 +5171,7 @@
                 badge.className = 'project-incomplete-badge';
                 th.appendChild(badge);
             }
-            badge.textContent = projectTotalsIncompleteState === 'error'
+            badge.textContent = isProjectTotalsIncompleteWarningState()
                 ? '⚠ niet compleet'
                 : (projectTotalsIncompleteState === 'loading-history' ? '⏳ oudere historie laadt nog' : '⏳ nog aan het laden');
             badge.title = tooltip;
@@ -5158,7 +5180,7 @@
 
     function setProjectTotalsIncompleteState (state)
     {
-        const nextState = state === 'loading' || state === 'loading-history' || state === 'error' ? state : '';
+        const nextState = state === 'loading' || state === 'loading-history' || state === 'error' || state === 'partial-cache' ? state : '';
         if (nextState === projectTotalsIncompleteState)
         {
             return;
@@ -6251,12 +6273,17 @@
         });
     }
 
-    async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt)
+    // Wachttijden tussen pogingen bij een haperend antwoord (afgekapte/ongeldige JSON, lege body,
+    // HTML-foutpagina, netwerkfout of 5xx zonder JSON). Daarna pas de normale foutweergave.
+    const TRANSIENT_WEEK_RETRY_DELAYS_MS = [3000, 10000, 20000];
+
+    async function fetchHistoryWeekWithRetry (yearWeek, weekProgressIndex, weekProgressTotal, attempt, transientRetries)
     {
         const maxAttempts = 4;
         // Verbindingsfouten niet eindeloos herhalen: na ~5 minuten zichtbaar falen.
         const maxConnectionAttempts = 30;
         const currentAttempt = Number(attempt || 1);
+        const transientRetriesDone = Number(transientRetries || 0);
 
         try
         {
@@ -6268,6 +6295,28 @@
                 'load_month week=' + String(yearWeek) + ' client_retry=' + String(currentAttempt),
                 loadError
             );
+
+            // Zelfde week opnieuw met dezelfde load_token: de server voegt een week idempotent samen
+            // (onder lock), dus een herhaling geeft geen dubbele rijen.
+            if (loadError && loadError.transientResponse === true)
+            {
+                if (transientRetriesDone >= TRANSIENT_WEEK_RETRY_DELAYS_MS.length)
+                {
+                    throw loadError;
+                }
+
+                const retryNumber = transientRetriesDone + 1;
+                updateHistoryLoadNote(
+                    'Verbinding hapert, opnieuw proberen ('
+                    + String(retryNumber)
+                    + '/'
+                    + String(TRANSIENT_WEEK_RETRY_DELAYS_MS.length)
+                    + ')...'
+                );
+                await waitForMs(TRANSIENT_WEEK_RETRY_DELAYS_MS[transientRetriesDone]);
+
+                return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt, retryNumber);
+            }
 
             const errorMessage = String(loadError && loadError.message ? loadError.message : loadError);
             const isConnectionError = isConnectionRetryableODataError(errorMessage);
@@ -6294,8 +6343,64 @@
             );
             await waitForMs(delayMs);
 
-            return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt + 1);
+            return fetchHistoryWeekWithRetry(yearWeek, weekProgressIndex, weekProgressTotal, currentAttempt + 1, transientRetriesDone);
         }
+    }
+
+    // Markeert een fout als 'haperend antwoord' (opnieuw proberen zinvol), met een leesbare melding.
+    function createTransientWeekResponseError (yearWeek, reason, responseStatus)
+    {
+        const statusText = typeof responseStatus === 'number' && responseStatus > 0 ? ' (HTTP ' + String(responseStatus) + ')' : '';
+        const error = new Error('Week ' + String(yearWeek) + ': ongeldig of onvolledig antwoord van de server' + statusText + ': ' + String(reason || 'onbekend'));
+        error.transientResponse = true;
+        if (typeof responseStatus === 'number')
+        {
+            error.responseStatus = responseStatus;
+        }
+
+        return error;
+    }
+
+    // Leest de body als tekst en parset zelf, zodat een lege/afgekapte body of HTML-foutpagina
+    // als haperend antwoord herkend wordt i.p.v. als harde fout.
+    function parseWeekResponseBody (yearWeek, response, text)
+    {
+        const status = Number(response && response.status || 0);
+        const trimmed = String(text || '').trim();
+        if (trimmed === '')
+        {
+            throw createTransientWeekResponseError(yearWeek, 'lege body', status);
+        }
+
+        let body = null;
+        try
+        {
+            body = JSON.parse(trimmed);
+        }
+        catch (parseError)
+        {
+            const looksLikeHtml = trimmed.charAt(0) === '<';
+            throw createTransientWeekResponseError(yearWeek, looksLikeHtml ? 'HTML-pagina i.p.v. JSON' : 'afgekapte of ongeldige JSON', status);
+        }
+
+        if (!body || typeof body !== 'object')
+        {
+            throw createTransientWeekResponseError(yearWeek, 'geen JSON-object', status);
+        }
+
+        if (!response.ok || body.ok !== true)
+        {
+            const errorText = body.error ? body.error : ('HTTP ' + status);
+            const apiError = createDemeterApiError(errorText, body, status);
+            // 502/503/504 van een proxy/gateway zonder eigen foutmelding: tijdelijk.
+            if (!body.error && status >= 500)
+            {
+                apiError.transientResponse = true;
+            }
+            throw apiError;
+        }
+
+        return body;
     }
 
     function fetchHistoryWeek (yearWeek, weekProgressIndex, weekProgressTotal, options)
@@ -6353,27 +6458,29 @@
             {
                 throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
             }
-            throw fetchError;
+            // Netwerkfout (fetch weigert met TypeError): verbinding hapert.
+            throw createTransientWeekResponseError(yearWeek, fetchError && fetchError.message ? fetchError.message : 'netwerkfout', 0);
         }).then(function (response)
         {
-            return response.json().then(function (body)
+            return response.text().then(function (text)
             {
-                if (!response.ok || !body || body.ok !== true)
+                try
                 {
-                    const errorText = body && body.error ? body.error : ('HTTP ' + response.status);
-                    const apiError = createDemeterApiError(errorText, body, response.status);
+                    return parseWeekResponseBody(yearWeek, response, text);
+                }
+                catch (apiError)
+                {
                     logDemeterODataFailure('load_month week=' + String(yearWeek), apiError);
                     throw apiError;
                 }
-
-                return body;
             }, function (parseError)
             {
                 if (parseError && parseError.name === 'AbortError')
                 {
                     throw new Error('Week ' + String(yearWeek) + ' laden gaf na 11 minuten geen volledig antwoord; het laden is gestopt. Klik op "Ververs Nu" om opnieuw te starten.');
                 }
-                throw parseError;
+                // Body afgebroken tijdens het lezen (verbinding weg): haperend antwoord.
+                throw createTransientWeekResponseError(yearWeek, parseError && parseError.message ? parseError.message : 'body niet leesbaar', Number(response.status || 0));
             });
         }).finally(function ()
         {
@@ -6383,6 +6490,82 @@
                 window.clearTimeout(abortTimer);
             }
         });
+    }
+
+    // Tekst tijdens de catch-up van de huidige week: stap/percentage van de server + verstreken tijd.
+    function formatCatchUpProgressNote (catchUpWeek, progress, elapsedMs)
+    {
+        let text = '⏳ Huidige week bijwerken: ' + String(catchUpWeek || '') + '...';
+        const total = Number(progress && progress.total_months || 0);
+        const index = Number(progress && progress.current_month_index || 0);
+        const message = String(progress && progress.message || '').trim();
+        if (message !== '' && String(progress && progress.status || '') === 'running')
+        {
+            text = '⏳ Huidige week bijwerken: ' + message;
+            if (total > 0)
+            {
+                text += ' (' + String(Math.max(0, Math.min(100, Math.round((index / total) * 100)))) + '%)';
+            }
+        }
+
+        const elapsedSeconds = Math.max(0, Math.floor(Number(elapsedMs || 0) / 1000));
+        if (elapsedSeconds >= 60)
+        {
+            text += ' · loopt ' + String(Math.floor(elapsedSeconds / 60)) + ' min';
+        }
+        if (elapsedSeconds >= 120)
+        {
+            text += ' · duurt langer dan normaal (veel boekingen deze week); Ververs Nu kan zodra dit klaar is.';
+        }
+
+        return text;
+    }
+
+    // Pollt de voortgang van de catch-up (zelfde load_token als de week-request). Geeft een stopfunctie terug.
+    function startCatchUpProgressPolling (catchUpWeek, startedAt)
+    {
+        const token = getPendingLoadProgressToken();
+        if (token === '' || typeof window.setInterval !== 'function')
+        {
+            return function () {};
+        }
+
+        let stopped = false;
+        let lastProgress = null;
+        const poll = async function ()
+        {
+            try
+            {
+                const requestUrl = new URL(loadProgressStatusUrl, window.location.href);
+                requestUrl.searchParams.set('token', token);
+                requestUrl.searchParams.set('_t', String(Date.now()));
+                const response = await fetch(requestUrl.toString(), {
+                    headers: { Accept: 'application/json' },
+                    credentials: 'same-origin',
+                    cache: 'no-store'
+                });
+                if (response.ok)
+                {
+                    lastProgress = await response.json();
+                }
+            }
+            catch (pollError)
+            {
+                // Voortgang is alleen informatief.
+            }
+
+            if (!stopped)
+            {
+                updateHistoryLoadNote(formatCatchUpProgressNote(catchUpWeek, lastProgress, Date.now() - startedAt));
+            }
+        };
+        const timerId = window.setInterval(poll, 1500);
+
+        return function ()
+        {
+            stopped = true;
+            window.clearInterval(timerId);
+        };
     }
 
     async function startCatchUpCurrentWeek ()
@@ -6397,8 +6580,10 @@
         }
 
         historyLoadRunning = true;
-        setRefreshNowButtonDisabled(true, 'Er loopt al een verversing');
-        updateHistoryLoadNote('Huidige week bijwerken: ' + catchUpWeek + '...');
+        setRefreshNowButtonDisabled(true, 'Huidige week wordt bijgewerkt; Ververs Nu kan zodra dit klaar is');
+        updateHistoryLoadNote(formatCatchUpProgressNote(catchUpWeek, null, 0));
+        const catchUpStartedAt = Date.now();
+        const stopCatchUpProgress = startCatchUpProgressPolling(catchUpWeek, catchUpStartedAt);
 
         try
         {
@@ -6449,12 +6634,14 @@
         }
         catch (catchUpError)
         {
+            stopCatchUpProgress();
             console.error(catchUpError);
             updateHistoryLoadNote('Bijwerken huidige week mislukt.');
             await waitForMs(2500);
         }
         finally
         {
+            stopCatchUpProgress();
             historyLoadRunning = false;
             updateHistoryLoadNote('');
             if (!hitchhikeLoadRunning && !asyncLoadConfig.enabled)
