@@ -1203,8 +1203,18 @@ function demeter_workorder_state_cache_write_atomic(string $path, string $conten
  *
  * @return resource|null
  */
-function demeter_workorder_state_cache_lock(string $company, string $costCenter)
+function demeter_workorder_state_cache_lock(string $company, string $costCenter, ?int $maxWaitSeconds = null)
 {
+    // Re-entrant binnen één proces: flock op een tweede handle van hetzelfde proces zou op zichzelf
+    // wachten (bv. dagpad → consolidatie van de vorige week). Geneste aanroepen tellen alleen op.
+    $lockKey = demeter_workorder_state_cache_path($company, $costCenter) . '.lock';
+    $held = &demeter_workorder_state_cache_held_locks();
+    if (isset($held[$lockKey])) {
+        $held[$lockKey]['depth']++;
+
+        return $held[$lockKey]['handle'];
+    }
+
     $directory = demeter_workorder_state_cache_directory();
     if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
         return null;
@@ -1217,8 +1227,9 @@ function demeter_workorder_state_cache_lock(string $company, string $costCenter)
     // Niet blokkerend wachten: de parallelle week kan de lock minutenlang houden (grote cache
     // laden/samenvoegen/opslaan). Intussen heartbeat sturen, anders lijkt de load vastgelopen.
     $waitStartedAt = time();
+    $maxWait = $maxWaitSeconds ?? (int) DEMETER_WORKORDER_STATE_CACHE_LOCK_MAX_WAIT_SECONDS;
     while (!flock($handle, LOCK_EX | LOCK_NB)) {
-        if (time() - $waitStartedAt > (int) DEMETER_WORKORDER_STATE_CACHE_LOCK_MAX_WAIT_SECONDS) {
+        if (time() - $waitStartedAt >= $maxWait) {
             fclose($handle);
 
             return null;
@@ -1228,8 +1239,21 @@ function demeter_workorder_state_cache_lock(string $company, string $costCenter)
         }
         usleep(250000);
     }
+    $held[$lockKey] = ['handle' => $handle, 'depth' => 1];
 
     return $handle;
+}
+
+/**
+ * Per proces vastgehouden cache-locks (pad → handle + diepte) voor re-entrant locken.
+ *
+ * @return array<string, array{handle: resource, depth: int}>
+ */
+function &demeter_workorder_state_cache_held_locks(): array
+{
+    static $held = [];
+
+    return $held;
 }
 
 /**
@@ -1237,10 +1261,64 @@ function demeter_workorder_state_cache_lock(string $company, string $costCenter)
  */
 function demeter_workorder_state_cache_unlock($handle): void
 {
-    if (is_resource($handle)) {
-        @flock($handle, LOCK_UN);
-        fclose($handle);
+    if (!is_resource($handle)) {
+        return;
     }
+    $held = &demeter_workorder_state_cache_held_locks();
+    foreach ($held as $key => $entry) {
+        if ($entry['handle'] === $handle) {
+            if ($entry['depth'] > 1) {
+                $held[$key]['depth']--;
+
+                return;
+            }
+            unset($held[$key]);
+            break;
+        }
+    }
+    @flock($handle, LOCK_UN);
+    fclose($handle);
+}
+
+/**
+ * Voert $fn uit onder de cache-lock van bedrijf/kostenplaats (re-entrant). Gooit als de lock niet vrijkomt.
+ *
+ * @return mixed
+ */
+function demeter_workorder_state_cache_with_lock(string $company, string $costCenter, callable $fn, ?int $maxWaitSeconds = null)
+{
+    $handle = demeter_workorder_state_cache_lock($company, $costCenter, $maxWaitSeconds);
+    if ($handle === null) {
+        throw new RuntimeException('Cache-lock voor ' . $company . ' / ' . $costCenter . ' niet beschikbaar (andere verversing bezig).');
+    }
+    try {
+        return $fn();
+    } finally {
+        demeter_workorder_state_cache_unlock($handle);
+    }
+}
+
+/**
+ * True als een ander proces de cache-lock van bedrijf/kostenplaats nu vasthoudt (niet-blokkerende test).
+ */
+function demeter_workorder_state_cache_lock_is_held_elsewhere(string $company, string $costCenter): bool
+{
+    $lockKey = demeter_workorder_state_cache_path($company, $costCenter) . '.lock';
+    $held = &demeter_workorder_state_cache_held_locks();
+    if (isset($held[$lockKey]) || !is_file($lockKey)) {
+        return false;
+    }
+    $handle = @fopen($lockKey, 'c');
+    if ($handle === false) {
+        return false;
+    }
+    $free = flock($handle, LOCK_EX | LOCK_NB);
+    if ($free) {
+        flock($handle, LOCK_UN);
+    }
+    fclose($handle);
+
+    return !$free;
 }
 
 /**
@@ -1381,6 +1459,14 @@ function demeter_workorder_state_cache_raw_month_scan(string $company, string $c
  * - Het state-bestand en de (nieuwe) display-rijen worden gewist: de herbouw begint met een lege state.
  */
 function demeter_workorder_state_cache_begin_rebuild(string $company, string $costCenter): void
+{
+    // Onder de cache-lock: een lopende nightly/catch-up schrijft niet half over de herbouwstart heen.
+    demeter_workorder_state_cache_with_lock($company, $costCenter, static function () use ($company, $costCenter): void {
+        demeter_workorder_state_cache_begin_rebuild_unlocked($company, $costCenter);
+    });
+}
+
+function demeter_workorder_state_cache_begin_rebuild_unlocked(string $company, string $costCenter): void
 {
     $statePath = demeter_workorder_state_cache_path($company, $costCenter);
     $displayPath = demeter_workorder_state_cache_display_rows_path($company, $costCenter);

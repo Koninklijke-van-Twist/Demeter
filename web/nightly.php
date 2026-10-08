@@ -73,6 +73,8 @@ $minute = $second * 60;
 $hour = $minute * 60;
 // Nightly Mímir max_age / legacy filecache TTL: 4h (UI keeps 12h in index.php).
 $ttl = defined('DEMETER_NIGHTLY_MAX_AGE') ? DEMETER_NIGHTLY_MAX_AGE : 14400;
+// Werkorders (weken, status, memo's): max 180 s oud, ook 's nachts (Mímir max_age / eigen cache-TTL).
+$workorderTtl = defined('DEMETER_WORKORDER_MAX_AGE_SECONDS') ? DEMETER_WORKORDER_MAX_AGE_SECONDS : 180;
 
 $lockPath = __DIR__ . '/cache/reference/nightly.lock';
 if (!is_dir(dirname($lockPath)) && !mkdir(dirname($lockPath), 0775, true) && !is_dir(dirname($lockPath))) {
@@ -169,6 +171,21 @@ try {
                 continue;
             }
 
+            // Fase 0: niet over een lopende browser-herbouw/catch-up heen schrijven. Max 10 min wachten,
+            // daarna deze kostenplaats beleefd overslaan (de volgende nacht/catch-up pakt hem op).
+            if (!demeter_nightly_wait_until_cost_center_free($company, $costCenter, 600)) {
+                $stats['companies'][$company]['cost_centers'][$costCenter] = [
+                    'status' => 'skipped_busy',
+                    'duration_seconds' => 0.0,
+                    'finished_at' => gmdate('c'),
+                    'weeks_processed' => 0,
+                    'memos_refreshed' => 0,
+                ];
+                demeter_nightly_stats_save($stats);
+                demeter_nightly_log("  Kostenplaats {$costCenter}: overgeslagen (browser-load/herbouw bezig, 10 min gewacht)\n");
+                continue;
+            }
+
             $startedAt = microtime(true);
             $entry = [
                 'status' => 'ok',
@@ -184,12 +201,21 @@ try {
                 while (true) {
                     $connectionAttempt++;
                     try {
-                        $refreshResult = demeter_refresh_cost_center_weeks($company, $costCenter, $auth, $ttl, [
+                        $refreshResult = demeter_refresh_cost_center_weeks($company, $costCenter, $auth, $workorderTtl, [
                             'force_full' => false,
                             'load_session_id' => 'nightly-' . gmdate('Ymd'),
                         ]);
                         $entry['weeks_processed'] = (int) ($refreshResult['weeks_processed'] ?? 0);
-                        $entry['memos_refreshed'] = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+                        $statusRefresh = demeter_nightly_refresh_open_workorder_statuses($company, $costCenter, $auth, $workorderTtl);
+                        $entry['open_status_refresh'] = $statusRefresh;
+                        demeter_nightly_log(sprintf(
+                            "  Kostenplaats %s: status open werkorders ververst (%d open in cache, %d gewijzigd, %d niet meer in BC)\n",
+                            $costCenter,
+                            $statusRefresh['open_in_cache'],
+                            $statusRefresh['updated'],
+                            $statusRefresh['not_found']
+                        ));
+                        $entry['memos_refreshed'] = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $workorderTtl);
                         demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
                         break;
                     } catch (Throwable $retryError) {

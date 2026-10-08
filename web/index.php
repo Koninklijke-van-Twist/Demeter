@@ -18,6 +18,12 @@ $hour = $minute * 60;
 $day = $hour * 24;
 
 $ttl = $hour * 12;
+// Werkorder-, week-, catch-up- en memo-calls: eigen cache-TTL en Mímir max_age 180 s (≤ 3 min oud).
+// $ttl (12 u) blijft alleen voor referentiedata (bedrijven, dimensies, kostenplaatsopties).
+if (!defined('DEMETER_WORKORDER_MAX_AGE_SECONDS')) {
+    define('DEMETER_WORKORDER_MAX_AGE_SECONDS', 180);
+}
+$workorderTtl = DEMETER_WORKORDER_MAX_AGE_SECONDS;
 
 function demeter_render_progress_screen_html(string $title, string $statusUrl, string $message, string $callPrefix, ?string $redirectUrl = null, int $redirectDelayMs = 0, string $note = ''): string
 {
@@ -704,7 +710,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
             $chunkOptions['partial_to_today'] = true;
         }
 
-        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $ttl, $chunkProgressToken, $chunkOptions);
+        $chunk = bc_fetch_load_workorder_week_chunk($company, $yearWeek, $auth, $workorderTtl, $chunkProgressToken, $chunkOptions);
 
         $built = [
             'rows' => [],
@@ -853,7 +859,7 @@ if (($_GET['action'] ?? '') === 'load_workorder_memos') {
 
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
-        $memosByRowKey = demeter_fetch_workorder_memos_for_row_refs($company, $rowRefs, $auth, $ttl);
+        $memosByRowKey = demeter_fetch_workorder_memos_for_row_refs($company, $rowRefs, $auth, $workorderTtl);
 
         if ($costCenter !== '') {
             demeter_persist_workorder_memos_to_display_cache($company, $costCenter, $memosByRowKey);
@@ -885,7 +891,7 @@ if (($_GET['action'] ?? '') === 'refresh_all_memos') {
 
         auth_set_current_company_context($company, 300);
         $auth = auth_get_auth_for_company($company, 300);
-        $memoCount = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $ttl);
+        $memoCount = demeter_refresh_all_memos_for_cost_center($company, $costCenter, $auth, $workorderTtl);
         demeter_workorder_state_cache_touch_updated_at($company, $costCenter);
 
         $loadProgressToken = trim((string) ($_GET['load_token'] ?? ''));

@@ -91,18 +91,52 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
  *
  * @return list<array>
  */
+/**
+ * Einddatum (exclusief) voor de 'vandaag'-query: minimaal het weekeinde, standaard 1 jaar na vandaag.
+ */
+function bc_fetch_future_start_date_end(DateTimeImmutable $toExclusive): DateTimeImmutable
+{
+    $oneYear = (new DateTimeImmutable('today'))->modify('+1 year');
+
+    return $oneYear > $toExclusive ? $oneYear : $toExclusive;
+}
+
+/**
+ * OData-filter op de kop-kostenplaats: eigen afdeling plus lege kop (die valt later via posten/projectkaart
+ * terug op een afdeling). Leeg bij geen afdeling.
+ */
+function bc_fetch_workorder_cost_center_odata_filter(string $costCenter): string
+{
+    $costCenter = trim($costCenter);
+    if ($costCenter === '') {
+        return '';
+    }
+    $quoted = "'" . str_replace("'", "''", $costCenter) . "'";
+
+    return "(Job_Dimension_1_Value eq " . $quoted . " or Job_Dimension_1_Value eq '')";
+}
+
 function bc_fetch_workorders_by_start_date_range(
     string $company,
     DateTimeImmutable $from,
     DateTimeImmutable $toExclusive,
     array $auth,
     int $ttl,
-    bool $includeFuture = false
+    bool $includeFuture = false,
+    string $costCenter = ''
 ): array {
     $fromDate = $from->format('Y-m-d');
     $filter = 'Start_Date ge ' . $fromDate;
     if (!$includeFuture) {
         $filter .= ' and Start_Date lt ' . $toExclusive->format('Y-m-d');
+    } else {
+        // 'Vandaag': wel toekomstige startdatums, maar met een einddatum (≈ 1 jaar vooruit) in plaats van
+        // de hele toekomst van het bedrijf.
+        $filter .= ' and Start_Date lt ' . bc_fetch_future_start_date_end($toExclusive)->format('Y-m-d');
+    }
+    $costCenterFilter = bc_fetch_workorder_cost_center_odata_filter($costCenter);
+    if ($costCenterFilter !== '') {
+        $filter .= ' and ' . $costCenterFilter;
     }
 
     $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
@@ -110,6 +144,18 @@ function bc_fetch_workorders_by_start_date_range(
         '$filter' => $filter,
     ]);
     $rows = odata_get_all($url, $auth, $ttl);
+    if ($includeFuture) {
+        // Werkorders zonder startdatum (BC: 0001-01-01) vallen buiten elk weekbereik; apart ophalen bij
+        // de 'vandaag'-load zodat ze niet verloren gaan (KvT/70: 38 Open op 08-10-2026).
+        $undatedFilter = 'Start_Date eq 0001-01-01' . ($costCenterFilter !== '' ? ' and ' . $costCenterFilter : '');
+        $undatedUrl = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Werkorders', [
+            '$select' => bc_fetch_werkorders_list_select(),
+            '$filter' => $undatedFilter,
+        ]);
+        foreach (odata_get_all($undatedUrl, $auth, $ttl) as $row) {
+            $rows[] = $row;
+        }
+    }
 
     $result = [];
     foreach ($rows as $row) {

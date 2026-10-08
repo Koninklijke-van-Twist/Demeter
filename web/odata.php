@@ -1315,7 +1315,8 @@ function odata_get_all(string $url, array $auth, $ttlSeconds = 300): array
         return odata_mimir_or_direct(
             static function () use ($url, $ttlSeconds, $startedAt): array {
                 // Mímir beheert de BC-cache (max_age); Demeter-filecache / live-paginering worden overgeslagen.
-                $rows = odata_mimir_fetch_all_impl($url, $ttlSeconds === 0 ? 3600 : $ttlSeconds);
+                // ttl 0 = echt live (max_age 0); vroeger werd dat stil 3600 s.
+                $rows = odata_mimir_fetch_all_impl($url, $ttlSeconds);
                 $durationMs = (int) max(0, round((microtime(true) - $startedAt) * 1000));
                 if (function_exists('odata_call_time_log_record')) {
                     odata_call_time_log_record($url, $durationMs, false, count($rows));
