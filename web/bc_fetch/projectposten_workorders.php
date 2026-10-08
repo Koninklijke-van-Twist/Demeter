@@ -174,6 +174,99 @@ function bc_fetch_workorders_by_numbers(string $company, array $numbers, array $
 }
 
 /**
+ * Kostenplaats van de projectkaart (Projecten.LVS_Global_Dimension_1_Code; Projecten heeft geen
+ * Global_Dimension_1_Code) voor de gegeven projecten. Alleen de gevraagde projecten worden
+ * opgehaald, in OR-batches op No, met dezelfde TTL/max_age als de rest van de load
+ * (nightly 4u, UI eigen TTL). Binnen één PHP-proces wordt per project maar één keer opgehaald.
+ * Faalt de fetch, dan volgt een lege map (filter valt dan terug op de projectposten).
+ *
+ * @param list<string> $jobNos
+ * @return array<string, string> Job_No (lowercase) => kostenplaatscode van de kaart ('' = leeg)
+ */
+function bc_fetch_project_card_cost_centers(string $company, array $jobNos, array $auth, int $ttl): array
+{
+    static $memo = [];
+    $scope = strtolower(trim($company)) . '|' . strtolower(trim((string) ($GLOBALS['environment'] ?? '')));
+    if (!isset($memo[$scope])) {
+        $memo[$scope] = [];
+    }
+
+    $wanted = [];
+    foreach ($jobNos as $jobNo) {
+        $trimmed = trim((string) $jobNo);
+        if ($trimmed === '') {
+            continue;
+        }
+        $wanted[strtolower($trimmed)] = $trimmed;
+    }
+
+    $missing = array_diff_key($wanted, $memo[$scope]);
+    foreach (bc_fetch_chunk_string_values(array_values($missing), 20) as $chunk) {
+        try {
+            $url = company_entity_url_with_query($GLOBALS['baseUrl'], $GLOBALS['environment'], $company, 'Projecten', [
+                '$select' => 'No,LVS_Global_Dimension_1_Code',
+                '$filter' => bc_fetch_build_odata_or_equals_filter('No', $chunk),
+            ]);
+            $rows = odata_get_all($url, $auth, $ttl);
+        } catch (Throwable $exception) {
+            error_log('Demeter: projectkaart-kostenplaats ophalen mislukt: ' . $exception->getMessage());
+            continue;
+        }
+
+        foreach ($chunk as $jobNo) {
+            $memo[$scope][strtolower($jobNo)] = '';
+        }
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                continue;
+            }
+            $no = strtolower(trim((string) ($row['No'] ?? '')));
+            if ($no !== '') {
+                $memo[$scope][$no] = trim((string) ($row['LVS_Global_Dimension_1_Code'] ?? ''));
+            }
+        }
+    }
+
+    $result = [];
+    foreach (array_keys($wanted) as $key) {
+        if (isset($memo[$scope][$key])) {
+            $result[$key] = $memo[$scope][$key];
+        }
+    }
+
+    return $result;
+}
+
+/**
+ * Projectkaart-kostenplaatsen voor werkorders met lege kop zonder kostenplaats uit eigen posten.
+ *
+ * @param list<array> $workorders
+ * @param list<array> $allPostenRows
+ * @return array<string, string>
+ */
+function bc_fetch_project_card_cost_centers_for_workorders(
+    string $company,
+    array $workorders,
+    array $allPostenRows,
+    array $auth,
+    int $ttl,
+    string $costCenter = ''
+): array {
+    $normalized = bc_fetch_normalize_cost_center($costCenter);
+    if ($normalized === bc_fetch_cost_center_none_value()) {
+        // 'Geen kostenplaats' filtert strikt op de lege kop; projectkaart niet nodig.
+        return [];
+    }
+
+    $jobNos = bc_fetch_job_nos_needing_project_card_cost_center($workorders, $allPostenRows);
+    if ($jobNos === []) {
+        return [];
+    }
+
+    return bc_fetch_project_card_cost_centers($company, $jobNos, $auth, $ttl);
+}
+
+/**
  * @param list<array> $workorders
  * @return array<string, bool>
  */

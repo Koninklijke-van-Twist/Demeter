@@ -11,7 +11,8 @@ require_once __DIR__ . '/../bc_enum.php';
 
 /** v8: Component_Description is de component-Description, niet Sub_Entity_Description (equipmentsoort). */
 /** v9: status/Entry_Type NL+EN (Usage/Sale, Closed/Invoiced), signed factuurtotalen. */
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 11;
+/** v12: lege kop zonder kostenplaats uit eigen posten valt terug op de projectkaart (Projecten.LVS_Global_Dimension_1_Code). */
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 12;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Maximale wachttijd (s) op de cache-lock van een parallelle week voordat de week faalt. */
