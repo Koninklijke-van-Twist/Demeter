@@ -17,6 +17,16 @@
 
 require_once __DIR__ . '/../bc_enum.php';
 
+if (!class_exists('DemeterStoreSyncAbort')) {
+    /** BC-call in de page-open sync liep in een timeout / 409 / fout: netjes afbreken, niets half schrijven. */
+    class DemeterStoreSyncAbort extends RuntimeException
+    {
+    }
+}
+if (!defined('DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT')) {
+    define('DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT', 20);
+}
+
 if (!defined('DEMETER_STORE_VERSION')) {
     define('DEMETER_STORE_VERSION', 1);
 }
@@ -589,7 +599,14 @@ function demeter_store_reconcile_counts(array &$store, array $transport, array $
         $local = count(demeter_store_nos_in_group($store, $afdeling, $status));
         if ($bc !== $local) {
             $mismatched[] = ($afdeling === '' ? '(leeg)' : $afdeling) . '/' . ($status ?? '*') . ' (BC ' . $bc . ', store ' . $local . ')';
-            demeter_store_reconcile_group($store, $transport, $afdeling, $status, $stats, $deadline);
+            // Checkpoint per groep: breekt een BC-call af, dan blijft deze groep zoals hij was.
+            $beforeGroup = $store;
+            try {
+                demeter_store_reconcile_group($store, $transport, $afdeling, $status, $stats, $deadline);
+            } catch (DemeterStoreSyncAbort $abort) {
+                $store = $beforeGroup;
+                throw $abort;
+            }
         }
     }
     // Na het inzoomen opnieuw vergelijken met de (gecachete) BC-counts van deze ronde.
@@ -674,16 +691,41 @@ function demeter_store_delta_sync(array &$store, array $transport, array $afdeli
     $started = microtime(true);
     $deadline = $started + ($budgetSeconds ?? DEMETER_STORE_SYNC_TIME_BUDGET_SECONDS);
     $stats = demeter_store_new_stats();
-    demeter_store_apply_new_postings($store, $transport, $stats);
-    demeter_store_apply_new_workorders($store, $transport, $stats);
-    $counts = demeter_store_reconcile_counts($store, $transport, $afdelingen, $stats, $deadline);
-    $stats['mismatched'] = $counts['mismatched'];
-    $stats['verified'] = $counts['verified'];
+    $stats['mismatched'] = [];
+    $stats['verified'] = false;
+    $stats['aborted'] = null;
+    $syncedBefore = (int) ($store['synced_at'] ?? 0);
+    // Elke stap is atomisch: posten (incl. max_entry_no), nieuwe werkorders, en per groep (checkpoint in
+    // reconcile_counts). Breekt een BC-call af (timeout/409), dan blijft dat deel ongewijzigd.
+    $checkpoint = $store;
+    $step = 'postings';
+    try {
+        demeter_store_apply_new_postings($store, $transport, $stats);
+        $checkpoint = $store;
+        $step = 'new_workorders';
+        demeter_store_apply_new_workorders($store, $transport, $stats);
+        $checkpoint = $store;
+        $step = 'counts';
+        $counts = demeter_store_reconcile_counts($store, $transport, $afdelingen, $stats, $deadline);
+        $stats['mismatched'] = $counts['mismatched'];
+        $stats['verified'] = $counts['verified'];
+    } catch (DemeterStoreSyncAbort $abort) {
+        if ($step !== 'counts') {
+            $store = $checkpoint;
+        }
+        $stats['verified'] = false;
+        $stats['aborted'] = ['step' => $step, 'reason' => substr($abort->getMessage(), 0, 200)];
+    }
     $stats['afdelingen'] = array_values(array_map('strval', $afdelingen));
     $stats['duration_ms'] = (int) round((microtime(true) - $started) * 1000);
     $stats['at'] = time();
+    // Afgebroken (timeout/409): synced_at NIET vooruit, zodat de volgende page-open het opnieuw probeert.
     // Niet volledig geverifieerd (tijdsbudget op): over ~1 min opnieuw proberen i.p.v. pas na 3 min.
-    $store['synced_at'] = $stats['verified'] ? time() : time() - max(0, DEMETER_STORE_MAX_AGE_SECONDS - 60);
+    if ($stats['aborted'] !== null) {
+        $store['synced_at'] = $syncedBefore;
+    } else {
+        $store['synced_at'] = $stats['verified'] ? time() : time() - max(0, DEMETER_STORE_MAX_AGE_SECONDS - 60);
+    }
     if ($stats['verified']) {
         $store['verified_at'] = time();
     }
@@ -720,7 +762,7 @@ function demeter_store_page_open_sync(string $company, string $afdeling, array $
         $stats = demeter_store_delta_sync($current, $transport, $afdelingen);
         demeter_store_write($company, $current);
 
-        return ['status' => 'synced', 'store' => $current, 'stats' => $stats];
+        return ['status' => $stats['aborted'] !== null ? 'aborted' : 'synced', 'store' => $current, 'stats' => $stats];
     }, $waitSeconds, $acquired);
     if ($result === null) {
         return ['status' => 'busy', 'store' => demeter_store_read($company) ?? $store, 'stats' => null];

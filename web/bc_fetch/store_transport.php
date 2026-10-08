@@ -7,8 +7,52 @@
 
 require_once __DIR__ . '/store.php';
 
-function demeter_store_live_transport(string $company): array
+/**
+ * Eén GET zonder retries met een harde timeout (page-open sync / API fresh=1). Timeout, 409/429/5xx,
+ * netwerkfout of ongeldige JSON → DemeterStoreSyncAbort (de sync breekt netjes af en probeert het bij de
+ * volgende page-open opnieuw).
+ */
+function demeter_store_http_get_json(string $url, array $auth, int $timeoutSeconds): array
 {
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_CONNECTTIMEOUT => min(10, $timeoutSeconds),
+        CURLOPT_TIMEOUT => $timeoutSeconds,
+        CURLOPT_NOSIGNAL => true,
+        CURLOPT_HTTPHEADER => ['Accept: application/json', 'Prefer: odata.maxpagesize=5000'],
+    ]);
+    if (in_array($auth['mode'] ?? '', ['basic', 'ntlm'], true)) {
+        curl_setopt($ch, CURLOPT_HTTPAUTH, ($auth['mode'] === 'ntlm') ? CURLAUTH_NTLM : CURLAUTH_BASIC);
+        curl_setopt($ch, CURLOPT_USERPWD, $auth['user'] . ':' . $auth['pass']);
+    }
+    $started = microtime(true);
+    $raw = curl_exec($ch);
+    $errno = curl_errno($ch);
+    $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($raw === false || $errno !== 0) {
+        throw new DemeterStoreSyncAbort(($errno === CURLE_OPERATION_TIMEDOUT ? 'timeout na ' : 'netwerkfout na ') . round(microtime(true) - $started, 1) . ' s (limiet ' . $timeoutSeconds . ' s)');
+    }
+    if ($code < 200 || $code >= 300) {
+        throw new DemeterStoreSyncAbort('HTTP ' . $code . ' van BC');
+    }
+    $json = json_decode((string) $raw, true);
+    if (!is_array($json)) {
+        throw new DemeterStoreSyncAbort('ongeldige JSON van BC');
+    }
+
+    return $json;
+}
+
+/**
+ * @param array{request_timeout?: int} $options request_timeout > 0 = strikte modus (page-open sync):
+ *        geen retries, harde timeout per request, afbreken met DemeterStoreSyncAbort.
+ */
+function demeter_store_live_transport(string $company, array $options = []): array
+{
+    $strictTimeout = max(0, (int) ($options['request_timeout'] ?? 0));
     odata_ensure_bc_config_loaded();
     $env = odata_bc_environment_for_company($company);
     $base = odata_bc_base_url_from_globals();
@@ -27,9 +71,10 @@ function demeter_store_live_transport(string $company): array
     $calls = ['count' => 0, 'fetch' => 0, 'rows' => 0, 'ms' => 0];
     $GLOBALS['DEMETER_STORE_TRANSPORT_CALLS'] = &$calls;
 
-    $count = static function (string $entity, string $filter) use ($build, $auth, &$calls): int {
+    $count = static function (string $entity, string $filter) use ($build, $auth, &$calls, $strictTimeout): int {
         $t = microtime(true);
-        $resp = odata_get_json($build($entity, ['$filter' => $filter, '$top' => '0', '$count' => 'true']), $auth);
+        $countUrl = $build($entity, ['$filter' => $filter, '$top' => '0', '$count' => 'true']);
+        $resp = $strictTimeout > 0 ? demeter_store_http_get_json($countUrl, $auth, $strictTimeout) : odata_get_json($countUrl, $auth);
         $calls['count']++;
         $calls['ms'] += (int) round((microtime(true) - $t) * 1000);
         if (getenv('DEMETER_STORE_DEBUG') === '1') {
@@ -46,7 +91,7 @@ function demeter_store_live_transport(string $company): array
         'count' => $count,
         // Counts 3 tegelijk (curl_multi; BC-concurrency per environment ≈ 5, 409-risico laag houden).
         // Mislukte of onleesbare antwoorden gaan sequentieel opnieuw via $count (met retries).
-        'count_many' => static function (string $entity, array $filters) use ($count, $build, $auth, &$calls): array {
+        'count_many' => static function (string $entity, array $filters) use ($count, $build, $auth, &$calls, $strictTimeout): array {
             $out = [];
             $queue = $filters;
             $t = microtime(true);
@@ -60,7 +105,7 @@ function demeter_store_live_transport(string $company): array
                     curl_setopt_array($ch, [
                         CURLOPT_RETURNTRANSFER => true,
                         CURLOPT_CONNECTTIMEOUT => 10,
-                        CURLOPT_TIMEOUT => 60,
+                        CURLOPT_TIMEOUT => $strictTimeout > 0 ? $strictTimeout : 60,
                         CURLOPT_NOSIGNAL => true,
                         CURLOPT_HTTPHEADER => ['Accept: application/json'],
                     ]);
@@ -85,6 +130,9 @@ function demeter_store_live_transport(string $company): array
                     if ($code === 200 && is_array($json) && isset($json['@odata.count'])) {
                         $out[$i] = (int) $json['@odata.count'];
                         $calls['count']++;
+                    } elseif ($strictTimeout > 0) {
+                        curl_multi_close($mh);
+                        throw new DemeterStoreSyncAbort('count mislukt (HTTP ' . $code . ')');
                     } else {
                         $out[$i] = $count($entity, $batch[$i]);
                     }
@@ -96,13 +144,13 @@ function demeter_store_live_transport(string $company): array
 
             return $out;
         },
-        'fetch' => static function (string $entity, array $query) use ($build, $auth, &$calls): array {
+        'fetch' => static function (string $entity, array $query) use ($build, $auth, &$calls, $strictTimeout): array {
             $t = microtime(true);
             // Bewust GEEN $top: in OData begrenst $top het totaal (geen nextLink). BC pagineert zelf.
             $next = $build($entity, $query);
             $all = [];
             while ($next) {
-                $resp = odata_get_json($next, $auth);
+                $resp = $strictTimeout > 0 ? demeter_store_http_get_json($next, $auth, $strictTimeout) : odata_get_json($next, $auth);
                 if (!isset($resp['value']) || !is_array($resp['value'])) {
                     throw new RuntimeException("OData-antwoord zonder 'value'.");
                 }

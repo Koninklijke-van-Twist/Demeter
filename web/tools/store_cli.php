@@ -38,7 +38,7 @@ $log = static function (string $m): void {
 };
 $t0 = microtime(true);
 try {
-    $transport = $cmd === 'status' ? null : demeter_store_live_transport($company);
+    $transport = $cmd === 'status' ? null : demeter_store_live_transport($company, $cmd === 'sync' ? ['request_timeout' => DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT] : []);
     switch ($cmd) {
         case 'snapshot':
             $r = demeter_store_nightly_snapshot($company, $transport, $log);

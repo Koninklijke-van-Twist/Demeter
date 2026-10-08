@@ -81,7 +81,7 @@ if ($filters['fresh'] && time() - (int) ($store['synced_at'] ?? 0) > DEMETER_STO
         require_once $webDir . '/odata.php';
         require_once $webDir . '/bc_fetch/store_transport.php';
         $afdeling = $filters['afdeling'][0] ?? '';
-        $result = demeter_store_page_open_sync($filters['company'], $afdeling, demeter_store_live_transport($filters['company']), 10.0);
+        $result = demeter_store_page_open_sync($filters['company'], $afdeling, demeter_store_live_transport($filters['company'], ['request_timeout' => DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT]), 10.0);
         if (is_array($result['store'] ?? null)) {
             $store = $result['store'];
         }

@@ -49,6 +49,9 @@ Per bedrijf staat er één store-bestand in `web/cache/workorder_store/` (werkor
   - nieuwe werkorders
   - nieuwe posten op Entry_No
   Uitzetten: `define('DEMETER_STORE_SHADOW_PAGE_SYNC', false)`.
+  - Elke BC-call in deze sync (en bij `fresh=1` in de API) heeft een harde timeout van 20 s (`DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT`) en wordt niet herhaald. Daarbovenop geldt een totaalbudget van 25 s.
+  - Bij een timeout, 409 of andere fout breekt de sync netjes af. Afgeronde stappen (posten, nieuwe werkorders, complete groepen) blijven bewaard; het afgebroken deel blijft ongewijzigd.
+  - De afbreking komt in `last_sync.aborted`. `synced_at` schuift niet op, dus de volgende page-open probeert het opnieuw.
 - **CLI**: `php web/tools/store_cli.php snapshot|sync|hourly|reconcile|status "<bedrijf>" [afdeling]`
   - `reconcile` doet een volledige BC-fetch en vergelijkt rij voor rij: velden en kosten.
 - **Afgesloten statussen**: Closed, Completed, Cancelled, Invoiced (ook de NL-captions). Checked en Signed tellen als open.

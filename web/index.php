@@ -1246,7 +1246,7 @@ if ($selectedCompany !== '' && $selectedCostCenter !== ''
         register_shutdown_function(static function () use ($shadowCompany, $shadowCostCenter): void {
             @fastcgi_finish_request();
             try {
-                demeter_store_page_open_sync($shadowCompany, $shadowCostCenter, demeter_store_live_transport($shadowCompany), 0.0);
+                demeter_store_page_open_sync($shadowCompany, $shadowCostCenter, demeter_store_live_transport($shadowCompany, ['request_timeout' => DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT]), 0.0);
             } catch (Throwable $shadowError) {
                 error_log('Demeter store shadow-sync: ' . $shadowError->getMessage());
             }
