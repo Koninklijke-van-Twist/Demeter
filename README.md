@@ -54,7 +54,8 @@ De schermcache is per week opgebouwd. Gesloten weken worden normaal niet opnieuw
   - Na afloop herlaadt de pagina één keer; hooguit één automatische herlaadbeurt per 3 minuten.
   - Posten en werkorders van vandaag of later leest de catch-up van de huidige week.
 - **Checkpoint**: staat in `<state>.delta.json` naast de werkorder-state: hoogste `Entry_No` van posten en logboek, `created_since`, `synced_at` en de gemarkeerde weken. Een (her)bouw wist dit bestand niet, en de nightly leest het niet.
-  - De eerste keer wordt alleen het checkpoint gezet.
+  - De eerste keer (en één keer per `DEMETER_WORKORDER_DELTA_BACKFILL_VERSION`, ook voor een bestaand checkpoint) kijkt de delta terug vanaf de oudste weekscan (min 5 minuten, hooguit 48 uur): logboekregels vanaf dat tijdstip en werkorders die sindsdien zijn aangemaakt. Zo komen wijzigingen tussen de weekscan en de eerste sync ook binnen. Posten krijgen hun checkpoint op de hoogste `Entry_No`.
+  - Alleen werkorders die in beeld staan worden nagelopen (plus nieuwe werkorders en verzette startdatums); hooguit 400 per sync, 40 per BC-call.
   - Een geslaagde (her)lading van een week haalt de markering weg.
   - Bij een timeout, 409 of andere fout verandert er niets en schuift het checkpoint niet op. De volgende page-open probeert het opnieuw.
   - Per sync hooguit 5000 posten/logregels (`DEMETER_WORKORDER_DELTA_MAX_ROWS`); de rest volgt bij de volgende keer openen.

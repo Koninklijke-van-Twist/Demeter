@@ -5,7 +5,7 @@
  *   en de hervat-logica leest hem opnieuw (werkorder daarna in beeld);
  * - een post met een boekdatum in het verleden -> de week van die post wordt 'opnieuw laden';
  * - een statuswijziging van een werkorder in een oude week -> direct in de display-rij, zonder weekherlading;
- * - eerste keer alleen checkpoint; < 180 s later niets (geen polling); timeout/409 -> niets gewijzigd, checkpoint
+ * - eerste keer terugkijken vanaf de oudste weekscan; < 180 s later niets (geen polling); timeout/409 -> niets gewijzigd, checkpoint
  *   blijft staan; onvolledige cache (herbouw) -> niets.
  * Run: php tests/page_open_changed_weeks_test.php
  */
@@ -145,9 +145,16 @@ $transport = static function () use (&$calls, &$mode, $closedDay, $oldDay, $post
 };
 
 $r = demeter_workorder_delta_page_open($company, $cc, $transport, $now);
-check($r['status'] === 'initialized' && $r['dirty_weeks'] === [], 'eerste keer: alleen checkpoint (' . $r['status'] . ')');
+// Eerste keer (na een herbouw): terugkijken vanaf de oudste weekscan, niet alleen een checkpoint op 'nu'.
+check($r['status'] === 'synced', 'eerste keer: terugkijken vanaf de oudste weekscan (' . $r['status'] . ')');
+check(in_array($closedWeek, $r['dirty_weeks'], true), 'WO2610905-scenario: gesloten week ' . $closedWeek . ' staat op opnieuw laden');
+check(!in_array($oldWeek, $r['dirty_weeks'], true), 'statuswijziging oude week: geen weekherlading');
+$display = demeter_workorder_state_cache_load_display_rows($company, $cc);
+check(($display['PRJWOSTATUS|WOSTATUS']['Status'] ?? '') === 'Closed' && $r['status_updates'] === 1 && $r['rows_changed'] === true, 'statuswijziging oude week direct in de display-rij (Checked -> Closed)');
 $cp = demeter_workorder_delta_read($company, $cc);
-check($cp['posten_entry_no'] === 1000 && $cp['changelog_entry_no'] === 500, 'checkpoint gezet op hoogste Entry_No (posten 1000, logboek 500)');
+check($cp['posten_entry_no'] === 1000 && $cp['changelog_entry_no'] === 503, 'checkpoint: posten op hoogste Entry_No (1000), logboek tot laatst verwerkt (503)');
+$joined = implode("\n", $calls);
+check(strpos($joined, 'Date_and_Time ge ' . gmdate('Y-m-d\TH:i:s\Z', $now - 7200 - 300)) !== false, 'logboek-start op de oudste weekscan (min 5 min marge)');
 
 $calls = [];
 $r = demeter_workorder_delta_page_open($company, $cc, $transport, $now + 60);
@@ -163,11 +170,8 @@ $mode = 'ok';
 $calls = [];
 $r = demeter_workorder_delta_page_open($company, $cc, $transport, $now + 400);
 check($r['status'] === 'synced', 'delta-sync geslaagd (' . $r['status'] . ')');
-check(in_array($closedWeek, $r['dirty_weeks'], true), 'WO2610905-scenario: gesloten week ' . $closedWeek . ' staat op opnieuw laden');
 check(in_array($postWeek, $r['dirty_weeks'], true), 'post met datum in het verleden: week ' . $postWeek . ' staat op opnieuw laden');
-check(!in_array($oldWeek, $r['dirty_weeks'], true), 'statuswijziging oude week: geen weekherlading');
-$display = demeter_workorder_state_cache_load_display_rows($company, $cc);
-check(($display['PRJWOSTATUS|WOSTATUS']['Status'] ?? '') === 'Closed' && $r['status_updates'] === 1 && $r['rows_changed'] === true, 'statuswijziging oude week direct in de display-rij (Checked -> Closed)');
+check(strpos(implode("\n", $calls), 'Date_and_Time ge') === false, 'tweede sync: geen terugkijk-call meer (alleen Entry_No > checkpoint)');
 $cp3 = demeter_workorder_delta_read($company, $cc);
 check($cp3['posten_entry_no'] === 1001 && $cp3['changelog_entry_no'] === 503, 'checkpoint vooruit (posten 1001, logboek 503)');
 check(count($calls) <= 5, 'licht: ' . count($calls) . ' BC-calls');
