@@ -1232,6 +1232,28 @@ if (!$refreshBlocked && demeter_active_load_is_fresh_running($bootActiveLoad)) {
     $refreshBlocked = true;
 }
 
+// Fase 1 (SHADOW): bij het openen van de pagina de werkorder-store bijwerken (alleen als die ouder is dan
+// 180 s, één schrijver onder lock). Pas NA het versturen van de pagina (fastcgi_finish_request), zodat Linda
+// niet wacht; het scherm leest de store nog niet. Uit: define('DEMETER_STORE_SHADOW_PAGE_SYNC', false).
+if ($selectedCompany !== '' && $selectedCostCenter !== ''
+    && (!defined('DEMETER_STORE_SHADOW_PAGE_SYNC') || DEMETER_STORE_SHADOW_PAGE_SYNC)
+    && function_exists('fastcgi_finish_request')
+) {
+    require_once __DIR__ . '/bc_fetch/store_transport.php';
+    if (demeter_store_read_meta_is_stale($selectedCompany)) {
+        $shadowCompany = $selectedCompany;
+        $shadowCostCenter = $selectedCostCenter;
+        register_shutdown_function(static function () use ($shadowCompany, $shadowCostCenter): void {
+            @fastcgi_finish_request();
+            try {
+                demeter_store_page_open_sync($shadowCompany, $shadowCostCenter, demeter_store_live_transport($shadowCompany, ['request_timeout' => DEMETER_STORE_PAGE_SYNC_REQUEST_TIMEOUT]), 0.0);
+            } catch (Throwable $shadowError) {
+                error_log('Demeter store shadow-sync: ' . $shadowError->getMessage());
+            }
+        });
+    }
+}
+
 $initialData = [
     'company' => $selectedCompany,
     'sync_load_week' => $syncLoadWeek,
