@@ -198,7 +198,7 @@ function demeter_page_apply_full_project_totals(string $company, array $displayR
     }
     try {
         require_once __DIR__ . '/bc_fetch/store_transport.php';
-        if (demeter_project_totals_full_read($company) !== null) {
+        if (demeter_project_totals_full_is_current(demeter_project_totals_full_read($company))) {
             demeter_project_totals_full_sync($company, demeter_store_live_transport($company, ['request_timeout' => 8]), false);
         } elseif (function_exists('fastcgi_finish_request') && empty($GLOBALS['demeter_project_totals_full_build_scheduled'])) {
             $GLOBALS['demeter_project_totals_full_build_scheduled'] = true;
@@ -217,9 +217,10 @@ function demeter_page_apply_full_project_totals(string $company, array $displayR
 
     // Kon de pagina de volledige totalen (nog) niet toepassen, dan vraagt de browser ze één keer na
     // (action=ensure_project_totals) en herlaadt hij zodra ze er zijn (anders bleef bv. KvT/70 de weeksom tonen).
-    $GLOBALS['demeter_project_totals_full_applied'] = demeter_project_totals_full_read($company) !== null;
+    $GLOBALS['demeter_project_totals_full_applied'] = demeter_project_totals_full_is_current(demeter_project_totals_full_read($company));
 
-    return demeter_project_totals_full_apply_to_rows($company, $displayRowsByKey);
+    // Ook werkordertotalen over alle posten (kostenplaats van de post en boekdatum doen er niet toe).
+    return demeter_project_totals_full_apply_wo_to_rows($company, demeter_project_totals_full_apply_to_rows($company, $displayRowsByKey));
 }
 
 /** load_month: de cumulatieve weeksom vervangen door de volledige totalen (voor de jobs in de map en de rijen). */
@@ -825,7 +826,13 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'catch_up' => $catchUp,
             'hitchhiked' => false,
             'load_progress_token' => $catchUp && $chunkProgressToken !== null ? $chunkProgressToken : null,
-            'rows' => is_array($built['rows'] ?? null) ? demeter_project_totals_full_apply_to_rows($company, $built['rows']) : $built['rows'],
+            // Werkordertotalen alleen bij de catch-up (de browser vervangt die rijen); gewone weekrijen telt de
+            // browser bij elkaar op, daar zou een absoluut totaal dubbel tellen.
+            'rows' => is_array($built['rows'] ?? null)
+                ? ($catchUp
+                    ? demeter_project_totals_full_apply_wo_to_rows($company, demeter_project_totals_full_apply_to_rows($company, $built['rows']))
+                    : demeter_project_totals_full_apply_to_rows($company, $built['rows']))
+                : $built['rows'],
             'row_keys' => !empty($chunk['skipped'])
                 ? demeter_month_scan_expected_row_keys($monthScan, $yearWeek)
                 : $built['row_keys'],
@@ -894,7 +901,7 @@ if (($_GET['action'] ?? '') === 'sync_changes') {
         // Volledige projecttotalen nog niet opgebouwd (bv. geen php-fpm, dus geen opbouw na de pagina): hier
         // opbouwen. Dit verzoek loopt op de achtergrond na de catch-up; niemand wacht erop (~40 s voor KvT).
         $projectTotalsFull = null;
-        if (demeter_project_totals_full_enabled() && demeter_project_totals_full_read($deltaCompany) === null) {
+        if (demeter_project_totals_full_enabled() && !demeter_project_totals_full_is_current(demeter_project_totals_full_read($deltaCompany))) {
             @set_time_limit(240);
             $projectTotalsFull = demeter_project_totals_full_sync($deltaCompany, demeter_store_live_transport($deltaCompany, ['request_timeout' => 60]), true);
         }

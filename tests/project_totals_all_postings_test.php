@@ -202,7 +202,7 @@ check(strpos(file_get_contents(__DIR__ . '/../web/bc_fetch/project_totals_full.p
 
 $syncPos = strpos($index, "=== 'sync_changes'");
 $syncBlock = $syncPos !== false ? substr($index, $syncPos, 3000) : '';
-check(strpos($syncBlock, 'demeter_project_totals_full_read($deltaCompany) === null') !== false
+check(strpos($syncBlock, '!demeter_project_totals_full_is_current(demeter_project_totals_full_read($deltaCompany))') !== false
     && strpos($syncBlock, 'demeter_project_totals_full_sync($deltaCompany') !== false
     && strpos($syncBlock, 'demeter_project_totals_full_sync($deltaCompany') < strpos($syncBlock, 'demeter_workorder_delta_page_open('),
     'sync_changes bouwt de volledige projecttotalen op als ze ontbreken (vangnet zonder php-fpm), vóór de delta');
