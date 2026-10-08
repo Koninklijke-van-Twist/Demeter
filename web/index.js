@@ -647,6 +647,26 @@
         return body && typeof body === 'object' ? body : null;
     }
 
+    // Eén automatische hervatting per vastgelopen load (geen herlaad-lus als de server hem nog als lopend ziet).
+    function shouldAutoResumeStalledLoad (token)
+    {
+        try
+        {
+            const key = 'demeter_auto_resume_' + String(token || '');
+            if (!window.sessionStorage || window.sessionStorage.getItem(key) === '1')
+            {
+                return false;
+            }
+            window.sessionStorage.setItem(key, '1');
+
+            return true;
+        }
+        catch (storageError)
+        {
+            return false;
+        }
+    }
+
     async function startHitchhikeActiveLoad (token, kind)
     {
         const safeToken = String(token || '').trim();
@@ -702,6 +722,19 @@
                         hitchhikeLoadRunning = false;
                         updateHistoryLoadNote('');
                         reloadPageWithoutRefreshNow();
+                        resolve();
+                    }
+                    else if (status === 'error' && progress && progress.stale === true && shouldAutoResumeStalledLoad(safeToken))
+                    {
+                        // De tab die deze verversing aanstuurde is gestopt (dicht/herladen): herladen, dan
+                        // gaat deze tab verder waar de verversing bleef (al gelezen weken worden overgeslagen).
+                        window.clearInterval(pollId);
+                        hitchhikeLoadRunning = false;
+                        updateHistoryLoadNote('Vorige verversing is gestopt; verder gaan waar hij bleef...');
+                        window.setTimeout(function ()
+                        {
+                            reloadPageWithoutRefreshNow();
+                        }, 1500);
                         resolve();
                     }
                     else if (status === 'error')
@@ -6469,6 +6502,10 @@
         if (asyncLoadConfig.force_full === true)
         {
             params.set('force_full', '1');
+            if (asyncLoadConfig.rebuild_resume === true && !(options && options.catchUp === true))
+            {
+                params.set('resume', '1');
+            }
         }
         const loadToken = getPendingLoadProgressToken();
         if (loadToken !== '')
@@ -6716,6 +6753,57 @@
         }
     }
 
+    // Rijen uit de cache staan al in beeld (vorige gegevens tijdens een herbouw, of een hervatte herbouw).
+    const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
+
+    function decorateRebuildLoadNote (text)
+    {
+        let note = String(text || '');
+        if (asyncLoadConfig.cache_version_rebuild === true)
+        {
+            note = 'Cacheversie gewijzigd: alle weken worden opnieuw uit BC gelezen · ' + note;
+        }
+        else if (asyncLoadConfig.rebuild_resume === true)
+        {
+            note = 'Onderbroken verversing wordt hervat (al gelezen weken worden overgeslagen) · ' + note;
+        }
+        if (keepDisplayRowsDuringLoad)
+        {
+            note += asyncLoadConfig.showing_previous_rows === true
+                ? ' · de vorige gegevens blijven zichtbaar tot alle weken opnieuw gelezen zijn'
+                : ' · de tabel wordt bijgewerkt zodra alle weken gelezen zijn';
+        }
+
+        return note;
+    }
+
+    // De aansturende browser geeft het op: fout in de laadvoortgang zetten, zodat meeliftende tabs de
+    // echte fout zien (en niet pas na 5 minuten 'vastgelopen'). Fire-and-forget.
+    function reportLoadFailureToServer (loadError)
+    {
+        try
+        {
+            const token = getPendingLoadProgressToken();
+            if (!token)
+            {
+                return;
+            }
+            const params = new URLSearchParams();
+            params.set('action', 'report_load_failure');
+            params.set('load_token', token);
+            params.set('message', String(loadError && loadError.message ? loadError.message : loadError).slice(0, 400));
+            fetch('index.php?' + params.toString(), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' }
+            }).catch(function () {});
+        }
+        catch (reportError)
+        {
+            console.warn(reportError);
+        }
+    }
+
     async function startIncrementalMonthLoading ()
     {
         const currentWeek = typeof asyncLoadConfig.current_week === 'string'
@@ -6743,7 +6831,7 @@
                 weekBatch = weekBatch.slice(batch.length);
                 const batchWeekProgressTotal = getRefreshWeekProgressTotal(monthScanState, weeksCompleted, batch.length);
 
-                for (const yearWeek of batch)
+                for (const yearWeek of (keepDisplayRowsDuringLoad ? [] : batch))
                 {
                     const weekMeta = monthScanState.months && monthScanState.months[yearWeek]
                         ? monthScanState.months[yearWeek]
@@ -6755,7 +6843,7 @@
                     }
                 }
 
-                updateHistoryLoadNote(buildHistoryLoadNote(batch[0], monthScanState, weeksCompleted, isFirstBatch));
+                updateHistoryLoadNote(decorateRebuildLoadNote(buildHistoryLoadNote(batch[0], monthScanState, weeksCompleted, isFirstBatch)));
 
                 const chunks = await Promise.all(batch.map(function (yearWeek, batchIndex)
                 {
@@ -6773,7 +6861,9 @@
                     monthScanState = chunk.month_scan && typeof chunk.month_scan === 'object' ? chunk.month_scan : monthScanState;
                     historyWeeksTotal = resolveHistoryWeeksTotal(monthScanState);
 
-                    if (!chunk.skipped)
+                    // Bij een (hervatte) herbouw blijven de rijen uit de cache staan; pas bij 'klaar' wisselen
+                    // (pagina herladen), zodat bruikbare gegevens nooit halverwege verdwijnen.
+                    if (!chunk.skipped && !keepDisplayRowsDuringLoad)
                     {
                         const weekLoadMode = chunk.load_meta && typeof chunk.load_meta.week_load_mode === 'string'
                             ? chunk.load_meta.week_load_mode
@@ -6790,7 +6880,7 @@
                     }
 
                     const completedKeys = Array.isArray(chunk.row_keys) ? chunk.row_keys : [];
-                    if (completedKeys.length > 0)
+                    if (completedKeys.length > 0 && !keepDisplayRowsDuringLoad)
                     {
                         markRowsComplete(completedKeys);
                     }
@@ -6815,7 +6905,7 @@
 
                 if (!isFirstBatch)
                 {
-                    updateHistoryLoadNote(buildHistoryLoadNote(batch[batch.length - 1], monthScanState, weeksCompleted, false));
+                    updateHistoryLoadNote(decorateRebuildLoadNote(buildHistoryLoadNote(batch[batch.length - 1], monthScanState, weeksCompleted, false)));
                 }
 
                 isFirstBatch = false;
@@ -6848,6 +6938,7 @@
         catch (historyError)
         {
             logDemeterODataFailure('load_month chain failed', historyError);
+            reportLoadFailureToServer(historyError);
             historyBackfillNote = '';
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             stopPageLoaderProgress();

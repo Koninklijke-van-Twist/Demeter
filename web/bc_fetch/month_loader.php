@@ -100,6 +100,17 @@ function bc_fetch_load_workorder_week_chunk(
         );
     }
 
+    // Hervatten van een onderbroken volledige verversing: weken die deze verversing al las (en opsloeg)
+    // overslaan, niet opnieuw uit BC lezen. De huidige week gaat altijd opnieuw (dagpad hierboven).
+    if ($forceFull && !empty($options['resume_skip_scanned'])) {
+        $resumeState = demeter_workorder_state_cache_load($company, $costCenter);
+        $resumeScan = is_array($resumeState['month_scan'] ?? null) ? $resumeState['month_scan'] : null;
+        $resumeWeekMeta = is_array($resumeScan['months'][$normalizedYearWeek] ?? null) ? $resumeScan['months'][$normalizedYearWeek] : null;
+        if (is_array($resumeScan) && is_array($resumeWeekMeta) && trim((string) ($resumeWeekMeta['scanned_at'] ?? '')) !== '') {
+            return bc_fetch_resume_skipped_week_chunk($normalizedYearWeek, $resumeScan, $costCenter, $progressToken, $options);
+        }
+    }
+
     $weekRange = bc_fetch_week_date_range($normalizedYearWeek, $partialToToday && $normalizedYearWeek === $currentCalendarWeek);
     $rangeStart = $weekRange['from'];
     $rangeEndExclusive = $weekRange['to'];
@@ -305,6 +316,10 @@ function bc_fetch_load_workorder_week_chunk(
         odata_load_progress_heartbeat_throttled(true);
     }
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
+    if (demeter_month_scan_history_complete($monthScan)) {
+        // Volledige herbouw is klaar (einde historie bereikt): nu pas wisselen naar de nieuwe rijen.
+        demeter_workorder_state_cache_finish_rebuild($company, $costCenter);
+    }
     demeter_workorder_state_cache_unlock($stateLock);
 
     $nextWeek = demeter_previous_iso_year_week($normalizedYearWeek);
@@ -337,6 +352,66 @@ function bc_fetch_load_workorder_week_chunk(
         'project_invoiced_total_by_job' => is_array($loaded['project_invoiced_total_by_job'] ?? null) ? $loaded['project_invoiced_total_by_job'] : [],
         'finance_key_by_pair' => is_array($loaded['finance_key_by_pair'] ?? null) ? $loaded['finance_key_by_pair'] : [],
         'load_meta' => $loadMeta,
+    ];
+}
+
+/**
+ * Antwoord voor een week die bij het hervatten van een verversing wordt overgeslagen (al gelezen).
+ *
+ * @param array<string, mixed> $monthScan
+ * @param array<string, mixed> $options
+ * @return array<string, mixed>
+ */
+function bc_fetch_resume_skipped_week_chunk(string $yearWeek, array $monthScan, string $costCenter, ?string $progressToken, array $options): array
+{
+    $weekMeta = is_array($monthScan['months'][$yearWeek] ?? null) ? $monthScan['months'][$yearWeek] : [];
+    $nextWeek = demeter_previous_iso_year_week($yearWeek);
+    $progressWeekIndex = max(0, (int) ($options['progress_week_index'] ?? 0));
+    $progressWeekTotal = max(0, (int) ($options['progress_week_total'] ?? 0));
+    if (
+        is_string($progressToken) && $progressToken !== ''
+        && $progressWeekIndex > 0 && $progressWeekTotal > 0
+        && function_exists('odata_load_progress_advance_month')
+    ) {
+        odata_load_progress_advance_month(
+            $progressToken,
+            min($progressWeekTotal * 4, $progressWeekIndex * 4),
+            $progressWeekTotal * 4,
+            $yearWeek . ' (al gelezen, overgeslagen)'
+        );
+    }
+
+    return [
+        'skipped' => true,
+        'year_week' => $yearWeek,
+        'year_month' => $yearWeek,
+        'has_projectposten' => !empty($weekMeta['has_projectposten']),
+        'empty' => !empty($weekMeta['empty']),
+        'only_closed_cached' => !empty($weekMeta['only_closed_cached']),
+        'row_keys' => demeter_month_scan_expected_row_keys($monthScan, $yearWeek),
+        'month_scan' => $monthScan,
+        'next_week' => $nextWeek,
+        'next_month' => $nextWeek,
+        'should_continue' => demeter_month_scan_should_continue($monthScan, $nextWeek),
+        'workorders' => [],
+        'project_totals_by_job' => [],
+        'workorder_totals_by_number' => [],
+        'workorder_totals_by_project_and_number' => [],
+        'projectposten_rows_by_project' => [],
+        'projectposten_rows_by_project_and_workorder' => [],
+        'invoice_details_by_id' => [],
+        'project_invoice_ids_by_job' => [],
+        'project_invoiced_total_by_job' => [],
+        'finance_key_by_pair' => [],
+        'load_meta' => [
+            'cost_center' => $costCenter,
+            'year_week' => $yearWeek,
+            'year_month' => $yearWeek,
+            'incremental' => true,
+            'skipped_cached' => true,
+            'resume_skipped' => true,
+            'week_load_mode' => 'skip',
+        ],
     ];
 }
 

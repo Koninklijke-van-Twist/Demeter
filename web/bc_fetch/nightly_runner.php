@@ -67,7 +67,8 @@ function demeter_refresh_cost_center_weeks(
     $weeksProcessed = 0;
 
     if ($forceFull) {
-        demeter_workorder_state_cache_purge($company, $costCenter);
+        // Niet-destructief: de vorige rijen blijven zichtbaar tot de herbouw compleet is.
+        demeter_workorder_state_cache_begin_rebuild($company, $costCenter);
     } else {
         $cachedState = demeter_workorder_state_cache_load($company, $costCenter);
         if (is_array($cachedState) && is_array($cachedState['month_scan'] ?? null)) {
