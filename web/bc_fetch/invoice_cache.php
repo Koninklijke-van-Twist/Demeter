@@ -261,6 +261,9 @@ function bc_fetch_resolve_invoices_for_projects(
         }
 
         demeter_invoice_cache_merge_fetched($cache, $fetched, $fetchedKeys);
+        if (function_exists('odata_load_progress_heartbeat_throttled')) {
+            odata_load_progress_heartbeat_throttled(true);
+        }
         demeter_invoice_cache_save($company, $cache);
     }
 

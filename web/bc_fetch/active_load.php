@@ -128,7 +128,21 @@ function demeter_active_load_is_fresh_running(?array $normalized): bool
         return false;
     }
 
-    return (time() - $updatedAt) <= DEMETER_ACTIVE_LOAD_STALE_SECONDS;
+    if ((time() - $updatedAt) <= DEMETER_ACTIVE_LOAD_STALE_SECONDS) {
+        return true;
+    }
+
+    // Geen recente heartbeat op de claim: dezelfde maatstaf als de laadvoortgang gebruiken (levende
+    // worker / recente serveractiviteit, zie odata_load_progress_mark_stale), zodat een trage stap de
+    // claim niet vrijgeeft terwijl de load nog loopt.
+    $token = trim((string) ($normalized['token'] ?? ''));
+    if ($token !== '' && function_exists('odata_load_progress_payload')) {
+        $progress = odata_load_progress_payload($token);
+
+        return ($progress['status'] ?? '') === 'running' && empty($progress['stale']);
+    }
+
+    return false;
 }
 
 function demeter_active_load_is_recently_completed(?array $normalized): bool

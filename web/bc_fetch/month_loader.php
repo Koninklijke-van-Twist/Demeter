@@ -211,7 +211,13 @@ function bc_fetch_load_workorder_week_chunk(
             // Zonder lock kan een parallelle week onze week (of wij de zijne) overschrijven.
             throw new RuntimeException('Cache-lock voor ' . $company . ' / ' . $costCenter . ' niet beschikbaar; week ' . $normalizedYearWeek . ' niet opgeslagen.');
         }
+        if (function_exists('odata_load_progress_heartbeat_throttled')) {
+            odata_load_progress_heartbeat_throttled(true);
+        }
         $freshState = demeter_workorder_state_cache_load($company, $costCenter);
+        if (function_exists('odata_load_progress_heartbeat_throttled')) {
+            odata_load_progress_heartbeat_throttled(true);
+        }
         if (is_array($freshState)) {
             $monthScan = is_array($freshState['month_scan'] ?? null) ? $freshState['month_scan'] : $monthScan;
             // Deze verversing heeft de week al opgeslagen (bv. client-retry na een afgekapt antwoord):
@@ -279,6 +285,9 @@ function bc_fetch_load_workorder_week_chunk(
         );
     }
 
+    if (function_exists('odata_load_progress_heartbeat_throttled')) {
+        odata_load_progress_heartbeat_throttled(true);
+    }
     demeter_workorder_state_cache_save(
         $company,
         $costCenter,
@@ -286,6 +295,9 @@ function bc_fetch_load_workorder_week_chunk(
         $monthScan,
         is_array($loaded['load_session'] ?? null) ? $loaded['load_session'] : demeter_workorder_load_session_defaults()
     );
+    if (function_exists('odata_load_progress_heartbeat_throttled')) {
+        odata_load_progress_heartbeat_throttled(true);
+    }
     demeter_workorder_state_cache_save_display_rows($company, $costCenter, $displayRowsByKey);
     demeter_workorder_state_cache_unlock($stateLock);
 
@@ -924,7 +936,8 @@ function bc_fetch_execute_workorder_date_range_load(
         && $fetchedWorkorders === []
         && $cachedWorkorderRows !== [];
 
-    $advanceProgress('Werkorders samenvoegen');
+    // Stap 3 dekt het ophalen van de facturen (kan bij oude weken met veel projecten lang duren).
+    $advanceProgress('Facturen');
 
     $projectNumbers = is_array($rangeFinance['project_numbers'] ?? null) ? $rangeFinance['project_numbers'] : [];
     $invoiceDetailsById = [];
@@ -965,7 +978,8 @@ function bc_fetch_execute_workorder_date_range_load(
         $invoiceLoadMeta = is_array($invoiceData['load_meta'] ?? null) ? $invoiceData['load_meta'] : $invoiceLoadMeta;
     }
 
-    $advanceProgress('Facturen');
+    // Stap 4: omschrijvingen aanvullen, werkorders samenvoegen en de week in de cache opslaan.
+    $advanceProgress('Werkorders samenvoegen en opslaan');
 
     $importSapWorkorderRows = is_array($rangeFinance['import_sap_workorder_rows'] ?? null)
         ? $rangeFinance['import_sap_workorder_rows']

@@ -688,7 +688,7 @@
                     const message = String(progress && progress.message ? progress.message : '');
                     if (message !== '')
                     {
-                        updateHistoryLoadNote(message);
+                        updateHistoryLoadNote(message + formatSlowStepSuffix(progress));
                     }
 
                     if (status === 'completed')
@@ -1325,7 +1325,7 @@
         });
     }
 
-    function getRefreshWeekProgressTotal (monthScan)
+    function getEstimatedHistoryWeeksTotal (monthScan)
     {
         const resolved = resolveHistoryWeeksTotal(monthScan);
         if (resolved && resolved > 0)
@@ -1339,6 +1339,42 @@
         }
 
         return monthScanEmptyStopCount;
+    }
+
+    // Totaal aantal weken voor de stapteller (4 stappen per week op de server). Zolang het einde
+    // (stop_before_month) onbekend is, is de schatting maar een ondergrens: bij het teruglezen van
+    // oudere weken groeit het totaal mee (minstens tot er genoeg lege weken op rij zijn geweest),
+    // zodat de teller nooit 'N van N' toont terwijl er nog weken geladen worden.
+    function getRefreshWeekProgressTotal (monthScan, weeksCompleted, batchLength)
+    {
+        const estimate = getEstimatedHistoryWeeksTotal(monthScan);
+        const done = Math.max(0, Number(weeksCompleted || 0));
+        const inBatch = Math.max(0, Number(batchLength || 0));
+        const stopBefore = String((monthScan && monthScan.stop_before_month) || '').trim();
+        if (stopBefore !== '' || (done + inBatch) < estimate)
+        {
+            return Math.max(estimate, done + inBatch);
+        }
+
+        const stopCount = monthScanEmptyStopCount > 0 ? monthScanEmptyStopCount : 52;
+        const emptyInRow = Math.max(0, Number((monthScan && monthScan.consecutive_empty) || 0));
+        const minimumRemainingAfterBatch = Math.max(0, stopCount - emptyInRow - inBatch);
+
+        return Math.max(estimate, done + inBatch + minimumRemainingAfterBatch);
+    }
+
+    // Extra tekst als de server meldt dat een stap lang duurt maar de week-request nog leeft.
+    function formatSlowStepSuffix (progress)
+    {
+        if (!progress || progress.slow !== true || String(progress.status || '') !== 'running')
+        {
+            return '';
+        }
+
+        const since = String(progress.last_activity_text || '').trim();
+
+        return ' · deze stap duurt langer dan normaal' + (since !== '' ? ' (laatste serveractiviteit ' + since + ')' : '')
+            + ', het laden loopt nog';
     }
 
     function getPendingLoadProgressToken ()
@@ -1639,7 +1675,7 @@
                 text = String(progress.error || '').trim();
             }
 
-            applyLoadProgressToUi(text, percent, currentCallLabel);
+            applyLoadProgressToUi(text, percent, currentCallLabel, status, formatSlowStepSuffix(progress));
         }
         catch (error)
         {
@@ -1647,13 +1683,14 @@
         }
     }
 
-    function applyLoadProgressToUi (text, percent, currentCallLabel)
+    function applyLoadProgressToUi (text, percent, currentCallLabel, status, slowSuffix)
     {
         if (asyncLoadConfig.enabled || hitchhikeLoadRunning)
         {
-            // Voorbij de geschatte periode is 'Stap 208 van 208 (100%)' misleidend: dan de
-            // backfill-tekst tonen (welke week, en hoeveel lege weken op rij nog nodig zijn).
-            let noteText = historyBackfillNote !== '' ? historyBackfillNote : text;
+            // Voorbij de geschatte periode de backfill-tekst tonen (welke week, hoeveel lege weken op
+            // rij nog nodig zijn). Een fout van de server (bv. echt vastgelopen) gaat altijd voor.
+            let noteText = historyBackfillNote !== '' && status !== 'error' ? historyBackfillNote : text;
+            noteText += String(slowSuffix || '');
             const callText = String(currentCallLabel || '').trim();
             if (callText !== '')
             {
@@ -6160,22 +6197,31 @@
     // Backfill voorbij de geschatte periode: de scan stopt pas na monthScanEmptyStopCount lege
     // weken op rij (of bij stop_before_month). Toon hoeveel lege weken op rij er nog nodig zijn;
     // dat is geen maximum aantal te laden weken, want een week met posten zet de teller weer op 0.
-    function buildHistoryBackfillNote (weekToLoad, monthScan)
+    function buildHistoryBackfillNote (weekToLoad, monthScan, weeksCompleted)
     {
         const stopCount = monthScanEmptyStopCount > 0 ? monthScanEmptyStopCount : 52;
         const emptyInRow = Math.max(0, Number((monthScan && monthScan.consecutive_empty) || 0));
         const remaining = Math.max(0, stopCount - emptyInRow);
+        const done = Math.max(0, Number(weeksCompleted || 0));
+        const estimate = getEstimatedHistoryWeeksTotal(monthScan);
+        const backfillWeek = Math.max(1, done - estimate + 1);
+        const backfillMinimum = Math.max(backfillWeek, backfillWeek - 1 + remaining);
 
-        return 'Oudere historie nalopen: ' + weekToLoad + ' · stopt na ' + stopCount
+        return 'Oudere historie teruglezen (incl. facturen): ' + weekToLoad
+            + ' · week ' + backfillWeek + ' van minstens ' + backfillMinimum
+            + ' · stopt na ' + stopCount
             + ' lege weken op rij (nu ' + emptyInRow + ' op rij leeg, nog ' + remaining + ' lege weken op rij nodig)';
     }
 
     function buildHistoryLoadNote (weekToLoad, monthScan, weeksCompleted, isFirstWeek)
     {
-        const estimatedWeeks = resolveHistoryWeeksTotal(monthScan);
-        if (!isFirstWeek && estimatedWeeks && weeksCompleted >= estimatedWeeks)
+        // Ook zonder bekend einde (eerste volledige verversing): voorbij de schatting (52 weken)
+        // de teruglees-fase tonen i.p.v. een stapteller die op 'N van N' blijft staan.
+        const estimatedWeeks = getEstimatedHistoryWeeksTotal(monthScan);
+        const stopBefore = String((monthScan && monthScan.stop_before_month) || '').trim();
+        if (!isFirstWeek && estimatedWeeks && weeksCompleted >= estimatedWeeks && stopBefore === '')
         {
-            historyBackfillNote = buildHistoryBackfillNote(weekToLoad, monthScan);
+            historyBackfillNote = buildHistoryBackfillNote(weekToLoad, monthScan, weeksCompleted);
 
             return historyBackfillNote;
         }
@@ -6676,7 +6722,7 @@
             {
                 const batch = weekBatch.slice(0, historyParallelWeekLoads);
                 weekBatch = weekBatch.slice(batch.length);
-                const batchWeekProgressTotal = getRefreshWeekProgressTotal(monthScanState);
+                const batchWeekProgressTotal = getRefreshWeekProgressTotal(monthScanState, weeksCompleted, batch.length);
 
                 for (const yearWeek of batch)
                 {
@@ -6731,7 +6777,7 @@
                     }
 
                     weeksCompleted++;
-                    const estimateForMarker = resolveHistoryWeeksTotal(monthScanState);
+                    const estimateForMarker = getEstimatedHistoryWeeksTotal(monthScanState);
                     if (estimateForMarker && weeksCompleted >= estimateForMarker && projectTotalsIncompleteState === 'loading')
                     {
                         setProjectTotalsIncompleteState('loading-history');

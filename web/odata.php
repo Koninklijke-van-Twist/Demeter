@@ -36,9 +36,22 @@ if (!defined('DEMETER_ODATA_CONNECTION_RETRY_MAX_SECONDS_CLI')) {
 if (!defined('DEMETER_LOAD_PROGRESS_STALE_SECONDS')) {
     define('DEMETER_LOAD_PROGRESS_STALE_SECONDS', 300);
 }
-/** Heartbeat-interval (s) tijdens een lopende cURL-call, zodat lange calls niet als vastgelopen gelden. */
+/**
+ * Zolang er nog een week-request (worker) loopt die zich heeft aangemeld, geldt de load pas als
+ * vastgelopen als die worker langer dan dit aantal seconden niets meer meldt. Langer dan de
+ * maximale looptijd van een request (max_execution_time 600 s) + marge kan een levende worker niet
+ * stil zijn; dan is hij weg (gekild, server herstart) zonder zich af te melden.
+ */
+if (!defined('DEMETER_LOAD_PROGRESS_WORKER_DEAD_SECONDS')) {
+    define('DEMETER_LOAD_PROGRESS_WORKER_DEAD_SECONDS', DEMETER_ODATA_MAX_EXECUTION_SECONDS + 60);
+}
+/** Na dit aantal seconden zonder serveractiviteit (maar met levende worker) meldt de voortgang 'traag'. */
+if (!defined('DEMETER_LOAD_PROGRESS_SLOW_SECONDS')) {
+    define('DEMETER_LOAD_PROGRESS_SLOW_SECONDS', 120);
+}
+/** Heartbeat-interval (s) tijdens een lopende cURL-call / lock-wacht, zodat lange stappen niet als vastgelopen gelden. */
 if (!defined('DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS')) {
-    define('DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS', 30);
+    define('DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS', 15);
 }
 
 require_once __DIR__ . '/bc_fetch/call_time_log.php';
@@ -1572,11 +1585,15 @@ function odata_attach_load_progress_heartbeat($ch): void
     });
 }
 
-function odata_load_progress_heartbeat_throttled(): void
+/**
+ * Heartbeat van de lopende worker (cURL-callback, lock-wacht, zware PHP-stappen). Gethrottled; met
+ * $force direct. Ververst updated_at én de beat van deze worker, zonder stap/tekst te wijzigen.
+ */
+function odata_load_progress_heartbeat_throttled(bool $force = false): void
 {
     static $lastBeatAt = 0;
     $now = time();
-    if ($now - $lastBeatAt < (int) DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS) {
+    if (!$force && $now - $lastBeatAt < (int) DEMETER_LOAD_PROGRESS_CURL_HEARTBEAT_SECONDS) {
         return;
     }
     $lastBeatAt = $now;
@@ -1591,7 +1608,7 @@ function odata_load_progress_heartbeat_throttled(): void
         return;
     }
 
-    // Lege payload: status/teksten blijven gelijk, alleen updated_at (+ active-load heartbeat) ververst.
+    // Lege payload: status/teksten blijven gelijk, alleen updated_at, worker-beat (+ active-load heartbeat) ververst.
     odata_load_progress_write($token, []);
 }
 
@@ -1814,7 +1831,7 @@ function odata_load_progress_cleanup(): void
             continue;
         }
 
-        if (pathinfo($fileInfo->getFilename(), PATHINFO_EXTENSION) !== 'json') {
+        if (!in_array(pathinfo($fileInfo->getFilename(), PATHINFO_EXTENSION), ['json', 'lock'], true)) {
             continue;
         }
 
@@ -1840,7 +1857,72 @@ function odata_load_progress_path_for_token(string $token): string
     return load_progress_base_dir() . DIRECTORY_SEPARATOR . $token . '.json';
 }
 
-function odata_load_progress_write(string $token, array $payload): void
+function odata_load_progress_lock_path_for_token(string $token): string
+{
+    return load_progress_base_dir() . DIRECTORY_SEPARATOR . $token . '.lock';
+}
+
+/**
+ * Voert $callback uit onder een exclusieve lock per token. Twee parallelle week-requests schrijven
+ * dezelfde voortgang (lezen-wijzigen-schrijven); zonder lock kan een worker-aanmelding verloren gaan.
+ *
+ * @template T
+ * @param callable(): T $callback
+ * @return T
+ */
+function odata_load_progress_with_lock(string $token, callable $callback)
+{
+    $handle = @fopen(odata_load_progress_lock_path_for_token($token), 'c');
+    if ($handle === false) {
+        return $callback();
+    }
+
+    try {
+        @flock($handle, LOCK_EX);
+
+        return $callback();
+    } finally {
+        @flock($handle, LOCK_UN);
+        fclose($handle);
+    }
+}
+
+/** Id van de worker (dit PHP-request) die zich bij de laadvoortgang heeft aangemeld, of ''. */
+function odata_load_progress_current_worker_id(): string
+{
+    return trim((string) ($GLOBALS['demeter_load_progress_worker_id'] ?? ''));
+}
+
+/**
+ * @param mixed $workers
+ * @return array<string, array{label: string, started_at: int, beat_at: int}>
+ */
+function odata_load_progress_normalize_workers($workers): array
+{
+    if (!is_array($workers)) {
+        return [];
+    }
+
+    $normalized = [];
+    foreach ($workers as $workerId => $worker) {
+        $id = trim((string) $workerId);
+        if ($id === '' || !is_array($worker)) {
+            continue;
+        }
+        $normalized[$id] = [
+            'label' => trim((string) ($worker['label'] ?? '')),
+            'started_at' => max(0, (int) ($worker['started_at'] ?? 0)),
+            'beat_at' => max(0, (int) ($worker['beat_at'] ?? 0)),
+        ];
+    }
+
+    return $normalized;
+}
+
+/**
+ * @param callable(array<string, array<string, mixed>>, int): array<string, array<string, mixed>>|null $mutateWorkers
+ */
+function odata_load_progress_write(string $token, array $payload, ?callable $mutateWorkers = null): void
 {
     if (!odata_load_progress_is_valid_token($token)) {
         return;
@@ -1848,42 +1930,110 @@ function odata_load_progress_write(string $token, array $payload): void
 
     odata_load_progress_cleanup();
 
-    // Ruwe payload (zonder stale-markering) om velden over te nemen.
-    $existingPayload = odata_load_progress_payload($token, false);
-    $now = time();
-    $normalizedPayload = [
-        'token' => $token,
-        'status' => (string) ($payload['status'] ?? ($existingPayload['status'] ?? 'idle')),
-        'total_months' => max(0, (int) ($payload['total_months'] ?? ($existingPayload['total_months'] ?? 0))),
-        'current_month_index' => max(0, (int) ($payload['current_month_index'] ?? ($existingPayload['current_month_index'] ?? 0))),
-        'current_month_label' => trim((string) ($payload['current_month_label'] ?? ($existingPayload['current_month_label'] ?? ''))),
-        'current_call_label' => trim((string) ($payload['current_call_label'] ?? ($existingPayload['current_call_label'] ?? ''))),
-        'message' => trim((string) ($payload['message'] ?? ($existingPayload['message'] ?? ''))),
-        'updated_at' => $now,
-        'started_at' => max(0, (int) ($payload['started_at'] ?? ($existingPayload['started_at'] ?? $now))),
-        'completed_at' => max(0, (int) ($payload['completed_at'] ?? ($existingPayload['completed_at'] ?? 0))),
-        'error' => trim((string) ($payload['error'] ?? ($existingPayload['error'] ?? ''))),
-    ];
+    $normalizedPayload = odata_load_progress_with_lock($token, static function () use ($token, $payload, $mutateWorkers): ?array {
+        // Ruwe payload (zonder stale-markering) om velden over te nemen.
+        $existingPayload = odata_load_progress_payload($token, false);
+        $now = time();
 
-    $json = json_encode($normalizedPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
-    if (!is_string($json)) {
-        return;
-    }
-
-    if (@file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX) === false) {
-        // Bv. rechten op cache/ na een deploy: zonder log zou de voortgang ongemerkt bevriezen.
-        static $loggedWriteFailure = false;
-        if (!$loggedWriteFailure) {
-            $loggedWriteFailure = true;
-            error_log('Demeter: laadvoortgang niet schrijfbaar: ' . odata_load_progress_path_for_token($token));
+        $workers = array_key_exists('workers', $payload)
+            ? odata_load_progress_normalize_workers($payload['workers'])
+            : odata_load_progress_normalize_workers($existingPayload['workers'] ?? []);
+        $currentWorker = odata_load_progress_current_worker_id();
+        if ($currentWorker !== '' && isset($workers[$currentWorker])) {
+            $workers[$currentWorker]['beat_at'] = $now;
         }
-    }
+        if ($mutateWorkers !== null) {
+            $workers = odata_load_progress_normalize_workers($mutateWorkers($workers, $now));
+        }
+        foreach ($workers as $workerId => $worker) {
+            // Worker zonder beat langer dan de maximale request-duur bestaat niet meer.
+            if ($now - (int) $worker['beat_at'] > (int) DEMETER_LOAD_PROGRESS_WORKER_DEAD_SECONDS) {
+                unset($workers[$workerId]);
+            }
+        }
 
-    if (function_exists('demeter_active_load_heartbeat_by_token')
+        $normalizedPayload = [
+            'token' => $token,
+            'status' => (string) ($payload['status'] ?? ($existingPayload['status'] ?? 'idle')),
+            'total_months' => max(0, (int) ($payload['total_months'] ?? ($existingPayload['total_months'] ?? 0))),
+            'current_month_index' => max(0, (int) ($payload['current_month_index'] ?? ($existingPayload['current_month_index'] ?? 0))),
+            'current_month_label' => trim((string) ($payload['current_month_label'] ?? ($existingPayload['current_month_label'] ?? ''))),
+            'current_call_label' => trim((string) ($payload['current_call_label'] ?? ($existingPayload['current_call_label'] ?? ''))),
+            'message' => trim((string) ($payload['message'] ?? ($existingPayload['message'] ?? ''))),
+            'updated_at' => $now,
+            'progress_at' => max(0, (int) ($payload['progress_at'] ?? ($existingPayload['progress_at'] ?? $now))),
+            'started_at' => max(0, (int) ($payload['started_at'] ?? ($existingPayload['started_at'] ?? $now))),
+            'completed_at' => max(0, (int) ($payload['completed_at'] ?? ($existingPayload['completed_at'] ?? 0))),
+            'error' => trim((string) ($payload['error'] ?? ($existingPayload['error'] ?? ''))),
+            'workers' => $workers,
+        ];
+
+        $json = json_encode($normalizedPayload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if (!is_string($json)) {
+            return null;
+        }
+
+        if (@file_put_contents(odata_load_progress_path_for_token($token), $json, LOCK_EX) === false) {
+            // Bv. rechten op cache/ na een deploy: zonder log zou de voortgang ongemerkt bevriezen.
+            if (empty($GLOBALS['demeter_load_progress_write_failure_logged'])) {
+                $GLOBALS['demeter_load_progress_write_failure_logged'] = true;
+                error_log('Demeter: laadvoortgang niet schrijfbaar: ' . odata_load_progress_path_for_token($token));
+            }
+        }
+
+        return $normalizedPayload;
+    });
+
+    if (is_array($normalizedPayload)
+        && function_exists('demeter_active_load_heartbeat_by_token')
         && (string) ($normalizedPayload['status'] ?? '') === 'running'
     ) {
         demeter_active_load_heartbeat_by_token($token);
     }
+}
+
+/**
+ * Meldt dit PHP-request aan als lopende worker van de load. Zolang een aangemelde worker leeft
+ * (beat via cURL/lock-wacht/stappen, of nog binnen de maximale request-duur), geldt de load niet
+ * als vastgelopen. Afmelden: odata_load_progress_worker_end() (ook vanuit de shutdown-handler).
+ */
+function odata_load_progress_worker_begin(string $token, string $label): string
+{
+    if (!odata_load_progress_is_valid_token($token)) {
+        return '';
+    }
+
+    $workerId = bin2hex(random_bytes(6));
+    $GLOBALS['demeter_load_progress_worker_id'] = $workerId;
+    $GLOBALS['demeter_load_progress_worker_token'] = $token;
+    odata_load_progress_write($token, [], static function (array $workers, int $now) use ($workerId, $label): array {
+        $workers[$workerId] = [
+            'label' => trim($label),
+            'started_at' => $now,
+            'beat_at' => $now,
+        ];
+
+        return $workers;
+    });
+
+    return $workerId;
+}
+
+function odata_load_progress_worker_end(): void
+{
+    $workerId = odata_load_progress_current_worker_id();
+    $token = trim((string) ($GLOBALS['demeter_load_progress_worker_token'] ?? ''));
+    $GLOBALS['demeter_load_progress_worker_id'] = '';
+    $GLOBALS['demeter_load_progress_worker_token'] = '';
+    if ($workerId === '' || !odata_load_progress_is_valid_token($token)) {
+        return;
+    }
+
+    odata_load_progress_write($token, [], static function (array $workers) use ($workerId): array {
+        unset($workers[$workerId]);
+
+        return $workers;
+    });
 }
 
 function odata_load_progress_begin(string $token, int $totalMonths): void
@@ -1894,6 +2044,8 @@ function odata_load_progress_begin(string $token, int $totalMonths): void
         'current_month_index' => 0,
         'current_month_label' => '',
         'message' => 'Voorbereiden...',
+        'progress_at' => time(),
+        'workers' => [],
         'started_at' => time(),
         'completed_at' => 0,
         'error' => '',
@@ -1905,7 +2057,7 @@ function odata_load_progress_advance_month(string $token, int $currentMonthIndex
     $safeMonthLabel = trim($yearMonth);
     $message = 'Stap ' . max(0, $currentMonthIndex) . ' van ' . max(0, $totalMonths);
     if ($safeMonthLabel !== '') {
-        $message .= ': maand ' . $safeMonthLabel . ' laden';
+        $message .= ': ' . (preg_match('/^\d{4}-W\d{2}/', $safeMonthLabel) === 1 ? 'week ' : 'maand ') . $safeMonthLabel . ' laden';
     }
 
     odata_load_progress_write($token, [
@@ -1914,6 +2066,7 @@ function odata_load_progress_advance_month(string $token, int $currentMonthIndex
         'current_month_index' => max(0, $currentMonthIndex),
         'current_month_label' => $safeMonthLabel,
         'message' => $message,
+        'progress_at' => time(),
         'started_at' => time(),
         'completed_at' => 0,
         'error' => '',
@@ -2060,29 +2213,34 @@ function odata_load_progress_payload(string $token, bool $detectStale = true): a
         'current_call_label' => trim((string) ($payload['current_call_label'] ?? '')),
         'message' => trim((string) ($payload['message'] ?? '')),
         'updated_at' => max(0, (int) ($payload['updated_at'] ?? 0)),
+        'progress_at' => max(0, (int) ($payload['progress_at'] ?? ($payload['updated_at'] ?? 0))),
         'started_at' => max(0, (int) ($payload['started_at'] ?? 0)),
         'completed_at' => max(0, (int) ($payload['completed_at'] ?? 0)),
         'error' => trim((string) ($payload['error'] ?? '')),
+        'workers' => odata_load_progress_normalize_workers($payload['workers'] ?? []),
     ];
 
     return $detectStale ? odata_load_progress_mark_stale($normalized, time()) : $normalized;
 }
 
 /**
- * Leesbare Nederlandse tijd (Europe/Amsterdam) voor meldingen, bv. '7 oktober 21:25'.
+ * Leesbare Nederlandse tijd (Europe/Amsterdam) voor meldingen, bv. '8 oktober 2026, 11:05'.
  */
 function odata_format_dutch_datetime(int $timestamp): string
 {
     $months = ['januari', 'februari', 'maart', 'april', 'mei', 'juni', 'juli', 'augustus', 'september', 'oktober', 'november', 'december'];
     $date = (new DateTimeImmutable('@' . $timestamp))->setTimezone(new DateTimeZone('Europe/Amsterdam'));
 
-    return (int) $date->format('j') . ' ' . $months[(int) $date->format('n') - 1] . ' ' . $date->format('H:i');
+    return (int) $date->format('j') . ' ' . $months[(int) $date->format('n') - 1] . ' ' . $date->format('Y') . ', ' . $date->format('H:i');
 }
 
 /**
- * Een 'running' voortgang die al DEMETER_LOAD_PROGRESS_STALE_SECONDS niet is bijgewerkt hoort bij een
- * worker die niet meer leeft (afgebroken request, deploy, fatal error). Meld dat als fout, zodat
- * wachtende pagina's stoppen en de gebruiker opnieuw kan starten.
+ * Bepaalt of een 'running' load echt vastzit. Alleen 'vastgelopen' (status error, stale) als er
+ * geen levende worker meer is:
+ * - er is een aangemelde worker (week-request) met een beat binnen DEMETER_LOAD_PROGRESS_WORKER_DEAD_SECONDS:
+ *   de request loopt nog (ook als een stap traag is) → niet stale, wel 'slow' na DEMETER_LOAD_PROGRESS_SLOW_SECONDS;
+ * - geen levende worker en geen activiteit sinds DEMETER_LOAD_PROGRESS_STALE_SECONDS → stale
+ *   (browser dicht tussen twee weken, of de worker is weg zonder zich af te melden).
  *
  * @param array<string, mixed> $payload
  * @return array<string, mixed>
@@ -2090,17 +2248,41 @@ function odata_format_dutch_datetime(int $timestamp): string
 function odata_load_progress_mark_stale(array $payload, int $now): array
 {
     $updatedAt = (int) ($payload['updated_at'] ?? 0);
-    if (($payload['status'] ?? '') !== 'running' || $updatedAt <= 0
-        || ($now - $updatedAt) <= (int) DEMETER_LOAD_PROGRESS_STALE_SECONDS
-    ) {
-        $payload['stale'] = false;
+    $workers = odata_load_progress_normalize_workers($payload['workers'] ?? []);
+    $lastActivity = $updatedAt;
+    $liveWorkers = 0;
+    foreach ($workers as $worker) {
+        $beatAt = (int) $worker['beat_at'];
+        $lastActivity = max($lastActivity, $beatAt);
+        if ($beatAt > 0 && ($now - $beatAt) <= (int) DEMETER_LOAD_PROGRESS_WORKER_DEAD_SECONDS) {
+            $liveWorkers++;
+        }
+    }
+
+    $payload['stale'] = false;
+    $payload['slow'] = false;
+    $payload['in_flight'] = $liveWorkers;
+    $payload['last_activity_at'] = $lastActivity;
+    $payload['last_activity_text'] = $lastActivity > 0 ? odata_format_dutch_datetime($lastActivity) : '';
+
+    if (($payload['status'] ?? '') !== 'running' || $updatedAt <= 0) {
+        return $payload;
+    }
+
+    $silentSeconds = $now - $lastActivity;
+    if ($liveWorkers > 0) {
+        $payload['slow'] = $silentSeconds > (int) DEMETER_LOAD_PROGRESS_SLOW_SECONDS;
 
         return $payload;
     }
 
+    if ($silentSeconds <= (int) DEMETER_LOAD_PROGRESS_STALE_SECONDS) {
+        return $payload;
+    }
+
     $lastStep = trim((string) ($payload['message'] ?? ''));
-    $message = 'Laden is vastgelopen: geen voortgang sinds ' . odata_format_dutch_datetime($updatedAt)
-        . ($lastStep !== '' ? ' (' . $lastStep . ')' : '')
+    $message = 'Laden is vastgelopen: geen serveractiviteit sinds ' . odata_format_dutch_datetime($lastActivity)
+        . ($lastStep !== '' ? ' (laatste stap: ' . $lastStep . ')' : '')
         . '. Klik op "Ververs Nu" om opnieuw te starten.';
     $payload['status'] = 'error';
     $payload['stale'] = true;
@@ -2462,29 +2644,19 @@ function odata_send_cache_clear_json(): void
  * Geeft de active-load van een dode worker vrij, zodat 'Ververs Nu' een nieuwe load kan starten
  * i.p.v. opnieuw mee te liften op de vastgelopen load.
  *
- * De stale-check en het vrijgeven gebeuren onder een exclusieve lock op het voortgangsbestand
- * (dezelfde lock als file_put_contents(..., LOCK_EX) van de worker), zodat een worker die net
- * voortgang schrijft zijn active-load niet kwijtraakt.
+ * De stale-check en het vrijgeven gebeuren onder dezelfde lock als odata_load_progress_write()
+ * (lock-bestand per token), zodat een worker die net voortgang schrijft zijn active-load niet kwijtraakt.
  *
  * @return bool true als vrijgegeven (nog steeds stale), false als de load weer leeft of niet te locken is
  */
 function odata_load_progress_release_if_stale(string $token): bool
 {
-    if (!odata_load_progress_is_valid_token($token)) {
+    if (!odata_load_progress_is_valid_token($token) || !is_file(odata_load_progress_path_for_token($token))) {
         return false;
     }
 
-    $handle = @fopen(odata_load_progress_path_for_token($token), 'rb');
-    if ($handle === false) {
-        return false;
-    }
-
-    try {
-        if (!flock($handle, LOCK_EX)) {
-            return false;
-        }
-
-        $raw = stream_get_contents($handle);
+    return (bool) odata_load_progress_with_lock($token, static function () use ($token): bool {
+        $raw = @file_get_contents(odata_load_progress_path_for_token($token));
         $payload = is_string($raw) ? json_decode($raw, true) : null;
         if (!is_array($payload) || empty(odata_load_progress_mark_stale($payload, time())['stale'])) {
             return false;
@@ -2494,10 +2666,7 @@ function odata_load_progress_release_if_stale(string $token): bool
         demeter_active_load_error_by_token($token);
 
         return true;
-    } finally {
-        @flock($handle, LOCK_UN);
-        fclose($handle);
-    }
+    });
 }
 
 function odata_send_load_progress_json(): void

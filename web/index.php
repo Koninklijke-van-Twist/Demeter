@@ -531,6 +531,11 @@ if (($_GET['action'] ?? '') === 'load_month') {
         // Sterft deze worker (fatal, parse error tijdens een deploy, timeout), zet de voortgang dan op
         // 'error' i.p.v. hem eeuwig op 'running' te laten staan.
         register_shutdown_function(static function (): void {
+            // Altijd afmelden als lopende worker (ook na een fatal/timeout): de stale-detectie weet dan
+            // dat deze request klaar is en wacht niet meer op zijn heartbeat.
+            if (function_exists('odata_load_progress_worker_end')) {
+                odata_load_progress_worker_end();
+            }
             $error = error_get_last();
             $fatalTypes = [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR];
             if (!$error || !in_array((int) ($error['type'] ?? 0), $fatalTypes, true)) {
@@ -583,6 +588,12 @@ if (($_GET['action'] ?? '') === 'load_month') {
             odata_set_active_load_progress_token($catchUpToken);
             odata_load_progress_begin($catchUpToken, 4);
             demeter_active_load_heartbeat($company, $costCenter, $catchUpToken);
+        }
+
+        // Aanmelden als lopende worker: zolang deze request leeft (heartbeat tijdens OData-calls,
+        // lock-wachten en zware stappen) toont de voortgang geen 'vastgelopen', ook bij een trage stap.
+        if ($chunkProgressToken !== null) {
+            odata_load_progress_worker_begin($chunkProgressToken, 'week ' . $yearWeek);
         }
 
         auth_set_current_company_context($company, 300);
