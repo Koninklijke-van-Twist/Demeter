@@ -69,5 +69,40 @@ function build (responses) {
     check(fetchFn.includes("createTransientWeekResponseError(yearWeek, fetchError"), 'netwerkfout = haperend');
     check(fetchFn.includes("params.set('load_token', loadToken)"), 'retry gebruikt dezelfde load_token');
 
+    // Fetch-niveau: de echte fetchHistoryWeek bouwt bij elke retry de URL opnieuw op; alle pogingen
+    // moeten dezelfde load_token (en week) meesturen.
+    {
+        const urls = [];
+        const replies = [
+            function () { return Promise.reject(new TypeError('Failed to fetch')); },
+            function () { return Promise.resolve({ status: 502, ok: false, text: function () { return Promise.resolve('<html>Bad Gateway</html>'); } }); },
+            function () { return Promise.resolve({ status: 200, ok: true, text: function () { return Promise.resolve('{"ok":true,"rows":[]'); } }); },
+            function () { return Promise.resolve({ status: 200, ok: true, text: function () { return Promise.resolve('{"ok":true,"rows":[],"year_week":"2026-W12"}'); } }); }
+        ];
+        const fetchFactory = new Function('urls', 'replies', classifiers + block + fetchFn + `
+            const payload = { company: 'Testbedrijf' };
+            const loadedCostCenter = '70';
+            const asyncLoadConfig = { force_full: true };
+            const callTimeLogSession = '';
+            const window = { setTimeout: function () { return 1; }, clearTimeout: function () {} };
+            function getPendingLoadProgressToken () { return 'tok-123'; }
+            function logDemeterODataFailure () {}
+            function updateHistoryLoadNote () {}
+            function waitForMs () { return Promise.resolve(); }
+            function fetch (url) { urls.push(url); return replies.shift()(); }
+            return fetchHistoryWeekWithRetry;
+        `);
+        const run = fetchFactory(urls, replies);
+        let result = null;
+        let fetchError = null;
+        try { result = await run('2026-W12', 3, 52); } catch (e) { fetchError = e; }
+        const tokens = urls.map(function (u) { return new URLSearchParams(u.split('?')[1]).get('load_token'); });
+        const weeks = urls.map(function (u) { return new URLSearchParams(u.split('?')[1]).get('year_week'); });
+        check(fetchError === null && result && result.ok === true, 'fetch-niveau: na 3 haperende antwoorden lukt poging 4');
+        check(urls.length === 4, 'fetch-niveau: 4 requests (' + urls.length + ')');
+        check(tokens.every(function (t) { return t === 'tok-123'; }), 'fetch-niveau: elke retry stuurt dezelfde load_token (' + tokens.join(',') + ')');
+        check(weeks.every(function (w) { return w === '2026-W12'; }), 'fetch-niveau: elke retry vraagt dezelfde week');
+    }
+
     process.exit(failures === 0 ? 0 : 1);
 })();
