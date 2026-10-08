@@ -633,7 +633,8 @@ class ProjectFinanceService
                     'Component_No' => '',
                     'Sub_Entity_Description' => '',
                     'Job_Dimension_1_Value' => '',
-                    'Status' => 'Open',
+                    // Geen echte werkorder: niet als 'Open' meetellen.
+                    'Status' => 'Geen werkorder',
                     'KVT_Document_Status' => '',
                     'Memo' => '',
                     'Memo_Internal_Use_Only' => '',

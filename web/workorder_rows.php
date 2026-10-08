@@ -9,6 +9,9 @@ require_once __DIR__ . '/bc_fetch/workorder_state_cache.php';
 require_once __DIR__ . '/bc_fetch/odata_select.php';
 require_once __DIR__ . '/bc_fetch/projectposten_workorders.php';
 
+/** Status voor rijen uit projectposten zonder werkorder (bv. 'Import SAP'): geen echte werkorder. */
+const DEMETER_POSTING_ONLY_ROW_STATUS = 'Geen werkorder';
+
 /**
  * Label → BC-veldnaam voor werkorder-memo's.
  *
@@ -384,20 +387,36 @@ function demeter_build_single_workorder_row(
 
     $rowKey = demeter_workorder_row_key($jobNo, $normalizedPopupWorkorderSourceKey);
 
+    // Klant: Bill-to, met terugval op Sell-to (bv. werkorders waar Bill-to in BC leeg is).
+    $customerId = trim((string) ($workorder['Bill_to_Customer_No'] ?? ''));
+    $customerName = trim((string) ($workorder['Bill_to_Name'] ?? ''));
+    if ($customerName === '' && $customerId === '') {
+        $customerId = trim((string) ($workorder['Sell_to_Customer_No'] ?? ''));
+        $customerName = trim((string) ($workorder['Sell_to_Name'] ?? ($workorder['Sell_to_Customer_Name'] ?? '')));
+    } elseif ($customerName === '') {
+        $customerName = trim((string) ($workorder['Sell_to_Name'] ?? ($workorder['Sell_to_Customer_Name'] ?? '')));
+    }
+
+    // 'Import SAP'-posten zonder werkorder zijn geen werkorder: eigen status, niet 'Open'
+    // (ze telden als ~1900 extra open werkorders in KvT kostenplaats 70).
+    $rowStatus = $isImportSapPseudoRow
+        ? DEMETER_POSTING_ONLY_ROW_STATUS
+        : (string) ($workorder['Status'] ?? '');
+
     return [
         'Row_Key' => $rowKey,
         'Bc_No' => (string) ($workorder['No'] ?? ''),
         'No' => $displayWorkorderNo,
         'Order_Type' => $displayOrderType,
         'Contract_No' => (string) ($workorder['Contract_No'] ?? ''),
-        'Customer_Id' => (string) ($workorder['Bill_to_Customer_No'] ?? ''),
+        'Customer_Id' => $customerId,
         'Start_Date' => (string) ($workorder['Start_Date'] ?? ''),
         'Component_No' => $equipmentNumber,
         'Component_Description' => (string) ($workorder['Component_Description'] ?? ''),
         'Equipment_Number' => $equipmentNumber,
         'Equipment_Name' => (string) ($workorder['Sub_Entity_Description'] ?? ''),
         'Description' => (string) ($workorder['Task_Description'] ?? ''),
-        'Customer_Name' => (string) ($workorder['Bill_to_Name'] ?? ''),
+        'Customer_Name' => $customerName,
         'Actual_Costs' => $actualCosts,
         'Total_Revenue' => $totalRevenue,
         'Invoice_Costs' => null,
@@ -407,7 +426,8 @@ function demeter_build_single_workorder_row(
         'Invoiced_Total' => $projectInvoicedTotal,
         'Actual_Total' => $actualTotal,
         'Cost_Center' => (string) ($workorder['Job_Dimension_1_Value'] ?? ''),
-        'Status' => (string) ($workorder['Status'] ?? ''),
+        'Status' => $rowStatus,
+        'Is_Posting_Only' => $isImportSapPseudoRow,
         'Document_Status' => (string) ($workorder['KVT_Document_Status'] ?? ''),
         'Notes' => $notesParts,
         'Notes_Search' => $notesSearch,
@@ -476,6 +496,9 @@ function demeter_merge_month_rows_into_existing(array $rowsByKey, array $monthRo
                 $existing[$field] = $monthRow[$field];
             }
         }
+        if (!empty($monthRow['Is_Posting_Only'])) {
+            $existing['Is_Posting_Only'] = true;
+        }
 
         if (!empty($monthRow['Memos_Loaded'])) {
             $existing['Notes'] = is_array($monthRow['Notes'] ?? null) ? $monthRow['Notes'] : [];
@@ -540,6 +563,9 @@ function demeter_coalesce_display_rows_by_business_key(array $rowsByKey, array $
             if (array_key_exists($field, $row) && trim((string) $row[$field]) !== '') {
                 $existing[$field] = $row[$field];
             }
+        }
+        if (!empty($row['Is_Posting_Only'])) {
+            $existing['Is_Posting_Only'] = true;
         }
 
         if (is_array($row['Invoice_Ids'] ?? null) && $row['Invoice_Ids'] !== []) {

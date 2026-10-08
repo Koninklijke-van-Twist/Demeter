@@ -17,6 +17,7 @@
     const demeterModal = window.DemeterModal;
     const payload = window.workorderOverviewData || {};
     let rows = Array.isArray(payload.rows) ? payload.rows.slice() : [];
+    rows.forEach(normalizePostingOnlyRow);
     const invoiceDetailsById = payload && typeof payload.invoice_details_by_id === 'object' && payload.invoice_details_by_id !== null
         ? payload.invoice_details_by_id
         : {};
@@ -124,6 +125,8 @@
     const rowLoadStates = new Map();
     const rowDomByKey = new Map();
     const monthScanEmptyStopCount = Number(asyncLoadConfig.empty_stop_count || 12);
+    // Tekst tijdens de backfill voorbij de geschatte periode (leeg = normale stap-voortgang).
+    var historyBackfillNote = '';
     const historyParallelWeekLoads = Math.max(1, Number(asyncLoadConfig.parallel_week_loads || 2));
     let historyWeeksTotal = Number(asyncLoadConfig.history_weeks_total || 0) || null;
     const refreshProgressTotalSteps = Math.max(0, Number(asyncLoadConfig.progress_total_steps || 0));
@@ -252,7 +255,7 @@
     summary.className = 'summary';
     let summaryPrefix = getInvoiceFilterSummaryPrefix(invoiceFilter);
 
-    summary.textContent = summaryPrefix + rows.filter(matchesInvoiceFilter).length;
+    updateSummaryCount();
     summaryRow.appendChild(summary);
 
     if (loadedCostCenter !== '')
@@ -407,6 +410,10 @@
             .catch(function (refreshError)
             {
                 console.error(refreshError);
+                // Ook als de memo's mislukken: de weken zijn geladen, dus geen load_token of
+                // blijvende 'Memo's ophalen...' meer.
+                stripLoadTokenFromUrl();
+                updateHistoryLoadNote('Weken geladen; memo\'s ophalen mislukt. Herlaad de pagina om de memo\'s opnieuw te proberen.');
                 setRefreshNowButtonDisabled(false, '');
             });
     }
@@ -1114,6 +1121,10 @@
             return;
         }
 
+        // De week-loop is klaar: load_token hoort niet meer in de adresbalk, ook niet als het
+        // memo-verzoek hierna faalt of blijft hangen. Het token zelf komt uit het verborgen
+        // veld / de config (getPendingLoadProgressToken), niet uit de URL.
+        stripLoadTokenFromUrl();
         updateHistoryLoadNote('Memo\'s ophalen...');
         const params = new URLSearchParams();
         params.set('action', 'refresh_all_memos');
@@ -1635,7 +1646,9 @@
     {
         if (asyncLoadConfig.enabled || hitchhikeLoadRunning)
         {
-            let noteText = text;
+            // Voorbij de geschatte periode is 'Stap 208 van 208 (100%)' misleidend: dan de
+            // backfill-tekst tonen (welke week, en hoe ver hij nog uiterlijk teruggaat).
+            let noteText = historyBackfillNote !== '' ? historyBackfillNote : text;
             const callText = String(currentCallLabel || '').trim();
             if (callText !== '')
             {
@@ -3637,14 +3650,58 @@
         refreshStatusFilters();
     }
 
+    // Rijen uit projectposten zonder werkorder (bv. 'Import SAP') zijn geen werkorder. Oudere caches
+    // hebben nog geen Is_Posting_Only en status 'Open'; herkennen op het pseudo-nummer.
+    function isPostingOnlyRow (row)
+    {
+        if (!row || typeof row !== 'object')
+        {
+            return false;
+        }
+        if (row.Is_Posting_Only === true)
+        {
+            return true;
+        }
+
+        return String(row.No || '').trim().toLowerCase() === 'import sap'
+            && String(row.Job_Task_No || '').trim() === '';
+    }
+
+    function normalizePostingOnlyRow (row)
+    {
+        if (!isPostingOnlyRow(row))
+        {
+            return row;
+        }
+        row.Is_Posting_Only = true;
+        if (normalizeStatus(row.Status || '') === 'open' || String(row.Status || '').trim() === '')
+        {
+            row.Status = 'Geen werkorder';
+        }
+
+        return row;
+    }
+
     function updateSummaryCount ()
     {
-        const count = rows.filter(function (row)
+        let count = 0;
+        let postingOnlyCount = 0;
+        for (const row of rows)
         {
-            return matchesInvoiceFilter(row) && (selectedCostCenter === 'all' || matchesSelectedCostCenter(row));
-        }).length;
+            if (!matchesInvoiceFilter(row) || !(selectedCostCenter === 'all' || matchesSelectedCostCenter(row)))
+            {
+                continue;
+            }
+            if (isPostingOnlyRow(row))
+            {
+                postingOnlyCount++;
+                continue;
+            }
+            count++;
+        }
 
-        summary.textContent = summaryPrefix + count;
+        summary.textContent = summaryPrefix + count
+            + (postingOnlyCount > 0 ? (' (+' + postingOnlyCount + ' regels zonder werkorder)') : '');
     }
 
     function getVisibleSortedRows ()
@@ -4211,7 +4268,7 @@
         const amount = Number(value || 0);
         if (amount === 0)
         {
-            return '€ 0';
+            return currencyFormatter.format(0);
         }
 
         return formatSignedCurrency(amount);
@@ -4222,7 +4279,7 @@
         const amount = Number(value || 0);
         if (amount === 0)
         {
-            return '€ 0';
+            return currencyFormatter.format(0);
         }
 
         return currencyFormatter.format(amount);
@@ -5896,6 +5953,7 @@
         const touchedRows = [];
         for (const monthRow of monthRows)
         {
+            normalizePostingOnlyRow(monthRow);
             const rowKey = String(monthRow.Row_Key || '').trim();
             if (rowKey === '')
             {
@@ -6069,14 +6127,26 @@
         return ' (' + String(percent) + '%)';
     }
 
+    // Backfill voorbij de geschatte periode: de scan stopt pas na monthScanEmptyStopCount lege
+    // weken op rij (of bij stop_before_month). Toon hoeveel weken dat nog uiterlijk is.
+    function buildHistoryBackfillNote (weekToLoad, monthScan)
+    {
+        const stopCount = monthScanEmptyStopCount > 0 ? monthScanEmptyStopCount : 52;
+        const emptyInRow = Math.max(0, Number((monthScan && monthScan.consecutive_empty) || 0));
+        const remaining = Math.max(0, stopCount - emptyInRow);
+
+        return 'Oudere historie nalopen: ' + weekToLoad + ' · stopt na ' + stopCount
+            + ' lege weken op rij (nu ' + emptyInRow + ' leeg, nog uiterlijk ' + remaining + ' weken)';
+    }
+
     function buildHistoryLoadNote (weekToLoad, monthScan, weeksCompleted, isFirstWeek)
     {
         const estimatedWeeks = resolveHistoryWeeksTotal(monthScan);
         if (!isFirstWeek && estimatedWeeks && weeksCompleted >= estimatedWeeks)
         {
-            // Bij een lege cache is het totaal een schatting (52 weken); de scan loopt door tot
-            // 52 lege weken op rij, dus oudere historie kan daarna nog komen.
-            return 'Geschatte periode klaar, oudere historie laadt nog: ' + weekToLoad + '...';
+            historyBackfillNote = buildHistoryBackfillNote(weekToLoad, monthScan);
+
+            return historyBackfillNote;
         }
 
         const prefix = isFirstWeek
@@ -6397,6 +6467,7 @@
 
         hidePageLoader();
         historyLoadRunning = true;
+        historyBackfillNote = '';
         setProjectTotalsIncompleteState('loading');
         startBackgroundLoadProgressPolling();
         let weekBatch = [currentWeek];
@@ -6516,6 +6587,7 @@
         catch (historyError)
         {
             logDemeterODataFailure('load_month chain failed', historyError);
+            historyBackfillNote = '';
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             stopPageLoaderProgress();
             historyLoadRunning = false;
@@ -6524,8 +6596,9 @@
             return false;
         }
 
-        updateHistoryLoadNote('');
+        historyBackfillNote = '';
         stopPageLoaderProgress();
+        updateHistoryLoadNote('');
         historyLoadRunning = false;
         setProjectTotalsIncompleteState('');
 
