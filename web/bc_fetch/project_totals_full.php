@@ -24,7 +24,8 @@ require_once __DIR__ . '/../project_finance.php';
 require_once __DIR__ . '/odata_select.php';
 
 if (!defined('DEMETER_PROJECT_TOTALS_FULL_VERSION')) {
-    define('DEMETER_PROJECT_TOTALS_FULL_VERSION', 1);
+    // 2: ook werkordertotalen (wo_totals); een bestand van versie 1 wordt opnieuw opgebouwd.
+    define('DEMETER_PROJECT_TOTALS_FULL_VERSION', 2);
 }
 if (!defined('DEMETER_PROJECT_TOTALS_FULL_MAX_AGE_SECONDS')) {
     define('DEMETER_PROJECT_TOTALS_FULL_MAX_AGE_SECONDS', 180);
@@ -65,13 +66,21 @@ function demeter_project_totals_full_read(string $company): ?array
         return null;
     }
     $decoded = json_decode((string) @file_get_contents($path), true);
-    if (!is_array($decoded) || (int) ($decoded['version'] ?? 0) !== DEMETER_PROJECT_TOTALS_FULL_VERSION
+    $version = (int) ($decoded['version'] ?? 0);
+    // Versie 1 (alleen projecttotalen) blijft bruikbaar voor de projecttotalen tot de nieuwe opbouw klaar is.
+    if (!is_array($decoded) || $version < 1 || $version > DEMETER_PROJECT_TOTALS_FULL_VERSION
         || (int) ($decoded['built_at'] ?? 0) <= 0 || !is_array($decoded['totals'] ?? null)
     ) {
         return null;
     }
 
     return $decoded;
+}
+
+/** Bestand van de huidige versie (incl. werkordertotalen)? Anders opnieuw opbouwen. */
+function demeter_project_totals_full_is_current(?array $state): bool
+{
+    return is_array($state) && (int) ($state['version'] ?? 0) === DEMETER_PROJECT_TOTALS_FULL_VERSION;
 }
 
 function demeter_project_totals_full_write(string $company, array $state): bool
@@ -116,6 +125,22 @@ function demeter_project_totals_full_add_rows(array $state, array $postenRows, s
         $state['totals'][$key]['costs'] = round((float) $state['totals'][$key]['costs'] + (float) ($values['costs'] ?? 0.0), 2);
         $state['totals'][$key]['revenue'] = round((float) $state['totals'][$key]['revenue'] + (float) ($values['revenue'] ?? 0.0), 2);
     }
+    // Werkordertotalen over alle posten van de werkorder (ongeacht boekdatum of kostenplaats van de post),
+    // sleutel 'job|werkorder' zoals de schermrijen (ProjectFinanceService: kosten Gebruik, opbrengst Verkoop).
+    if (!is_array($state['wo_totals'] ?? null)) {
+        $state['wo_totals'] = [];
+    }
+    foreach (is_array($finance['workorder_totals_by_project_and_number'] ?? null) ? $finance['workorder_totals_by_project_and_number'] : [] as $composite => $values) {
+        $key = strtolower(trim((string) $composite));
+        if ($key === '' || $key === '|' || !is_array($values)) {
+            continue;
+        }
+        if (!isset($state['wo_totals'][$key])) {
+            $state['wo_totals'][$key] = ['costs' => 0.0, 'revenue' => 0.0];
+        }
+        $state['wo_totals'][$key]['costs'] = round((float) $state['wo_totals'][$key]['costs'] + (float) ($values['costs'] ?? 0.0), 2);
+        $state['wo_totals'][$key]['revenue'] = round((float) $state['wo_totals'][$key]['revenue'] + (float) ($values['revenue'] ?? 0.0), 2);
+    }
     foreach ($postenRows as $row) {
         $entryNo = is_array($row) ? (int) ($row['Entry_No'] ?? 0) : 0;
         if ($entryNo > (int) ($state['max_entry_no'] ?? 0)) {
@@ -150,6 +175,9 @@ function demeter_project_totals_full_sync(string $company, array $transport, boo
     if ($existing === null && !$allowFull) {
         return ['status' => 'needs_full'];
     }
+    if ($existing !== null && $allowFull && !demeter_project_totals_full_is_current($existing)) {
+        $force = true; // oude versie: nu volledig opnieuw opbouwen
+    }
     if ($existing !== null && !$force && (time() - (int) ($existing['synced_at'] ?? 0)) < DEMETER_PROJECT_TOTALS_FULL_MAX_AGE_SECONDS) {
         return ['status' => 'fresh'];
     }
@@ -171,6 +199,9 @@ function demeter_project_totals_full_sync(string $company, array $transport, boo
     try {
         // Opnieuw lezen onder de lock (een andere schrijver kan net klaar zijn).
         $existing = demeter_project_totals_full_read($company);
+        if ($existing !== null && $allowFull && !demeter_project_totals_full_is_current($existing)) {
+            $existing = null; // oude versie: volledige opbouw; het oude bestand blijft tot de nieuwe klaar is
+        }
         $fetch = $transport['fetch'];
         $select = demeter_project_totals_full_select();
         $rowsRead = 0;
@@ -184,7 +215,7 @@ function demeter_project_totals_full_sync(string $company, array $transport, boo
             @ignore_user_abort(true);
             $last = $fetch('ProjectPosten', ['$select' => 'Entry_No', '$orderby' => 'Entry_No desc', '$top' => '1']);
             $maxInBc = (int) ($last[0]['Entry_No'] ?? 0);
-            $state = ['version' => DEMETER_PROJECT_TOTALS_FULL_VERSION, 'company' => $company, 'max_entry_no' => 0, 'built_at' => 0, 'synced_at' => 0, 'totals' => []];
+            $state = ['version' => DEMETER_PROJECT_TOTALS_FULL_VERSION, 'company' => $company, 'max_entry_no' => 0, 'built_at' => 0, 'synced_at' => 0, 'totals' => [], 'wo_totals' => []];
             for ($from = 0; $from < $maxInBc; $from += DEMETER_PROJECT_TOTALS_FULL_BLOCK) {
                 $rows = $fetch('ProjectPosten', [
                     '$select' => $select,
@@ -299,7 +330,7 @@ function demeter_project_totals_full_ensure(string $company, array $transport, f
     if (!demeter_project_totals_full_enabled()) {
         return ['available' => false, 'status' => 'disabled'];
     }
-    if (demeter_project_totals_full_read($company) !== null) {
+    if (demeter_project_totals_full_is_current(demeter_project_totals_full_read($company))) {
         return ['available' => true, 'status' => 'exists'];
     }
     $result = demeter_project_totals_full_sync($company, $transport, true);
@@ -308,7 +339,7 @@ function demeter_project_totals_full_ensure(string $company, array $transport, f
         $deadline = microtime(true) + max(0.0, $waitSeconds);
         $lock = @fopen(demeter_project_totals_full_path($company) . '.lock', 'c');
         while ($lock !== false && microtime(true) < $deadline) {
-            if (demeter_project_totals_full_read($company) !== null) {
+            if (demeter_project_totals_full_is_current(demeter_project_totals_full_read($company))) {
                 break;
             }
             if (flock($lock, LOCK_EX | LOCK_NB)) {
@@ -320,13 +351,68 @@ function demeter_project_totals_full_ensure(string $company, array $transport, f
         if ($lock !== false) {
             fclose($lock);
         }
-        if (demeter_project_totals_full_read($company) === null) {
+        if (!demeter_project_totals_full_is_current(demeter_project_totals_full_read($company))) {
             // De andere opbouw is mislukt of nog bezig: nu zelf (als de lock vrij is).
             $result = demeter_project_totals_full_sync($company, $transport, true);
         }
     }
-    $available = demeter_project_totals_full_read($company) !== null;
+    $available = demeter_project_totals_full_is_current(demeter_project_totals_full_read($company));
 
     return ['available' => $available, 'status' => (string) ($result['status'] ?? '')] + (isset($result['error']) ? ['error' => (string) $result['error']] : []);
 }
 
+/**
+ * Werkordertotalen (kosten/opbrengst/resultaat) over ALLE posten van de werkorder op display-rijen.
+ *
+ * Waarom: de weekcache telt werkorderbedragen per geladen week op en neemt per week alleen posten van de
+ * eigen kostenplaats mee. Een inkoopfactuur met kostenplaats 20 op een werkorder van 70 (WO2606204),
+ * een verkoopfactuur met kostenplaats 99 (WO2606479) of een achteraf gedateerde post in een al gelezen
+ * week (PI12608901 op WO2609914, boekdatum 01-09) viel daardoor weg. Sleutel 'job|werkorder' zoals
+ * demeter_apply_workorder_totals_delta_to_display_rows (Workorder_Source_Key, anders Job_Task_No, anders No).
+ * Rijen zonder posten in het bestand blijven ongewijzigd.
+ *
+ * Alleen voor absolute rijen (pagina-render, catch-up met replace); NIET voor weekrijen die de browser
+ * bij elkaar optelt (gewone load_month), anders telt hij dubbel.
+ */
+function demeter_project_totals_full_apply_wo_to_rows(string $company, array $rowsByKey): array
+{
+    if (!demeter_project_totals_full_enabled()) {
+        return $rowsByKey;
+    }
+    $state = demeter_project_totals_full_read($company);
+    if (!demeter_project_totals_full_is_current($state)) {
+        return $rowsByKey; // bestand van een oude versie heeft geen (volledige) werkordertotalen
+    }
+    $woTotals = is_array($state['wo_totals'] ?? null) ? $state['wo_totals'] : [];
+    if ($woTotals === []) {
+        return $rowsByKey;
+    }
+    foreach ($rowsByKey as $rowKey => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $job = strtolower(trim((string) ($row['Job_No'] ?? '')));
+        $sourceKey = strtolower(trim((string) ($row['Workorder_Source_Key'] ?? '')));
+        if ($sourceKey === '') {
+            $sourceKey = strtolower(trim((string) ($row['Job_Task_No'] ?? '')));
+        }
+        if ($sourceKey === '') {
+            $sourceKey = strtolower(trim((string) ($row['No'] ?? '')));
+        }
+        if ($job === '' || $sourceKey === '' || !isset($woTotals[$job . '|' . $sourceKey])) {
+            continue;
+        }
+        $values = $woTotals[$job . '|' . $sourceKey];
+        $costs = round((float) ($values['costs'] ?? 0.0), 2);
+        $revenue = round((float) ($values['revenue'] ?? 0.0), 2);
+        if (abs((float) ($row['Actual_Costs'] ?? 0.0) - $costs) < 0.005 && abs((float) ($row['Total_Revenue'] ?? 0.0) - $revenue) < 0.005) {
+            continue; // al goed: cel niet aanraken
+        }
+        $row['Actual_Costs'] = $costs;
+        $row['Total_Revenue'] = $revenue;
+        $row['Actual_Total'] = function_exists('finance_calculate_result') ? finance_calculate_result($revenue, $costs) : round($revenue - $costs, 2);
+        $rowsByKey[$rowKey] = $row;
+    }
+
+    return $rowsByKey;
+}
