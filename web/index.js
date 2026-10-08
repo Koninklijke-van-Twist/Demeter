@@ -1647,7 +1647,7 @@
         if (asyncLoadConfig.enabled || hitchhikeLoadRunning)
         {
             // Voorbij de geschatte periode is 'Stap 208 van 208 (100%)' misleidend: dan de
-            // backfill-tekst tonen (welke week, en hoe ver hij nog uiterlijk teruggaat).
+            // backfill-tekst tonen (welke week, en hoeveel lege weken op rij nog nodig zijn).
             let noteText = historyBackfillNote !== '' ? historyBackfillNote : text;
             const callText = String(currentCallLabel || '').trim();
             if (callText !== '')
@@ -2883,7 +2883,15 @@
         }
 
         const taskLineCount = taskLineKeys.size;
-        const workorderCount = projectRows.length;
+        // Zelfde telling als updateSummaryCount(): 'Import SAP'-regels zonder werkorder tellen niet mee.
+        let workorderCount = 0;
+        for (const row of projectRows)
+        {
+            if (!isPostingOnlyRow(row))
+            {
+                workorderCount++;
+            }
+        }
         const projectLabel = normalizeSortValue(projectKey);
 
         if (projectLabel === '')
@@ -6128,7 +6136,8 @@
     }
 
     // Backfill voorbij de geschatte periode: de scan stopt pas na monthScanEmptyStopCount lege
-    // weken op rij (of bij stop_before_month). Toon hoeveel weken dat nog uiterlijk is.
+    // weken op rij (of bij stop_before_month). Toon hoeveel lege weken op rij er nog nodig zijn;
+    // dat is geen maximum aantal te laden weken, want een week met posten zet de teller weer op 0.
     function buildHistoryBackfillNote (weekToLoad, monthScan)
     {
         const stopCount = monthScanEmptyStopCount > 0 ? monthScanEmptyStopCount : 52;
@@ -6136,7 +6145,7 @@
         const remaining = Math.max(0, stopCount - emptyInRow);
 
         return 'Oudere historie nalopen: ' + weekToLoad + ' · stopt na ' + stopCount
-            + ' lege weken op rij (nu ' + emptyInRow + ' leeg, nog uiterlijk ' + remaining + ' weken)';
+            + ' lege weken op rij (nu ' + emptyInRow + ' op rij leeg, nog ' + remaining + ' lege weken op rij nodig)';
     }
 
     function buildHistoryLoadNote (weekToLoad, monthScan, weeksCompleted, isFirstWeek)

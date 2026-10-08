@@ -36,6 +36,12 @@ api.updateSummaryCount();
 check(summary.textContent === 'Werkorders (beide): 2 (+2 regels zonder werkorder)', 'telling: ' + summary.textContent);
 check(!api.isPostingOnlyRow({ No: 'Import SAP', Job_Task_No: 'WO9' }), 'rij met Job_Task_No is geen pseudo-rij');
 
+// Projectgroep-samenvatting: 'Werkorders' telt geen 'Import SAP'-regels.
+const groupBlock = slice('        const taskLineCount = taskLineKeys.size;', '        const projectLabel = normalizeSortValue(projectKey);');
+const countWorkorders = new Function('projectRows', 'taskLineKeys', 'isPostingOnlyRow', groupBlock + '\nreturn workorderCount;');
+check(countWorkorders(rows.filter(function (r) { return r.Row_Key.indexOf('prj1|') === 0; }), new Set(), api.isPostingOnlyRow) === 2, 'projectgroep prj1: 2 werkorders (Import SAP-regel telt niet)');
+check(countWorkorders(rows.filter(function (r) { return r.Row_Key.indexOf('prj2|') === 0; }), new Set(), api.isPostingOnlyRow) === 0, 'projectgroep met alleen Import SAP: 0 werkorders');
+
 // Init en week-merge normaliseren.
 check(/let rows = Array\.isArray\(payload\.rows\) \? payload\.rows\.slice\(\) : \[\];\n    rows\.forEach\(normalizePostingOnlyRow\);/.test(src), 'init normaliseert payload.rows');
 const merge = slice('    function mergeMonthChunk (chunk, options)', '    function yieldToUi ()');
@@ -47,7 +53,7 @@ const noteApi = new Function('monthScanEmptyStopCount', 'resolveHistoryWeeksTota
     'var historyBackfillNote = "";\n' + noteBlock + '\nreturn { buildHistoryLoadNote, get: function () { return historyBackfillNote; } };')(
     52, function () { return 52; }, function () { return ' (50%)'; });
 const beyond = noteApi.buildHistoryLoadNote('2024-W39', { consecutive_empty: 20 }, 60, false);
-check(beyond === 'Oudere historie nalopen: 2024-W39 · stopt na 52 lege weken op rij (nu 20 leeg, nog uiterlijk 32 weken)', 'backfill-tekst: ' + beyond);
+check(beyond === 'Oudere historie nalopen: 2024-W39 · stopt na 52 lege weken op rij (nu 20 op rij leeg, nog 32 lege weken op rij nodig)', 'backfill-tekst: ' + beyond);
 check(noteApi.get() === beyond, 'backfill-tekst onthouden voor de voortgangs-poller');
 check(noteApi.buildHistoryLoadNote('2026-W30', { consecutive_empty: 0 }, 10, false) === 'Oudere week laden: 2026-W30... (50%)', 'binnen de schatting: normale tekst');
 const apply = slice('    function applyLoadProgressToUi (text, percent, currentCallLabel)', '    function startBackgroundLoadProgressPolling ()');

@@ -388,13 +388,21 @@ function demeter_build_single_workorder_row(
     $rowKey = demeter_workorder_row_key($jobNo, $normalizedPopupWorkorderSourceKey);
 
     // Klant: Bill-to, met terugval op Sell-to (bv. werkorders waar Bill-to in BC leeg is).
+    // Nummer en naam komen altijd uit hetzelfde paar: zonder Bill-to-naam valt het hele paar
+    // terug op Sell-to (nooit een Bill-to-nummer met een Sell-to-naam).
     $customerId = trim((string) ($workorder['Bill_to_Customer_No'] ?? ''));
     $customerName = trim((string) ($workorder['Bill_to_Name'] ?? ''));
-    if ($customerName === '' && $customerId === '') {
-        $customerId = trim((string) ($workorder['Sell_to_Customer_No'] ?? ''));
-        $customerName = trim((string) ($workorder['Sell_to_Name'] ?? ($workorder['Sell_to_Customer_Name'] ?? '')));
-    } elseif ($customerName === '') {
-        $customerName = trim((string) ($workorder['Sell_to_Name'] ?? ($workorder['Sell_to_Customer_Name'] ?? '')));
+    if ($customerName === '') {
+        $sellToId = trim((string) ($workorder['Sell_to_Customer_No'] ?? ''));
+        $sellToName = trim((string) ($workorder['Sell_to_Name'] ?? ''));
+        if ($sellToName === '') {
+            $sellToName = trim((string) ($workorder['Sell_to_Customer_Name'] ?? ''));
+        }
+        if ($sellToId !== '' || $sellToName !== '') {
+            $customerId = $sellToId;
+            $customerName = $sellToName;
+        }
+        // Anders: Bill-to-nummer zonder naam laten staan (geen naam van een andere klant).
     }
 
     // 'Import SAP'-posten zonder werkorder zijn geen werkorder: eigen status, niet 'Open'

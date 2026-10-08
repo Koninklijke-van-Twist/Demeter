@@ -68,6 +68,15 @@ check(($realRows[0]['Customer_Name'] ?? '') === 'Testklant B.V.', 'klantnaam val
 check(($realRows[0]['Customer_Id'] ?? '') === 'C0001', 'klantnummer valt terug op Sell_to_Customer_No');
 $withBill = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => 'Factuurklant'])]], 'both')['rows'][0];
 check($withBill['Customer_Name'] === 'Factuurklant' && $withBill['Customer_Id'] === 'B0002', 'Bill-to blijft voorrang houden');
+// Bill-to-nummer zonder Bill-to-naam: nummer en naam samen van Sell-to (nooit Bill-to-nr + Sell-to-naam).
+$billNoName = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => ''])]], 'both')['rows'][0];
+check($billNoName['Customer_Id'] === 'C0001' && $billNoName['Customer_Name'] === 'Testklant B.V.', 'Bill-to zonder naam -> Sell-to-paar: ' . $billNoName['Customer_Id'] . ' ' . $billNoName['Customer_Name']);
+// Zoals WO2610333: Bill-to leeg, Sell-to 8262 SPIE BUILDING SOLUTIONS B.V.
+$spie = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Sell_to_Customer_No' => '8262', 'Sell_to_Name' => 'SPIE BUILDING SOLUTIONS B.V.'])]], 'both')['rows'][0];
+check($spie['Customer_Id'] === '8262' && $spie['Customer_Name'] === 'SPIE BUILDING SOLUTIONS B.V.', 'Sell-to-paar 8262 SPIE: ' . $spie['Customer_Id'] . ' ' . $spie['Customer_Name']);
+// Bill-to-nummer zonder naam en geen Sell-to: nummer blijft, naam leeg.
+$billOnly = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => '', 'Sell_to_Customer_No' => '', 'Sell_to_Name' => ''])]], 'both')['rows'][0];
+check($billOnly['Customer_Id'] === 'B0002' && $billOnly['Customer_Name'] === '', 'Bill-to-nummer zonder naam en zonder Sell-to: naam blijft leeg');
 
 // Dezelfde week twee keer samenvoegen: dezelfde Row_Keys, dus geen extra rijen.
 $display = demeter_merge_display_rows_for_month_chunk([], $rows, false, []);
