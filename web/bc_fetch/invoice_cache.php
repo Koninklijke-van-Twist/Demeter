@@ -10,8 +10,12 @@
 require_once __DIR__ . '/helpers.php';
 require_once __DIR__ . '/../project_finance.php';
 
-/** v3: geboekte creditnota's (GeboekteVerkoopCreditnotaRegels) als negatieve bron. */
-const DEMETER_INVOICE_CACHE_VERSION = 3;
+/**
+ * v3: geboekte creditnota's (GeboekteVerkoopCreditnotaRegels) als negatieve bron.
+ * v4: dedup op Line_No i.p.v. regeltekst (identieke regels werden weggegooid → te lage totalen);
+ *     mislukte factuurbronnen worden niet meer als "0 gefactureerd" gecachet. Oude totalen zijn fout → herbouw.
+ */
+const DEMETER_INVOICE_CACHE_VERSION = 4;
 
 /**
  * Pad naar de factuurcache-directory.
@@ -154,7 +158,7 @@ function demeter_invoice_cache_merge_fetched(array &$cache, array $fetched, arra
             ? $invoiceDetailsById[$invoiceId]['Lines']
             : [];
         $newLines = is_array($details['Lines'] ?? null) ? $details['Lines'] : [];
-        $invoiceDetailsById[$invoiceId]['Lines'] = array_values(array_merge($existingLines, $newLines));
+        $invoiceDetailsById[$invoiceId]['Lines'] = demeter_invoice_cache_merge_lines($existingLines, $newLines);
 
         $existingSources = is_array($invoiceDetailsById[$invoiceId]['Source_Entities'] ?? null)
             ? $invoiceDetailsById[$invoiceId]['Source_Entities']
@@ -179,8 +183,14 @@ function demeter_invoice_cache_merge_fetched(array &$cache, array $fetched, arra
     $fetchedTotalsByJob = is_array($fetched['project_invoiced_total_by_job'] ?? null) ? $fetched['project_invoiced_total_by_job'] : [];
     $cachedAt = gmdate(DateTimeInterface::ATOM);
 
+    $failedKeys = array_fill_keys(array_map('strval', is_array($fetched['failed_project_keys'] ?? null) ? $fetched['failed_project_keys'] : []), true);
+
     foreach ($fetchedProjectKeys as $projectKey) {
         if (!is_string($projectKey) || $projectKey === '') {
+            continue;
+        }
+        if (isset($failedKeys[$projectKey])) {
+            // Onvolledig opgehaald: niet (over)schrijven; een eerdere goede entry blijft, anders volgende keer opnieuw.
             continue;
         }
 
@@ -195,6 +205,44 @@ function demeter_invoice_cache_merge_fetched(array &$cache, array $fetched, arra
     }
 
     $cache['projects'] = $projects;
+}
+
+/**
+ * Voegt factuurregels samen zonder dezelfde BC-regel (bron + Line_No) twee keer op te nemen.
+ * Regels zonder Line_No (oude cache) worden vervangen zodra er regels mét Line_No binnenkomen.
+ *
+ * @param list<array> $existingLines
+ * @param list<array> $newLines
+ * @return list<array>
+ */
+function demeter_invoice_cache_merge_lines(array $existingLines, array $newLines): array
+{
+    $byKey = [];
+    $newHasLineNo = false;
+    foreach ($newLines as $line) {
+        if (is_array($line) && trim((string) ($line['Line_No'] ?? '')) !== '') {
+            $newHasLineNo = true;
+            break;
+        }
+    }
+    foreach ([$existingLines, $newLines] as $set) {
+        foreach ($set as $line) {
+            if (!is_array($line)) {
+                continue;
+            }
+            $lineNo = trim((string) ($line['Line_No'] ?? ''));
+            if ($lineNo === '') {
+                if ($newHasLineNo) {
+                    continue;
+                }
+                $byKey[] = $line;
+                continue;
+            }
+            $byKey[(string) ($line['Source_Entity'] ?? '') . '|' . $lineNo] = $line;
+        }
+    }
+
+    return array_values($byKey);
 }
 
 /**
