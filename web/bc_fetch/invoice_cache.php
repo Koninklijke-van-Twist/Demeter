@@ -325,6 +325,7 @@ function bc_fetch_resolve_invoices_for_projects(
         $fromCacheCount++;
     }
 
+    $failedProjectKeys = [];
     if ($missingProjectNumbers !== []) {
         $financeService = new ProjectFinanceService($company);
         $fetched = $financeService->collectProjectInvoicesForProjects($missingProjectNumbers, $ttl);
@@ -335,6 +336,9 @@ function bc_fetch_resolve_invoices_for_projects(
         }
 
         demeter_invoice_cache_merge_fetched($cache, $fetched, $fetchedKeys);
+        foreach (is_array($fetched['failed_project_keys'] ?? null) ? $fetched['failed_project_keys'] : [] as $failedKey) {
+            $failedProjectKeys[(string) $failedKey] = true;
+        }
         if (function_exists('odata_load_progress_heartbeat_throttled')) {
             odata_load_progress_heartbeat_throttled(true);
         }
@@ -366,10 +370,20 @@ function bc_fetch_resolve_invoices_for_projects(
         }
     }
 
+    // Projecten waarvan een factuurbron faalde (bv. 409) en waarvoor geen eerdere goede cache-entry is:
+    // de aanroeper mag hun (lege) factuurgegevens niet als compleet opslaan.
+    $unresolvedFailedKeys = [];
+    foreach (array_keys($failedProjectKeys) as $failedKey) {
+        if (!is_array($cachedProjects[$failedKey] ?? null)) {
+            $unresolvedFailedKeys[] = (string) $failedKey;
+        }
+    }
+
     return [
         'invoice_details_by_id' => $invoiceDetailsById,
         'project_invoice_ids_by_job' => $projectInvoiceIdsByJob,
         'project_invoiced_total_by_job' => $projectInvoicedTotalByJob,
+        'failed_project_keys' => $unresolvedFailedKeys,
         'load_meta' => [
             'from_cache_count' => $fromCacheCount,
             'fetched_count' => count($missingProjectNumbers),

@@ -418,6 +418,23 @@ function bc_fetch_resume_skipped_week_chunk(string $yearWeek, array $monthScan, 
 }
 
 /**
+ * Basis-state waarop de force_full-dagload van de huidige week opslaat: de bestaande state van de
+ * huidige cacheversie (weken die deze herbouw al las), of null als er niets (bruikbaars) ligt.
+ * Een state van een oude cacheversie telt niet: die wordt door de herbouw vervangen.
+ *
+ * @return array<string, mixed>|null
+ */
+function bc_fetch_day_path_base_state(string $company, string $costCenter): ?array
+{
+    if (demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+        return null;
+    }
+    $state = demeter_workorder_state_cache_load($company, $costCenter);
+
+    return is_array($state) ? $state : null;
+}
+
+/**
  * Laadt de huidige ISO-week per kalenderdag (alleen ontbrekende dagen + vandaag).
  *
  * @param array<string, mixed> $options
@@ -456,8 +473,14 @@ function bc_fetch_load_current_week_by_days_unlocked(
         : null;
 
     $cachedState = $forceFull ? null : demeter_workorder_state_cache_load($company, $costCenter);
-    $monthScan = is_array($cachedState['month_scan'] ?? null) ? $cachedState['month_scan'] : demeter_workorder_month_scan_defaults();
-    $displayRowsByKey = $cachedState !== null
+    // Bij force_full haalt de dagload alles opnieuw uit BC (geen cache voor de fetch), maar slaat hij wel
+    // op BOVENOP de state die er al ligt (de weken die deze herbouw/hervatting al las). Voorheen begon het
+    // dagpad bij force_full met een lege month_scan en lege display-rijen en schreef dat weg: elke hervatting
+    // of herhaling van de huidige week wiste zo alle eerder geladen weken uit de cache (KvT/70, 8 okt 2026:
+    // alleen week 31-41 nog in de cache, week 1-30 grotendeels weg).
+    $baseState = $forceFull ? bc_fetch_day_path_base_state($company, $costCenter) : $cachedState;
+    $monthScan = is_array($baseState['month_scan'] ?? null) ? $baseState['month_scan'] : demeter_workorder_month_scan_defaults();
+    $displayRowsByKey = $baseState !== null
         ? demeter_workorder_state_cache_load_display_rows($company, $costCenter)
         : [];
 
@@ -507,8 +530,11 @@ function bc_fetch_load_current_week_by_days_unlocked(
         $consolidateOptions['_consolidating'] = true;
         bc_fetch_load_workorder_week_chunk($company, $previousWeek, $auth, $ttl, $progressToken, $consolidateOptions);
 
-        $cachedState = demeter_workorder_state_cache_load($company, $costCenter);
-        $monthScan = is_array($cachedState['month_scan'] ?? null) ? $cachedState['month_scan'] : demeter_workorder_month_scan_defaults();
+        $baseState = demeter_workorder_state_cache_load($company, $costCenter);
+        if (!$forceFull) {
+            $cachedState = $baseState;
+        }
+        $monthScan = is_array($baseState['month_scan'] ?? null) ? $baseState['month_scan'] : demeter_workorder_month_scan_defaults();
         $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
     }
 
@@ -567,9 +593,9 @@ function bc_fetch_load_current_week_by_days_unlocked(
     $aggregatedProjectInvoicedTotal = [];
     $aggregatedFinanceKeyByPair = [];
     // cache_state is de werkordermap zelf (bc_fetch_build_workorder_state_cache), niet de volledige payload.
-    $lastCacheState = is_array($cachedState) && is_array($cachedState['workorders'] ?? null) ? $cachedState['workorders'] : [];
-    $lastLoadSession = is_array($cachedState)
-        ? demeter_workorder_state_normalize_load_session($cachedState['load_session'] ?? null)
+    $lastCacheState = is_array($baseState) && is_array($baseState['workorders'] ?? null) ? $baseState['workorders'] : [];
+    $lastLoadSession = is_array($baseState)
+        ? demeter_workorder_state_normalize_load_session($baseState['load_session'] ?? null)
         : demeter_workorder_load_session_defaults();
     $hasProjectPosten = false;
     $loadMeta = [
@@ -659,7 +685,10 @@ function bc_fetch_load_current_week_by_days_unlocked(
             );
         }
 
-        $lastCacheState = is_array($loaded['cache_state'] ?? null) ? $loaded['cache_state'] : $lastCacheState;
+        if (is_array($loaded['cache_state'] ?? null)) {
+            // force_full: de dag is zonder cache opgebouwd; werkorders van eerder geladen weken behouden.
+            $lastCacheState = $forceFull ? array_replace($lastCacheState, $loaded['cache_state']) : $loaded['cache_state'];
+        }
         $lastLoadSession = is_array($loaded['load_session'] ?? null) ? $loaded['load_session'] : $lastLoadSession;
         $cachedState = array_merge(is_array($cachedState) ? $cachedState : [], [
             // Volgende dag bouwt verder op de werkordermap van deze dag (niet leeg beginnen).
@@ -1084,6 +1113,15 @@ function bc_fetch_execute_workorder_date_range_load(
             ? $invoiceData['project_invoiced_total_by_job']
             : [];
         $invoiceLoadMeta = is_array($invoiceData['load_meta'] ?? null) ? $invoiceData['load_meta'] : $invoiceLoadMeta;
+        $failedInvoiceProjects = is_array($invoiceData['failed_project_keys'] ?? null) ? $invoiceData['failed_project_keys'] : [];
+        if ($failedInvoiceProjects !== []) {
+            // Half geladen (factuurbron faalde, bv. BC 409): de week niet als compleet opslaan, maar laten
+            // falen zodat hij opnieuw wordt geprobeerd (anders blijven Factuur ID/totalen voorgoed leeg).
+            throw new RuntimeException(
+                'Facturen ophalen mislukt voor ' . count($failedInvoiceProjects) . ' project(en) (' . implode(', ', array_slice($failedInvoiceProjects, 0, 5))
+                . '); ' . $progressLabel . ' niet opgeslagen, wordt opnieuw geprobeerd.'
+            );
+        }
     }
 
     // Stap 4: omschrijvingen aanvullen, werkorders samenvoegen en de week in de cache opslaan.
