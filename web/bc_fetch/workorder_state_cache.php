@@ -9,10 +9,21 @@
 require_once __DIR__ . '/cost_center.php';
 require_once __DIR__ . '/../bc_enum.php';
 
+if (!class_exists('DemeterStaleCacheVersionException')) {
+    /** Cache van een oude cacheversie: alleen een volledige verversing mag hem vervangen. */
+    class DemeterStaleCacheVersionException extends RuntimeException
+    {
+    }
+}
+
 /** v8: Component_Description is de component-Description, niet Sub_Entity_Description (equipmentsoort). */
 /** v9: status/Entry_Type NL+EN (Usage/Sale, Closed/Invoiced), signed factuurtotalen. */
 /** v12: lege kop zonder kostenplaats uit eigen posten valt terug op de projectkaart (Projecten.LVS_Global_Dimension_1_Code). */
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 12;
+/**
+ * v13: v12 werd niet afgedwongen (display-cache zonder versie + catch-up schreef een verse v12-state met
+ * alleen de huidige week). Een versiewissel start nu een volledige herbouw van alle weken.
+ */
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 13;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Maximale wachttijd (s) op de cache-lock van een parallelle week voordat de week faalt. */
@@ -994,6 +1005,65 @@ function demeter_workorder_state_cache_purge(string $company, string $costCenter
 }
 
 /**
+ * Leest alleen het versienummer van het opgeslagen state-bestand (null = geen/onleesbaar bestand).
+ * Goedkoop: 'version' is de eerste key van de payload, dus de kop van het bestand volstaat meestal.
+ */
+function demeter_workorder_state_cache_stored_version(string $company, string $costCenter): ?int
+{
+    $path = demeter_workorder_state_cache_path($company, $costCenter);
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+
+    $handle = @fopen($path, 'rb');
+    if ($handle === false) {
+        return null;
+    }
+    $head = (string) fread($handle, 256);
+    fclose($handle);
+    if (preg_match('/^\s*\{\s*"version"\s*:\s*(\d+)/', $head, $matches) === 1) {
+        return (int) $matches[1];
+    }
+    if (trim($head) === '') {
+        return null;
+    }
+
+    $decoded = json_decode((string) file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    return (int) ($decoded['version'] ?? 0);
+}
+
+/**
+ * True als er een state-cache staat die met een andere (oude) cacheversie is gebouwd.
+ * Zo'n cache wordt niet gelezen; de weken moeten met de huidige logica volledig opnieuw worden gelezen
+ * (de werkorders die het oude filter uitsloot staan er niet in, dus alleen herfilteren is niet genoeg).
+ */
+function demeter_workorder_state_cache_is_stale_version(string $company, string $costCenter): bool
+{
+    $storedVersion = demeter_workorder_state_cache_stored_version($company, $costCenter);
+
+    return $storedVersion !== null && $storedVersion !== DEMETER_WORKORDER_STATE_CACHE_VERSION;
+}
+
+/**
+ * Weigert een incrementele (niet-volledige) load op een cache van een oude versie: die zou met een lege
+ * state beginnen en een verse state met alleen deze week/dag wegschrijven (de oude weken verdwijnen dan
+ * zonder ooit opnieuw gelezen te worden, en de versiewissel is daarna 'verbruikt').
+ */
+function demeter_workorder_state_cache_assert_not_stale_version(string $company, string $costCenter): void
+{
+    if (demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+        throw new DemeterStaleCacheVersionException(
+            'De cache van ' . $company . ' / ' . $costCenter . ' is met een oudere cacheversie gebouwd; '
+            . 'een volledige verversing (alle weken opnieuw lezen) is nodig.'
+        );
+    }
+}
+
+/**
  * Leest de werkorder-state cache.
  *
  * @param bool|null $purgedLegacy Wordt true als oude maand-keys zijn gedetecteerd en cache is gewist.
@@ -1215,6 +1285,28 @@ function demeter_workorder_state_cache_display_rows_path(string $company, string
 }
 
 /**
+ * Haalt de rijen uit een display-cachebestand. Null = andere cacheversie of het oude formaat zonder
+ * versie (platte rijenmap): die rijen zijn met oude filterlogica gebouwd en mogen niet getoond worden.
+ *
+ * @param mixed $decoded
+ * @return array<string, array>|null
+ */
+function demeter_workorder_display_rows_unwrap($decoded): ?array
+{
+    if (!is_array($decoded)) {
+        return [];
+    }
+    if (!array_key_exists('version', $decoded) || !array_key_exists('rows', $decoded)) {
+        return $decoded === [] ? [] : null;
+    }
+    if ((int) $decoded['version'] !== DEMETER_WORKORDER_STATE_CACHE_VERSION) {
+        return null;
+    }
+
+    return is_array($decoded['rows']) ? $decoded['rows'] : [];
+}
+
+/**
  * Leest opgeslagen UI-rijen voor snelle eerste paint.
  *
  * @return array<string, array>
@@ -1225,7 +1317,11 @@ function demeter_workorder_state_cache_load_display_rows(string $company, string
     if (is_file($path) && is_readable($path)) {
         $raw = file_get_contents($path);
         if (is_string($raw) && trim($raw) !== '') {
-            $decoded = json_decode($raw, true);
+            $decoded = demeter_workorder_display_rows_unwrap(json_decode($raw, true));
+            if ($decoded === null) {
+                // Oude cacheversie (of oud formaat zonder versie): niet tonen, de weken moeten opnieuw.
+                return [];
+            }
             if (is_array($decoded)) {
                 if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
                     $decoded = demeter_coalesce_display_rows_by_business_key($decoded);
@@ -1263,7 +1359,10 @@ function demeter_workorder_state_cache_save_display_rows(string $company, string
         $displayRowsByKey = demeter_coalesce_display_rows_by_business_key($displayRowsByKey);
     }
 
-    $json = demeter_workorder_state_cache_json_encode($displayRowsByKey);
+    $json = demeter_workorder_state_cache_json_encode([
+        'version' => DEMETER_WORKORDER_STATE_CACHE_VERSION,
+        'rows' => $displayRowsByKey,
+    ]);
     if (!is_string($json)) {
         return false;
     }

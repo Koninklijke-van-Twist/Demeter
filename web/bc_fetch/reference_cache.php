@@ -255,6 +255,12 @@ function demeter_workorder_cost_center_cache_updated_at(string $company, string 
 
 function demeter_workorder_cost_center_cache_is_populated(string $company, string $costCenter): bool
 {
+    // Een cache van een oude cacheversie wordt niet gelezen, maar de kostenplaats is wel in gebruik:
+    // de nightly moet hem dan volledig herbouwen i.p.v. als 'lege cache' over te slaan.
+    if (demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+        return true;
+    }
+
     $displayRows = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
     if ($displayRows !== []) {
         return true;

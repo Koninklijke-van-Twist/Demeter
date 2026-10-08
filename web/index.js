@@ -400,6 +400,10 @@
         // De verversing is gestart: refresh_now uit de URL, zodat F5 geen nieuwe volledige verversing start.
         // load_token blijft staan zolang de load loopt (om te kunnen volgen) en gaat eruit bij klaar/fout.
         stripUrlParams(['refresh_now', 'boot', 'call_time_log_session']);
+        if (asyncLoadConfig.cache_version_rebuild === true)
+        {
+            updateHistoryLoadNote('Cacheversie gewijzigd: alle weken worden opnieuw uit BC gelezen...');
+        }
         startIncrementalMonthLoading()
             .then(function (loadSucceeded)
             {
@@ -6614,6 +6618,13 @@
         };
     }
 
+    // Server meldt dat de cache met een oude cacheversie is gebouwd (bv. na een deploy met nieuwe
+    // kostenplaats-logica): alleen de huidige week bijwerken mag dan niet.
+    function shouldReloadForStaleCacheVersion (chunk)
+    {
+        return !!(chunk && typeof chunk === 'object' && chunk.cache_version_stale === true);
+    }
+
     async function startCatchUpCurrentWeek ()
     {
         const catchUpWeek = typeof asyncLoadConfig.catch_up_week === 'string' && asyncLoadConfig.catch_up_week !== ''
@@ -6643,6 +6654,14 @@
             }
 
             const chunk = await fetchHistoryWeek(catchUpWeek, 0, 0, { catchUp: true });
+
+            if (shouldReloadForStaleCacheVersion(chunk))
+            {
+                // Cacheversie gewijzigd sinds deze pagina is geladen: herladen start de volledige verversing.
+                updateHistoryLoadNote('Cacheversie gewijzigd: pagina herladen om alle weken opnieuw te lezen...');
+                window.location.reload();
+                return;
+            }
 
             if (chunk && chunk.hitchhiked === true && chunk.load_progress_token)
             {

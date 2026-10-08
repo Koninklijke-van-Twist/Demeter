@@ -75,6 +75,12 @@ function bc_fetch_load_workorder_week_chunk(
         ? (float) $options['current_week_skip_max_age_hours']
         : null;
 
+    // Cache van een oude cacheversie: alleen een volledige verversing (force_full) mag hem vervangen.
+    // Anders begint deze week met een lege state en schrijft een verse state met alleen deze week weg.
+    if (!$forceFull) {
+        demeter_workorder_state_cache_assert_not_stale_version($company, $costCenter);
+    }
+
     $parsedWeek = demeter_parse_iso_year_week($yearWeek);
     if ($parsedWeek === null) {
         throw new InvalidArgumentException('Ongeldige week: ' . $yearWeek);
