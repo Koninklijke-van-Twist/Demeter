@@ -887,10 +887,17 @@ if (($_GET['action'] ?? '') === 'sync_changes') {
         auth_set_current_company_context($deltaCompany, 300);
         require_once __DIR__ . '/bc_fetch/workorder_delta.php';
         require_once __DIR__ . '/bc_fetch/store_transport.php';
+        // Volledige projecttotalen nog niet opgebouwd (bv. geen php-fpm, dus geen opbouw na de pagina): hier
+        // opbouwen. Dit verzoek loopt op de achtergrond na de catch-up; niemand wacht erop (~40 s voor KvT).
+        $projectTotalsFull = null;
+        if (demeter_project_totals_full_enabled() && demeter_project_totals_full_read($deltaCompany) === null) {
+            @set_time_limit(240);
+            $projectTotalsFull = demeter_project_totals_full_sync($deltaCompany, demeter_store_live_transport($deltaCompany, ['request_timeout' => 60]), true);
+        }
         $deltaResult = demeter_workorder_delta_page_open($deltaCompany, $deltaCostCenter, static function () use ($deltaCompany): array {
             return demeter_store_live_transport($deltaCompany, ['request_timeout' => DEMETER_WORKORDER_DELTA_REQUEST_TIMEOUT]);
         });
-        demeter_send_json_response(['ok' => true] + $deltaResult);
+        demeter_send_json_response(['ok' => true, 'project_totals_full' => $projectTotalsFull] + $deltaResult);
     } catch (Throwable $deltaError) {
         error_log('Demeter sync_changes: ' . $deltaError->getMessage());
         demeter_send_json_response(['ok' => false, 'error' => $deltaError->getMessage(), 'dirty_weeks' => []]);
