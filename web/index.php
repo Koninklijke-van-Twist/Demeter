@@ -1088,6 +1088,8 @@ $initialData = [
         'age_hours' => $cacheAgeHours,
         'age_seconds' => $cacheAgeSeconds,
         'has_data' => $cacheUsedForFirstPaint,
+        // false = de laatste volledige verversing is niet afgerond (scan niet tot het einde): toon ⚠.
+        'history_complete' => demeter_month_scan_history_complete($monthScan),
         'is_refreshing' => $asyncLoadEnabled || $hitchhikeActiveLoad,
     ],
     'nightly_stats' => $nightlyStats,
