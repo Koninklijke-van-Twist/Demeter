@@ -17,7 +17,9 @@ check(calls.length === 1, 'syncChangesAndReloadWeeks wordt op precies één plek
 const block = src.slice(src.indexOf('startCatchUpCurrentWeek()\n'), src.indexOf('startCatchUpCurrentWeek()\n') + 900);
 check(/startCatchUpCurrentWeek\(\)[\s\S]*\.then\([\s\S]*syncChangesAndReloadWeeks\(\)/.test(block), 'sync na de page-open catch-up');
 check(!/set(Interval|Timeout)\([^)]*syncChangesAndReloadWeeks/.test(src), 'nooit op een timer (geen polling)');
-const fn = src.slice(src.indexOf('async function syncChangesAndReloadWeeks'), src.indexOf('// Rijen uit de cache staan al in beeld'));
+const fnStart = src.indexOf('async function syncChangesAndReloadWeeks');
+// Tot het einde van de functie (sluitende accolade op topniveau-inspringing).
+const fn = src.slice(fnStart, src.indexOf('\n    }\n', fnStart) + 7);
 check(fn.includes("params.set('action', 'sync_changes')"), 'roept action=sync_changes aan');
 check(fn.includes('{ reloadChanged: true }'), 'gemarkeerde weken via fetchHistoryWeek(..., { reloadChanged: true })');
 check(/options\.reloadChanged === true\)[\s\S]{0,300}force_full', '1'\)[\s\S]{0,80}resume', '1'\)/.test(src), 'reloadChanged zet force_full=1 en resume=1');

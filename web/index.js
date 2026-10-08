@@ -40,6 +40,13 @@
     const asyncLoadConfig = payload && typeof payload.async_load === 'object' && payload.async_load !== null
         ? payload.async_load
         : {};
+    // Rijen uit de cache staan al in beeld (vorige gegevens tijdens een herbouw, of een hervatte herbouw).
+    // Moet vóór het opstartdeel gedeclareerd zijn: startIncrementalMonthLoading() draait al tijdens het laden
+    // van het script en leest deze waarde synchroon (anders TDZ: 'Cannot access … before initialization').
+    const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
+    // Herlaad-guard van de page-open BC-delta (bovenaan i.v.m. TDZ, zie #30).
+    const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
+    const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
     let loadStatsFromCache = 0;
     let loadStatsUpdatedFromBc = 0;
     let loadStatsNote = null;
@@ -6790,9 +6797,7 @@
         }
     }
 
-    const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
-    const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
-
+    // keepDisplayRowsDuringLoad en CHANGES_RELOAD_GUARD_*: bovenaan gedeclareerd (TDZ-fix #30).
     function changesReloadRecentlyDone ()
     {
         try
@@ -6932,8 +6937,6 @@
         updateHistoryLoadNote(String(failed) + ' van ' + String(weeks.length) + ' gewijzigde weken konden niet opnieuw worden gelezen; dat gebeurt bij de volgende keer openen.');
     }
 
-    // Rijen uit de cache staan al in beeld (vorige gegevens tijdens een herbouw, of een hervatte herbouw).
-    const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
 
     function decorateRebuildLoadNote (text)
     {
