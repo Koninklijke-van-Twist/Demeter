@@ -37,6 +37,32 @@ Tim moet `$mimirApi` (en optioneel `$mimirBase`) lokaal/op de server zetten; `au
 
 Geen `auth.php` in deze repository (staat in `.gitignore`). Lokaal/op de server `$mimirApi` (en optioneel `$mimirBase`) én de Business Central-credentials (`$baseUrl`, `$auth`, `$auth_list`, `$environment`) naast elkaar zetten. Die BC-credentials zijn de automatische fallback als Mímir uitvalt, ook voor `nightly.php` en andere CLI/cron-scripts.
 
+## Schermcache: wijzigingen uit BC bij het openen (page-open delta)
+
+De schermcache is per week opgebouwd. Gesloten weken worden normaal niet opnieuw gelezen. Daarom haalt de pagina na de catch-up van de huidige week **één keer** op wat er sinds de laatste sync in BC veranderd is (`index.php?action=sync_changes`, code in `web/bc_fetch/workorder_delta.php`).
+
+- **Wanneer**: alleen bij het openen van de pagina, en alleen als de laatste geslaagde sync ouder is dan 180 s (`DEMETER_WORKORDER_DELTA_MAX_AGE_SECONDS`). Er draait geen timer en geen polling. Verder alleen voor een complete cache van de huidige versie, en niet als er een (her)bouw of andere load loopt.
+- **Bronnen** (alleen lezen, harde timeout van 15 s per request (`DEMETER_WORKORDER_DELTA_REQUEST_TIMEOUT`), geen retries, normaal 3–5 calls):
+  - `ProjectPosten` met `Entry_No` > laatst gezien (nieuwe en achteraf gedateerde posten);
+  - `ChangeLogEntries` van tabel 11332939 *Work Order* met `Entry_No` > laatst gezien: status, startdatum, documentstatus en nieuwe werkorders. `Werkorders` heeft geen SystemModifiedAt in OData;
+  - `Werkorders` met `Created_Date_Time` > laatste sync (vangnet voor nieuwe werkorders);
+  - de gewijzigde werkorders zelf (op `No`, 20 per call, hooguit 200 per sync).
+- **Effect**:
+  - Een statuswijziging van een werkorder die al in beeld staat, komt direct in de display-rij (status, documentstatus, startdatum).
+  - De week van een post met een boekdatum vóór vandaag, of van een nieuwe of nog niet getoonde werkorder met een startdatum vóór vandaag (ook in een gesloten week), krijgt de markering *opnieuw laden*. Een verzette startdatum markeert ook de nieuwe week.
+  - De browser leest de gemarkeerde weken daarna één voor één via `load_month` met `force_full=1&resume=1`. Niet-gemarkeerde weken slaat de server over.
+  - Na afloop herlaadt de pagina één keer; hooguit één automatische herlaadbeurt per 3 minuten.
+  - Posten en werkorders van vandaag of later leest de catch-up van de huidige week.
+- **Checkpoint**: staat in `<state>.delta.json` naast de werkorder-state: hoogste `Entry_No` van posten en logboek, `created_since`, `synced_at` en de gemarkeerde weken. Een (her)bouw wist dit bestand niet, en de nightly leest het niet.
+  - De eerste keer wordt alleen het checkpoint gezet.
+  - Een geslaagde (her)lading van een week haalt de markering weg.
+  - Bij een timeout, 409 of andere fout verandert er niets en schuift het checkpoint niet op. De volgende page-open probeert het opnieuw.
+  - Per sync hooguit 5000 posten/logregels (`DEMETER_WORKORDER_DELTA_MAX_ROWS`); de rest volgt bij de volgende keer openen.
+- **Uitzetten**: `define('DEMETER_WORKORDER_DELTA_ENABLED', false)`.
+- **Bekende grenzen**:
+  - Een werkorder met een lege kop-kostenplaats die nog niet in beeld staat, komt alleen mee via een post (anders bij de volgende herbouw).
+  - Een wijziging van de kostenplaats van een werkorder die al in beeld staat, haalt hem niet uit de lijst.
+
 ## Werkorder-store (fase 1, shadow)
 
 Per bedrijf staat er één store-bestand in `web/cache/workorder_store/` (werkorders op `No`, kosten per werkorder uit ProjectPosten en de sync-status). Dat bestand wordt atomisch geschreven (temp + rename) onder een bedrijfslock (flock). Het scherm leest er in fase 1 nog **niet** uit.
