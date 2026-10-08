@@ -253,6 +253,40 @@ function demeter_workorder_cost_center_cache_updated_at(string $company, string 
     return $updatedAt !== '' ? $updatedAt : null;
 }
 
+/**
+ * Pagina-open voor een kostenplaats zonder enige cache: zelf de eerste (volledige) load starten, net als
+ * 'Ververs Nu', i.p.v. alleen 'Geen cachegegevens' te tonen. Alleen voor een bestaande kostenplaats-optie
+ * en alleen als er nog helemaal geen state-bestand is (ook een lege maar geladen kostenplaats laadt dus
+ * niet bij elke page-open opnieuw). Daarna houdt de nightly hem bij.
+ *
+ * @param list<array> $costCenterOptions
+ */
+function demeter_cost_center_needs_initial_load(string $company, string $costCenter, array $costCenterOptions): bool
+{
+    $costCenter = trim($costCenter);
+    if (trim($company) === '' || $costCenter === '') {
+        return false;
+    }
+    $known = false;
+    foreach ($costCenterOptions as $option) {
+        if (is_array($option) && strcasecmp(trim((string) ($option['code'] ?? '')), $costCenter) === 0) {
+            $known = true;
+            break;
+        }
+    }
+    if (!$known) {
+        return false;
+    }
+    if (demeter_workorder_state_cache_stored_version($company, $costCenter) !== null) {
+        return false;
+    }
+    if (demeter_workorder_state_cache_load_display_rows($company, $costCenter) !== []) {
+        return false;
+    }
+
+    return demeter_workorder_state_cache_load($company, $costCenter) === null;
+}
+
 function demeter_workorder_cost_center_cache_is_populated(string $company, string $costCenter): bool
 {
     // Een cache van een oude cacheversie wordt niet gelezen, maar de kostenplaats is wel in gebruik:
