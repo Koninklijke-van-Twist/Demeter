@@ -119,3 +119,11 @@ curl -s -G 'https://sleutels.kvt.nl/demeter/api/workorders.php' \
   -H "X-API-Key: $LOGIN_API_KEY" -H "X-User-Oid: $OID" -H "X-User-Email: linda@kvt.nl" \
   --data-urlencode 'company=Koninklijke van Twist' -d afdeling=70 -d open=1 -d limit=100
 ```
+
+## Projecttotalen over alle ProjectPosten (`bc_fetch/project_totals_full.php`)
+De kolommen *Kosten project* en *Opbrengst project* komen uit een apart bestand per bedrijf (`cache/workorder_state/project_totals_<bedrijf>.json`). Daarin staan kosten en opbrengst per project over **alle** ProjectPosten uit BC, met dezelfde rekenregels als de rest (kosten = Total_Cost van Gebruik, opbrengst = −Line_Amount_LCY van Verkoop).
+- De weekcache telde per week alleen de posten van projecten met een werkorder in die week. Daardoor vielen bijvoorbeeld verkoopfacturen zonder werkordernummer in een week zonder werkorder van dat project weg (hertest 8 okt: KvT/50 83 verschillen).
+- **Opbouw**: de eerste keer volledig in Entry_No-blokken (KvT: 55k posten, ~40 s, ~300 KB). Dat gebeurt na het versturen van de pagina of in de nightly; tot dan blijven de weektotalen staan.
+- **Bijwerken**: bij het openen van de pagina een delta op `Entry_No` > max (hooguit één keer per 180 s, timeout 8 s, één schrijver onder lock). De nightly doet ook een delta. Bij een fout blijft het bestand ongewijzigd.
+- **Gebruik**: de pagina-render en `load_month` (`project_totals_cumulative_by_job` en de rijen) zetten deze totalen op alle rijen van een project. Een herbouw is niet nodig.
+- **Uitzetten**: `define('DEMETER_PROJECT_TOTALS_FULL_ENABLED', false)`.

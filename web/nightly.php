@@ -287,6 +287,29 @@ try {
         }
     }
 
+    // Volledige projecttotalen per bedrijf (alle ProjectPosten, zie bc_fetch/project_totals_full.php): eerste
+    // keer volledig opbouwen (~30-60 s per bedrijf), daarna alleen de delta op Entry_No (seconden).
+    require_once __DIR__ . '/bc_fetch/project_totals_full.php';
+    if (demeter_project_totals_full_enabled()) {
+        require_once __DIR__ . '/bc_fetch/store_transport.php';
+        foreach ($companies as $company) {
+            if (!is_string($company) || trim($company) === '') {
+                continue;
+            }
+            $company = trim($company);
+            $totalsStartedAt = microtime(true);
+            try {
+                $totalsResult = demeter_project_totals_full_sync($company, demeter_store_live_transport($company, ['request_timeout' => 120]), true, true);
+            } catch (Throwable $totalsError) {
+                $totalsResult = ['status' => 'error', 'error' => $totalsError->getMessage()];
+            }
+            $stats['companies'][$company]['project_totals_full'] = $totalsResult + ['duration_seconds' => round(microtime(true) - $totalsStartedAt, 1)];
+            demeter_nightly_log("Projecttotalen (volledig) {$company}: " . ($totalsResult['status'] ?? '?')
+                . (isset($totalsResult['error']) ? ' ' . substr((string) $totalsResult['error'], 0, 300) : '') . "\n", ($totalsResult['status'] ?? '') === 'error');
+            demeter_nightly_stats_save($stats);
+        }
+    }
+
     $stats['last_run_finished_at'] = gmdate('c');
     demeter_nightly_stats_save($stats);
     demeter_nightly_log('[' . gmdate('Y-m-d H:i:s') . "] Nightly voltooid\n");
