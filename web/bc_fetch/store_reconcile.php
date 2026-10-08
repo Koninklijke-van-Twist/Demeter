@@ -138,7 +138,7 @@ function demeter_store_reconcile_compare(array $store, array $bcRows, array $pos
 
 function demeter_store_reconcile_summary(array $r): string
 {
-    $out = sprintf("Reconciliatie %s (%s): %d verschillen\n", $r['company'], date('Y-m-d H:i:s', $r['at']), $r['total_diffs']);
+    $out = sprintf("Reconciliatie %s (%s): %d verschillen\n", $r['company'], date('Y-m-d H:i:s T', $r['at']), $r['total_diffs']);
     foreach ($r['per_afdeling'] as $afdeling => $p) {
         $out .= sprintf("  afdeling %-6s BC %5d / store %5d | ontbreekt %d, extra %d, velden %d, kosten %d\n",
             $afdeling === '' ? '(leeg)' : $afdeling, $p['bc'], $p['store'], $p['missing'], $p['extra'], $p['changed'], $p['finance']);

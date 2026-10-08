@@ -729,21 +729,28 @@ function demeter_store_page_open_sync(string $company, string $afdeling, array $
     return $result;
 }
 
-/** Hourly: alle niet-afgesloten werkorders opnieuw + Entry_No-delta. */
+/**
+ * Hourly: alle niet-afgesloten werkorders opnieuw + Entry_No-delta. De grote fetch (~4 min voor KvT) gebeurt
+ * BUITEN de lock, zodat pagina-open syncs intussen gewoon doorgaan; toepassen gebeurt onder de lock op de
+ * dan actuele store.
+ */
 function demeter_store_hourly_refresh(string $company, array $transport, float $waitSeconds = 120.0): array
 {
-    $result = demeter_store_with_lock($company, static function () use ($company, $transport) {
+    if (demeter_store_read($company) === null) {
+        return ['status' => 'no_store'];
+    }
+    $started = microtime(true);
+    $filter = implode(' and ', array_map(static function (string $s): string {
+        return 'Status ne ' . demeter_store_q($s);
+    }, demeter_store_closed_statuses()));
+    $rows = demeter_store_fetch_all_workorders($transport, $filter);
+    $result = demeter_store_with_lock($company, static function () use ($company, $transport, $rows, $started) {
         $store = demeter_store_read($company);
         if ($store === null) {
             return ['status' => 'no_store'];
         }
-        $started = microtime(true);
         $stats = demeter_store_new_stats();
         demeter_store_apply_new_postings($store, $transport, $stats);
-        $filter = implode(' and ', array_map(static function (string $s): string {
-            return 'Status ne ' . demeter_store_q($s);
-        }, demeter_store_closed_statuses()));
-        $rows = $transport['fetch']('Werkorders', ['$select' => implode(',', demeter_store_workorder_fields()), '$filter' => $filter]);
         $stats['rows_fetched'] += count($rows);
         $seen = [];
         foreach ($rows as $row) {
@@ -768,7 +775,6 @@ function demeter_store_hourly_refresh(string $company, array $transport, float $
         $stats['upserted'] = count($rows) + count($found);
         $stats['duration_ms'] = (int) round((microtime(true) - $started) * 1000);
         $store['hourly_at'] = time();
-        $store['synced_at'] = time();
         $store['last_hourly'] = $stats;
         demeter_store_write($company, $store);
 
