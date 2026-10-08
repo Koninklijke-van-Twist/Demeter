@@ -53,7 +53,7 @@ $done = odata_load_progress_mark_stale(array_merge($running, ['status' => 'compl
 check($done['status'] === 'completed', 'afgeronde load wordt niet stale');
 
 // 2) Nederlandse tijd in Europe/Amsterdam (CEST = UTC+2).
-check(odata_format_dutch_datetime(gmmktime(19, 25, 0, 10, 7, 2026)) === '7 oktober 21:25', 'Dutch datetime Europe/Amsterdam');
+check(odata_format_dutch_datetime(gmmktime(19, 25, 0, 10, 7, 2026)) === '7 oktober 2026, 21:25', 'Dutch datetime Europe/Amsterdam');
 
 // 3) Verbindingsfouten worden niet eindeloos herhaald.
 $started = microtime(true);

@@ -48,16 +48,16 @@ const merge = slice('    function mergeMonthChunk (chunk, options)', '    functi
 check(merge.indexOf('normalizePostingOnlyRow(monthRow);') > 0, 'mergeMonthChunk normaliseert week-rijen');
 
 // Backfill-tekst.
-const noteBlock = slice('    function buildHistoryBackfillNote (weekToLoad, monthScan)', '    function createDemeterApiError (');
-const noteApi = new Function('monthScanEmptyStopCount', 'resolveHistoryWeeksTotal', 'formatHistoryLoadProgressSuffix',
+const noteBlock = slice('    function buildHistoryBackfillNote (weekToLoad, monthScan, weeksCompleted)', '    function createDemeterApiError (');
+const noteApi = new Function('monthScanEmptyStopCount', 'resolveHistoryWeeksTotal', 'getEstimatedHistoryWeeksTotal', 'formatHistoryLoadProgressSuffix',
     'var historyBackfillNote = "";\n' + noteBlock + '\nreturn { buildHistoryLoadNote, get: function () { return historyBackfillNote; } };')(
-    52, function () { return 52; }, function () { return ' (50%)'; });
+    52, function () { return null; }, function () { return 52; }, function () { return ' (50%)'; });
 const beyond = noteApi.buildHistoryLoadNote('2024-W39', { consecutive_empty: 20 }, 60, false);
-check(beyond === 'Oudere historie nalopen: 2024-W39 · stopt na 52 lege weken op rij (nu 20 op rij leeg, nog 32 lege weken op rij nodig)', 'backfill-tekst: ' + beyond);
+check(beyond === 'Oudere historie teruglezen (incl. facturen): 2024-W39 · week 9 van minstens 40 · stopt na 52 lege weken op rij (nu 20 op rij leeg, nog 32 lege weken op rij nodig)', 'backfill-tekst: ' + beyond);
 check(noteApi.get() === beyond, 'backfill-tekst onthouden voor de voortgangs-poller');
 check(noteApi.buildHistoryLoadNote('2026-W30', { consecutive_empty: 0 }, 10, false) === 'Oudere week laden: 2026-W30... (50%)', 'binnen de schatting: normale tekst');
-const apply = slice('    function applyLoadProgressToUi (text, percent, currentCallLabel)', '    function startBackgroundLoadProgressPolling ()');
-check(apply.indexOf("historyBackfillNote !== '' ? historyBackfillNote : text") > 0, "poller toont backfill-tekst i.p.v. 'Stap 208 van 208'");
+const apply = slice('    function applyLoadProgressToUi (text, percent, currentCallLabel, status, slowSuffix)', '    function startBackgroundLoadProgressPolling ()');
+check(apply.indexOf("historyBackfillNote !== '' && status !== 'error' ? historyBackfillNote : text") > 0, "poller toont backfill-tekst i.p.v. 'Stap 208 van 208' (behalve bij een fout)");
 const loop = slice('    async function startIncrementalMonthLoading ()', '    function escapeHtml (value)');
 check((loop.match(/historyBackfillNote = '';/g) || []).length >= 3, 'backfill-tekst wordt gewist bij start, fout en einde');
 

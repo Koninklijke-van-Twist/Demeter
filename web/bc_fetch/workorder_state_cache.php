@@ -14,6 +14,8 @@ require_once __DIR__ . '/../bc_enum.php';
 const DEMETER_WORKORDER_STATE_CACHE_VERSION = 11;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
+/** Maximale wachttijd (s) op de cache-lock van een parallelle week voordat de week faalt. */
+const DEMETER_WORKORDER_STATE_CACHE_LOCK_MAX_WAIT_SECONDS = 540;
 /** Open stale werkorders volledig verversen na dit aantal dagen (niet in huidige ProjectPosten). */
 const DEMETER_WORKORDER_OPEN_FULL_REFRESH_MAX_AGE_DAYS = 14;
 /** Huidige ISO-week overslaan bij herladen als scan jonger is dan dit aantal uren. */
@@ -1140,10 +1142,19 @@ function demeter_workorder_state_cache_lock(string $company, string $costCenter)
     if ($handle === false) {
         return null;
     }
-    if (!flock($handle, LOCK_EX)) {
-        fclose($handle);
+    // Niet blokkerend wachten: de parallelle week kan de lock minutenlang houden (grote cache
+    // laden/samenvoegen/opslaan). Intussen heartbeat sturen, anders lijkt de load vastgelopen.
+    $waitStartedAt = time();
+    while (!flock($handle, LOCK_EX | LOCK_NB)) {
+        if (time() - $waitStartedAt > (int) DEMETER_WORKORDER_STATE_CACHE_LOCK_MAX_WAIT_SECONDS) {
+            fclose($handle);
 
-        return null;
+            return null;
+        }
+        if (function_exists('odata_load_progress_heartbeat_throttled')) {
+            odata_load_progress_heartbeat_throttled();
+        }
+        usleep(250000);
     }
 
     return $handle;
