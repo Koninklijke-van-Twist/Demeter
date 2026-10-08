@@ -27,6 +27,8 @@ function bc_fetch_werkorders_list_select(): string
         'Component_No',
         'Bill_to_Customer_No',
         'Bill_to_Name',
+        'Sell_to_Customer_No',
+        'Sell_to_Name',
         'Job_Dimension_1_Value',
     ]);
 }
