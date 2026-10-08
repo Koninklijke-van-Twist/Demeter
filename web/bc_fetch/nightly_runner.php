@@ -54,6 +54,11 @@ function demeter_refresh_cost_center_weeks(
     array $options = []
 ): array {
     $forceFull = !empty($options['force_full']);
+    // Cacheversie gewijzigd (bv. andere kostenplaats-logica): alle weken volledig opnieuw lezen.
+    // Incrementeel kan niet: de werkorders die het oude filter uitsloot staan niet in de cache.
+    if (!$forceFull && demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+        $forceFull = true;
+    }
     $loadSessionId = trim((string) ($options['load_session_id'] ?? 'refresh'));
     $progressToken = array_key_exists('progress_token', $options) ? $options['progress_token'] : null;
     $currentWeek = demeter_current_iso_year_week();

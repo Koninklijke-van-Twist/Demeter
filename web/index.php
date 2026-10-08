@@ -558,6 +558,26 @@ if (($_GET['action'] ?? '') === 'load_month') {
         // Zonder schrijfrechten (bv. na een deploy) bevriest de voortgang ongemerkt: faal dan direct en zichtbaar.
         demeter_assert_cache_dirs_writable();
 
+        // Catch-up op een cache van een oude cacheversie: niet alleen de huidige week laden (dat schreef een
+        // verse state met alleen deze week en 'verbruikte' de versiewissel). De pagina herladen start dan
+        // een volledige verversing.
+        if ($catchUp && !$forceFull && demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+            demeter_send_json_response([
+                'ok' => true,
+                'catch_up' => true,
+                'skipped' => true,
+                'hitchhiked' => false,
+                'cache_version_stale' => true,
+                'week' => $yearWeek,
+                'month' => $yearWeek,
+                'rows' => [],
+                'row_keys' => [],
+                'month_scan' => demeter_workorder_month_scan_defaults(),
+                'project_totals_by_job' => [],
+                'project_totals_cumulative_by_job' => [],
+            ]);
+        }
+
         if ($catchUp) {
             $catchUpToken = $chunkProgressToken !== null
                 ? $chunkProgressToken
@@ -717,6 +737,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
         demeter_send_json_response(odata_append_debug_to_payload([
             'ok' => false,
             'error' => $error->getMessage(),
+            'cache_version_stale' => $error instanceof DemeterStaleCacheVersionException,
         ]), 500);
     }
 }
@@ -961,6 +982,7 @@ $clientLoadProgressToken = $nextLoadProgressToken;
 $hitchhikeActiveLoad = false;
 $hitchhikeKind = '';
 $refreshBlocked = false;
+$cacheVersionRebuild = false;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -971,6 +993,17 @@ try {
     if ($shouldReadCacheData) {
         $existingActiveLoad = demeter_active_load_get($selectedCompany, $selectedCostCenter);
         $refreshBlocked = demeter_active_load_is_fresh_running($existingActiveLoad);
+
+        // Cacheversie gewijzigd (bv. nieuwe kostenplaats-logica): de oude cache niet tonen en niet alleen de
+        // huidige week bijwerken, maar meteen een volledige verversing starten (alle weken opnieuw lezen,
+        // incl. de fase 'Oudere historie teruglezen'). Loopt er al een load, dan liften we daarop mee.
+        if (!$refreshNowRequested && !$refreshBlocked
+            && demeter_workorder_state_cache_is_stale_version($selectedCompany, $selectedCostCenter)
+        ) {
+            $refreshNowRequested = true;
+            $forceFullReload = true;
+            $cacheVersionRebuild = true;
+        }
 
         if ($refreshNowRequested) {
             $claimResult = demeter_active_load_claim(
@@ -1116,6 +1149,7 @@ $initialData = [
         'hitchhike_kind' => $hitchhikeKind,
         'refresh_blocked' => $refreshBlocked || $asyncLoadEnabled || $hitchhikeActiveLoad,
         'force_full' => $forceFullReload,
+        'cache_version_rebuild' => $cacheVersionRebuild && $asyncLoadEnabled,
         'chunk_unit' => 'week',
         'current_week' => $syncLoadWeek,
         'current_month' => $syncLoadWeek,
