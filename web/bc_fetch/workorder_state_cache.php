@@ -952,7 +952,7 @@ function demeter_workorder_state_cache_list_populated_pairs(): array
     }
 
     foreach ($paths as $path) {
-        if (!is_string($path) || strpos($path, '.json.display.json') !== false) {
+        if (!is_string($path) || strpos($path, '.json.display.json') !== false || strpos($path, '.json.display.prev.json') !== false) {
             continue;
         }
 
@@ -995,6 +995,7 @@ function demeter_workorder_state_cache_purge(string $company, string $costCenter
     $paths = [
         demeter_workorder_state_cache_path($company, $costCenter),
         demeter_workorder_state_cache_display_rows_path($company, $costCenter),
+        demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter),
     ];
 
     foreach ($paths as $path) {
@@ -1341,6 +1342,165 @@ function demeter_workorder_state_cache_load_display_rows(string $company, string
     }
 
     return [];
+}
+
+/**
+ * Pad naar de display-rijen van vóór een lopende volledige herbouw (vorige, complete gegevens).
+ * Bestaat dit bestand, dan is er een herbouw bezig of onderbroken: de pagina toont deze rijen tot de
+ * herbouw klaar is (pas dan wisselen), zodat een herbouw nooit bruikbare gegevens weggooit.
+ */
+function demeter_workorder_state_cache_previous_display_rows_path(string $company, string $costCenter): string
+{
+    return demeter_workorder_state_cache_path($company, $costCenter) . '.display.prev.json';
+}
+
+/**
+ * Leest month_scan rechtstreeks uit het state-bestand, ook bij een andere cacheversie (null = geen bestand).
+ *
+ * @return array<string, mixed>|null
+ */
+function demeter_workorder_state_cache_raw_month_scan(string $company, string $costCenter): ?array
+{
+    $path = demeter_workorder_state_cache_path($company, $costCenter);
+    if (!is_file($path) || !is_readable($path)) {
+        return null;
+    }
+    $decoded = json_decode((string) file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return null;
+    }
+
+    return is_array($decoded['month_scan'] ?? null) ? $decoded['month_scan'] : demeter_workorder_month_scan_defaults();
+}
+
+/**
+ * Start een volledige herbouw zonder de bruikbare gegevens weg te gooien (vervangt purge bij force_full).
+ * - De huidige display-rijen worden de 'vorige' rijen (ook van een oude cacheversie), tenzij er al vorige
+ *   rijen staan van een eerder onderbroken herbouw en de huidige cache zelf niet compleet is: dan blijven
+ *   de oudere, complete rijen staan.
+ * - Het state-bestand en de (nieuwe) display-rijen worden gewist: de herbouw begint met een lege state.
+ */
+function demeter_workorder_state_cache_begin_rebuild(string $company, string $costCenter): void
+{
+    $statePath = demeter_workorder_state_cache_path($company, $costCenter);
+    $displayPath = demeter_workorder_state_cache_display_rows_path($company, $costCenter);
+    $previousPath = demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter);
+
+    $hasDisplay = is_file($displayPath) && (int) @filesize($displayPath) > 2;
+    if ($hasDisplay) {
+        $monthScan = demeter_workorder_state_cache_raw_month_scan($company, $costCenter);
+        $currentComplete = is_array($monthScan) && demeter_month_scan_history_complete($monthScan);
+        if (!is_file($previousPath) || $currentComplete) {
+            if (!@rename($displayPath, $previousPath)) {
+                @copy($displayPath, $previousPath);
+                @unlink($displayPath);
+            }
+        } else {
+            @unlink($displayPath);
+        }
+    } elseif (is_file($displayPath)) {
+        @unlink($displayPath);
+    }
+
+    if (is_file($statePath)) {
+        @unlink($statePath);
+    }
+}
+
+/**
+ * True als er een volledige herbouw loopt of onderbroken is (vorige rijen worden nog getoond).
+ */
+function demeter_workorder_state_cache_rebuild_pending(string $company, string $costCenter): bool
+{
+    return is_file(demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter));
+}
+
+/**
+ * Herbouw klaar (historie compleet): de vorige rijen zijn niet meer nodig.
+ */
+function demeter_workorder_state_cache_finish_rebuild(string $company, string $costCenter): void
+{
+    $previousPath = demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter);
+    if (is_file($previousPath)) {
+        @unlink($previousPath);
+    }
+}
+
+/**
+ * Display-rijen van vóór de lopende herbouw (elke cacheversie, ook het oude formaat zonder versie):
+ * bewust oude gegevens, alleen om te tonen tot de nieuwe herbouw compleet is.
+ *
+ * @return array<string, array>
+ */
+function demeter_workorder_state_cache_load_previous_display_rows(string $company, string $costCenter): array
+{
+    $path = demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter);
+    if (!is_file($path) || !is_readable($path)) {
+        return [];
+    }
+    $decoded = json_decode((string) file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return [];
+    }
+    $rows = (array_key_exists('version', $decoded) && array_key_exists('rows', $decoded))
+        ? (is_array($decoded['rows']) ? $decoded['rows'] : [])
+        : $decoded;
+    if ($rows === []) {
+        return [];
+    }
+    if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
+        $rows = demeter_coalesce_display_rows_by_business_key($rows);
+    }
+
+    return bc_fetch_filter_display_rows_for_cost_center($rows, $costCenter);
+}
+
+/**
+ * Display-rijen voor de eerste paint. Loopt er een volledige herbouw (of is die onderbroken) en is de
+ * nieuwe cache nog niet compleet, dan de vorige (complete) rijen tonen: pas wisselen als de herbouw klaar is.
+ *
+ * @return array{rows: array<string, array>, previous: bool}
+ */
+function demeter_workorder_state_cache_display_rows_for_page(string $company, string $costCenter): array
+{
+    if (demeter_workorder_state_cache_rebuild_pending($company, $costCenter)) {
+        $monthScan = demeter_workorder_state_cache_raw_month_scan($company, $costCenter);
+        $stale = demeter_workorder_state_cache_is_stale_version($company, $costCenter);
+        if ($stale || !is_array($monthScan) || !demeter_month_scan_history_complete($monthScan)) {
+            $previousRows = demeter_workorder_state_cache_load_previous_display_rows($company, $costCenter);
+            if ($previousRows !== []) {
+                return ['rows' => $previousRows, 'previous' => true];
+            }
+        } else {
+            // Herbouw is compleet (bv. door de nightly): opruimen.
+            demeter_workorder_state_cache_finish_rebuild($company, $costCenter);
+        }
+    }
+
+    return ['rows' => demeter_workorder_state_cache_load_display_rows($company, $costCenter), 'previous' => false];
+}
+
+/**
+ * Moet een onderbroken volledige verversing hervat worden? Ja als de cache van de huidige versie is,
+ * al weken bevat, maar de historie nog niet compleet is (de browser die de herbouw aanstuurde is
+ * gestopt: tab dicht/herladen of een fout). Dan verder waar hij bleef i.p.v. opnieuw te beginnen.
+ */
+function demeter_workorder_state_cache_needs_resume(string $company, string $costCenter): bool
+{
+    if (demeter_workorder_state_cache_is_stale_version($company, $costCenter)) {
+        return false;
+    }
+    $state = demeter_workorder_state_cache_load($company, $costCenter);
+    if (!is_array($state)) {
+        return false;
+    }
+    $monthScan = is_array($state['month_scan'] ?? null) ? $state['month_scan'] : [];
+    $months = is_array($monthScan['months'] ?? null) ? $monthScan['months'] : [];
+    if ($months === []) {
+        return false;
+    }
+
+    return !demeter_month_scan_history_complete($monthScan);
 }
 
 /**

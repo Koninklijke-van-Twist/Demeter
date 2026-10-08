@@ -118,6 +118,10 @@ register_shutdown_function(function () {
     if (!$error || ($error['type'] ?? 0) !== E_ERROR) {
         return;
     }
+    // JSON-endpoints (week laden) melden een fatal zelf als JSON-fout; geen HTML-wachtscherm sturen.
+    if (!empty($GLOBALS['demeter_json_action'])) {
+        return;
+    }
 
     $message = (string) ($error['message'] ?? '');
     $isTimeout = stripos($message, 'Maximum execution time') !== false
@@ -466,6 +470,55 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
     exit;
 }
 
+/**
+ * Verhoogt memory_limit voor een week-request tot minstens 1024M (nooit verlagen; -1 = onbeperkt blijft).
+ */
+function demeter_raise_memory_limit_for_week_load(string $minimum = '1024M'): void
+{
+    $toBytes = static function (string $value): int {
+        $value = trim($value);
+        if ($value === '' || $value === '-1') {
+            return -1;
+        }
+        $number = (int) $value;
+        $unit = strtolower(substr($value, -1));
+        if ($unit === 'g') {
+            return $number * 1024 * 1024 * 1024;
+        }
+        if ($unit === 'm') {
+            return $number * 1024 * 1024;
+        }
+        if ($unit === 'k') {
+            return $number * 1024;
+        }
+
+        return $number;
+    };
+    $current = $toBytes((string) ini_get('memory_limit'));
+    if ($current === -1) {
+        return;
+    }
+    if ($current < $toBytes($minimum)) {
+        @ini_set('memory_limit', $minimum);
+    }
+}
+
+/**
+ * Stuurt na een fatal (shutdown) nog een JSON-foutantwoord, als er nog geen headers zijn verstuurd.
+ */
+function demeter_emit_fatal_json_response(string $message): void
+{
+    if (headers_sent()) {
+        return;
+    }
+    while (ob_get_level() > 0) {
+        @ob_end_clean();
+    }
+    http_response_code(500);
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode(['ok' => false, 'error' => $message, 'server_fatal' => true], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PARTIAL_OUTPUT_ON_ERROR);
+}
+
 function demeter_send_json_response(array $payload, int $statusCode = 200): void
 {
     while (ob_get_level() > 0) {
@@ -495,6 +548,15 @@ function demeter_send_json_response(array $payload, int $statusCode = 200): void
 if (($_GET['action'] ?? '') === 'load_month') {
     ini_set('display_errors', '0');
     demeter_release_session_lock_if_active();
+    $GLOBALS['demeter_json_action'] = true;
+    // Een week-request moet zijn week afmaken en opslaan, ook als de browser/proxy de verbinding
+    // verbreekt (anders is het werk weg en begint de volgende poging opnieuw). Ruime limieten voor
+    // grote kostenplaatsen (~10.000 werkorders, cache van enkele MB's).
+    @ignore_user_abort(true);
+    if (function_exists('set_time_limit')) {
+        @set_time_limit((int) DEMETER_ODATA_MAX_EXECUTION_SECONDS);
+    }
+    demeter_raise_memory_limit_for_week_load();
 
     try {
         $company = trim((string) ($_GET['company'] ?? ''));
@@ -503,6 +565,7 @@ if (($_GET['action'] ?? '') === 'load_month') {
         $invoiceFilter = strtolower(trim((string) ($_GET['invoice_filter'] ?? 'both')));
         $forceFull = strtolower(trim((string) ($_GET['force_full'] ?? ''))) === '1';
         $catchUp = strtolower(trim((string) ($_GET['catch_up'] ?? ''))) === '1';
+        $resumeRebuild = strtolower(trim((string) ($_GET['resume'] ?? ''))) === '1';
 
         if (!in_array($invoiceFilter, ['both', 'uninvoiced', 'invoiced'], true)) {
             $invoiceFilter = 'both';
@@ -541,18 +604,20 @@ if (($_GET['action'] ?? '') === 'load_month') {
             if (!$error || !in_array((int) ($error['type'] ?? 0), $fatalTypes, true)) {
                 return;
             }
+            $fatalMessage = 'Laden van week ' . (string) ($GLOBALS['demeter_load_month_label'] ?? '') . ' afgebroken door een serverfout: '
+                . (string) ($error['message'] ?? 'onbekend');
             $token = $GLOBALS['demeter_load_month_progress_token'] ?? null;
-            if (!is_string($token) || $token === '' || !function_exists('odata_load_progress_error')) {
-                return;
+            if (is_string($token) && $token !== '' && function_exists('odata_load_progress_error')) {
+                $current = odata_load_progress_payload($token, false);
+                odata_load_progress_error(
+                    $token,
+                    (int) ($current['total_months'] ?? 0),
+                    (int) ($current['current_month_index'] ?? 0),
+                    $fatalMessage
+                );
             }
-            $current = odata_load_progress_payload($token, false);
-            odata_load_progress_error(
-                $token,
-                (int) ($current['total_months'] ?? 0),
-                (int) ($current['current_month_index'] ?? 0),
-                'Laden van week ' . (string) ($GLOBALS['demeter_load_month_label'] ?? '') . ' afgebroken door een serverfout: '
-                    . (string) ($error['message'] ?? 'onbekend')
-            );
+            // De browser krijgt een duidelijke JSON-fout i.p.v. een lege/afgekapte body (stilte tot de stuck-detectie).
+            demeter_emit_fatal_json_response($fatalMessage);
         });
 
         // Zonder schrijfrechten (bv. na een deploy) bevriest de voortgang ongemerkt: faal dan direct en zichtbaar.
@@ -631,6 +696,8 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'load_session_id' => $perfLogSession,
             'progress_week_index' => $progressWeekIndex,
             'progress_week_total' => $progressWeekTotal,
+            // Hervatte verversing: al gelezen weken overslaan (alleen samen met force_full).
+            'resume_skip_scanned' => $resumeRebuild && $forceFull && !$catchUp,
         ];
         if ($catchUp) {
             $chunkOptions['current_week_skip_max_age_hours'] = DEMETER_WORKORDER_CATCH_UP_SKIP_MAX_AGE_MINUTES / 60;
@@ -740,6 +807,29 @@ if (($_GET['action'] ?? '') === 'load_month') {
             'cache_version_stale' => $error instanceof DemeterStaleCacheVersionException,
         ]), 500);
     }
+}
+
+if (($_GET['action'] ?? '') === 'report_load_failure') {
+    // De browser die een verversing aanstuurt geeft het op (week blijft mislukken): leg de fout vast in de
+    // laadvoortgang, zodat meeliftende tabs de echte fout zien i.p.v. na 5 minuten 'vastgelopen'.
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+    $failToken = trim((string) ($_GET['load_token'] ?? ''));
+    $failMessage = trim((string) ($_GET['message'] ?? ''));
+    if ($failToken === '' || !odata_load_progress_is_valid_token($failToken)) {
+        demeter_send_json_response(['ok' => false, 'error' => 'Ongeldige load_token.'], 400);
+    }
+    $failProgress = odata_load_progress_payload($failToken, false);
+    if (($failProgress['status'] ?? '') === 'running') {
+        odata_load_progress_error(
+            $failToken,
+            (int) ($failProgress['total_months'] ?? 0),
+            (int) ($failProgress['current_month_index'] ?? 0),
+            'Verversing gestopt: ' . substr($failMessage !== '' ? $failMessage : 'onbekende fout', 0, 500)
+                . ' Herlaad de pagina om verder te gaan waar de verversing bleef.'
+        );
+    }
+    demeter_send_json_response(['ok' => true]);
 }
 
 if (($_GET['action'] ?? '') === 'load_workorder_memos') {
@@ -983,6 +1073,8 @@ $hitchhikeActiveLoad = false;
 $hitchhikeKind = '';
 $refreshBlocked = false;
 $cacheVersionRebuild = false;
+$rebuildResume = false;
+$showingPreviousRows = false;
 $errorMessage = $companyDiscoveryErrorMessage;
 
 try {
@@ -1005,6 +1097,16 @@ try {
             $cacheVersionRebuild = true;
         }
 
+        // Onderbroken volledige verversing (de aansturende browser is gestopt): automatisch verder gaan
+        // waar hij bleef (al gelezen weken worden overgeslagen), niet opnieuw beginnen en niets wissen.
+        if (!$refreshNowRequested && !$refreshBlocked
+            && demeter_workorder_state_cache_needs_resume($selectedCompany, $selectedCostCenter)
+        ) {
+            $refreshNowRequested = true;
+            $forceFullReload = false;
+            $rebuildResume = true;
+        }
+
         if ($refreshNowRequested) {
             $claimResult = demeter_active_load_claim(
                 $selectedCompany,
@@ -1020,6 +1122,7 @@ try {
                 $asyncLoadEnabled = false;
                 $forceFullReload = false;
                 $refreshNowRequested = false;
+                $rebuildResume = false;
                 $refreshBlocked = true;
             } else {
                 $asyncLoadEnabled = true;
@@ -1036,7 +1139,9 @@ try {
 
         if ($asyncLoadEnabled) {
             if ($forceFullReload) {
-                demeter_workorder_state_cache_purge($selectedCompany, $selectedCostCenter);
+                // Niet-destructief: de huidige rijen blijven als 'vorige rijen' zichtbaar tot de herbouw
+                // compleet is (pas dan wisselen); alleen de state begint leeg.
+                demeter_workorder_state_cache_begin_rebuild($selectedCompany, $selectedCostCenter);
             }
 
             $estimatedWeeks = demeter_history_weeks_total_for_scan($monthScan, $syncLoadWeek);
@@ -1072,17 +1177,17 @@ try {
         }
 
         $builtRows = ['rows' => [], 'row_keys' => []];
-        if ($asyncLoadEnabled) {
-            $rows = [];
+        // Ook tijdens een (hervatte) herbouw de bruikbare rijen tonen: de vorige complete rijen zolang de
+        // herbouw loopt/onderbroken is, anders de huidige display-cache.
+        $pageDisplay = demeter_workorder_state_cache_display_rows_for_page($selectedCompany, $selectedCostCenter);
+        $showingPreviousRows = !empty($pageDisplay['previous']);
+        $displayRowsByKey = is_array($pageDisplay['rows'] ?? null) ? $pageDisplay['rows'] : [];
+        if ($displayRowsByKey !== []) {
+            $cacheUsedForFirstPaint = true;
+            // Altijd alle rijen: het factuurfilter wordt client-side toegepast (zonder navigatie).
+            $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, 'both');
         } else {
-            $displayRowsByKey = demeter_workorder_state_cache_load_display_rows($selectedCompany, $selectedCostCenter);
-            if ($displayRowsByKey !== []) {
-                $cacheUsedForFirstPaint = true;
-                // Altijd alle rijen: het factuurfilter wordt client-side toegepast (zonder navigatie).
-                $rows = demeter_filter_display_rows_by_invoice($displayRowsByKey, 'both');
-            } else {
-                $rows = [];
-            }
+            $rows = [];
         }
 
         save_user_settings($currentUserEmail, null, null, null, $selectedCostCenter);
@@ -1148,8 +1253,14 @@ $initialData = [
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
         'refresh_blocked' => $refreshBlocked || $asyncLoadEnabled || $hitchhikeActiveLoad,
-        'force_full' => $forceFullReload,
+        // Hervatten leest de weken ook volledig (force_full), maar slaat al gelezen weken over (resume).
+        'force_full' => $forceFullReload || ($rebuildResume && $asyncLoadEnabled),
         'cache_version_rebuild' => $cacheVersionRebuild && $asyncLoadEnabled,
+        'rebuild_resume' => $rebuildResume && $asyncLoadEnabled,
+        // Rijen uit de cache staan al in beeld: de lopende (her)bouw voegt weken niet in de tabel samen,
+        // maar wisselt pas bij 'klaar' (pagina herladen). Zo verdwijnen bruikbare gegevens nooit halverwege.
+        'keep_display_rows' => $asyncLoadEnabled && $cacheUsedForFirstPaint,
+        'showing_previous_rows' => $showingPreviousRows,
         'chunk_unit' => 'week',
         'current_week' => $syncLoadWeek,
         'current_month' => $syncLoadWeek,
