@@ -223,6 +223,37 @@ function demeter_page_apply_full_project_totals(string $company, array $displayR
     return demeter_project_totals_full_apply_wo_to_rows($company, demeter_project_totals_full_apply_to_rows($company, $displayRowsByKey));
 }
 
+/**
+ * Rijen + projecttotalen zoals de pagina-render ze aan de browser geeft (zie de render-flow): display-cache,
+ * volledige project- en werkordertotalen, alle factuurfilters (client-side gefilterd).
+ *
+ * @return array{rows: list<array>, project_totals_cumulative_by_job: array<string, array{costs: float, revenue: float}>, previous: bool, history_complete: bool}
+ */
+function demeter_page_rows_payload(string $company, string $costCenter): array
+{
+    $pageDisplay = demeter_workorder_state_cache_display_rows_for_page($company, $costCenter);
+    $displayRowsByKey = is_array($pageDisplay['rows'] ?? null) ? $pageDisplay['rows'] : [];
+    if ($displayRowsByKey !== []) {
+        $displayRowsByKey = demeter_page_apply_full_project_totals($company, $displayRowsByKey);
+    }
+    $rows = array_values(demeter_filter_display_rows_by_invoice($displayRowsByKey, 'both'));
+    $totals = [];
+    foreach ($rows as $row) {
+        $job = is_array($row) ? strtolower(trim((string) ($row['Job_No'] ?? ''))) : '';
+        if ($job !== '' && !isset($totals[$job])) {
+            $totals[$job] = ['costs' => (float) ($row['Project_Actual_Costs'] ?? 0.0), 'revenue' => (float) ($row['Project_Total_Revenue'] ?? 0.0)];
+        }
+    }
+    $monthScan = demeter_workorder_state_cache_raw_month_scan($company, $costCenter);
+
+    return [
+        'rows' => $rows,
+        'project_totals_cumulative_by_job' => $totals,
+        'previous' => !empty($pageDisplay['previous']),
+        'history_complete' => is_array($monthScan) && demeter_month_scan_history_complete($monthScan),
+    ];
+}
+
 /** load_month: de cumulatieve weeksom vervangen door de volledige totalen (voor de jobs in de map en de rijen). */
 function demeter_load_month_full_project_totals(string $company, array $cumulative, array $rows): array
 {
@@ -938,6 +969,29 @@ if (($_GET['action'] ?? '') === 'ensure_project_totals') {
     } catch (Throwable $ensureError) {
         error_log('Demeter ensure_project_totals: ' . $ensureError->getMessage());
         demeter_send_json_response(['ok' => false, 'available' => false, 'error' => $ensureError->getMessage()]);
+    }
+}
+
+if (($_GET['action'] ?? '') === 'page_rows') {
+    // De rijen precies zoals de pagina ze rendert (display-cache + volledige project- en werkordertotalen),
+    // voor het bijwerken van de bestaande tabel na een catch-up, wijzigingsronde of opbouw van de totalen,
+    // zonder de pagina te herladen (filters, sortering, scrollpositie en modals blijven staan). Alleen lezen.
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+    $GLOBALS['demeter_json_action'] = true;
+    try {
+        $rowsCompany = trim((string) ($_GET['company'] ?? ''));
+        $rowsCostCenter = trim((string) ($_GET['cost_center'] ?? ''));
+        if ($rowsCompany === '' || $rowsCostCenter === '') {
+            throw new InvalidArgumentException('Ongeldige parameters voor page_rows.');
+        }
+        @set_time_limit(90);
+        auth_set_current_company_context($rowsCompany, 300);
+        $pageRows = demeter_page_rows_payload($rowsCompany, $rowsCostCenter);
+        demeter_send_json_response(['ok' => true] + $pageRows);
+    } catch (Throwable $rowsError) {
+        error_log('Demeter page_rows: ' . $rowsError->getMessage());
+        demeter_send_json_response(['ok' => false, 'error' => $rowsError->getMessage()]);
     }
 }
 

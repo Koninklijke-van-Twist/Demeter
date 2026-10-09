@@ -765,6 +765,14 @@
                         stopPageLoaderProgress();
                         hitchhikeLoadRunning = false;
                         updateHistoryLoadNote('');
+                        if (kind === 'catch_up')
+                        {
+                            // Catch-up van een ander klaar: de tabel bijwerken i.p.v. herladen.
+                            stripLoadTokenFromUrl();
+                            setRefreshNowButtonDisabled(false, '');
+                            refreshRowsInPlace(reloadPageWithoutRefreshNow).then(function () { resolve(); });
+                            return;
+                        }
                         reloadPageWithoutRefreshNow();
                         resolve();
                     }
@@ -845,7 +853,8 @@
                 cacheMeta.age_seconds = status.cache_age_seconds;
             }
             updateCacheAgeBannerFromMeta();
-            reloadPageWithoutRefreshNow();
+            // Een ander heeft de cache ververst: de tabel bijwerken i.p.v. herladen (vangnet: herladen).
+            await refreshRowsInPlace(reloadPageWithoutRefreshNow);
             return;
         }
 
@@ -6836,9 +6845,9 @@
         }
     }
 
-    function reloadAfterChanges (note)
+    // Oude gedrag (vangnet als bijwerken in de tabel niet lukt): hooguit één herlaadbeurt per 3 minuten.
+    function reloadAfterChangesFallback ()
     {
-        // Hooguit één automatische herlaadbeurt per 3 minuten (nooit een herlaad-lus).
         if (changesReloadRecentlyDone())
         {
             updateHistoryLoadNote('');
@@ -6852,9 +6861,140 @@
         {
             // geen sessionStorage: dan alleen de serverkant (sync max. 1x per 180 s)
         }
-        updateHistoryLoadNote(note);
         window.__demeterSuppressUnloadLoader = true;
         window.location.reload();
+    }
+
+    // Wijzigingen uit BC verwerkt: de bestaande tabel bijwerken i.p.v. de pagina te herladen (Tim, 9 okt).
+    function reloadAfterChanges (note)
+    {
+        updateHistoryLoadNote(note);
+        return refreshRowsInPlace(reloadAfterChangesFallback);
+    }
+
+    let inPlaceRefreshRunning = false;
+
+    /**
+     * Haalt de rijen op zoals de pagina ze zou renderen (action=page_rows) en verwerkt ze in de huidige tabel:
+     * gewijzigde rijen bijgewerkt (memo's blijven), nieuwe toegevoegd, verdwenen rijen weg, projecttotalen
+     * vervangen. Filters, sortering, scrollpositie en geopende modals blijven staan. Lukt het niet (fout, of
+     * de server toont tijdens een herbouw de vorige rijen), dan het oude gedrag via fallback().
+     */
+    async function refreshRowsInPlace (fallback)
+    {
+        if (inPlaceRefreshRunning || loadedCostCenter === '')
+        {
+            return false;
+        }
+        inPlaceRefreshRunning = true;
+        const runFallback = function ()
+        {
+            if (typeof fallback === 'function')
+            {
+                fallback();
+            }
+        };
+        try
+        {
+            const params = new URLSearchParams();
+            params.set('action', 'page_rows');
+            params.set('company', String(payload.company || ''));
+            params.set('cost_center', loadedCostCenter);
+            const response = await fetch('index.php?' + params.toString(), {
+                method: 'GET',
+                credentials: 'same-origin',
+                headers: { Accept: 'application/json' },
+                cache: 'no-store'
+            });
+            const body = await response.json();
+            if (!body || body.ok !== true || !Array.isArray(body.rows) || body.rows.length === 0 || body.previous === true)
+            {
+                runFallback();
+                return false;
+            }
+            applyPageRowsInPlace(body);
+            updateHistoryLoadNote('');
+            return true;
+        }
+        catch (refreshError)
+        {
+            console.error(refreshError);
+            runFallback();
+            return false;
+        }
+        finally
+        {
+            inPlaceRefreshRunning = false;
+        }
+    }
+
+    function applyPageRowsInPlace (body)
+    {
+        const serverKeys = new Set();
+        for (const row of body.rows)
+        {
+            const rowKey = String((row && row.Row_Key) || '').trim();
+            if (rowKey !== '')
+            {
+                serverKeys.add(rowKey);
+            }
+        }
+        removeRowsNotInKeys(serverKeys);
+        mergeMonthChunk({
+            rows: body.rows,
+            project_totals_cumulative_by_job: body.project_totals_cumulative_by_job || {}
+        }, {
+            replace: true,
+            resetTotals: true,
+            useCumulativeFromChunk: true
+        });
+        if (body.history_complete === true && !asyncLoadConfig.enabled && !historyLoadRunning && !hitchhikeLoadRunning)
+        {
+            setProjectTotalsIncompleteState('');
+        }
+    }
+
+    // Rijen die de server niet meer heeft (bv. werkorder naar een andere afdeling) uit de tabel halen.
+    function removeRowsNotInKeys (keepKeys)
+    {
+        if (!keepKeys || keepKeys.size === 0)
+        {
+            return;
+        }
+        const kept = [];
+        const removedKeys = [];
+        for (const row of rows)
+        {
+            const rowKey = String((row && row.Row_Key) || '').trim();
+            if (rowKey !== '' && !keepKeys.has(rowKey))
+            {
+                removedKeys.push(rowKey);
+            }
+            else
+            {
+                kept.push(row);
+            }
+        }
+        if (removedKeys.length === 0)
+        {
+            return;
+        }
+        rows.length = 0;
+        for (const row of kept)
+        {
+            rows.push(row);
+        }
+        for (const removedKey of removedKeys)
+        {
+            rowsByKey.delete(removedKey);
+            const tr = rowDomByKey.get(removedKey);
+            if (tr && tr.parentNode)
+            {
+                tr.remove();
+            }
+            rowDomByKey.delete(removedKey);
+            rowLoadStates.delete(removedKey);
+        }
     }
 
     /**
@@ -6912,17 +7052,22 @@
             {
                 return;
             }
-            try
+            asyncLoadConfig.project_totals_full_missing = false;
+            // De volledige totalen in de huidige tabel zetten (geen herlaad). Vangnet: één herlaadbeurt.
+            return refreshRowsInPlace(function ()
             {
-                window.sessionStorage.setItem(PROJECT_TOTALS_RELOAD_GUARD_KEY, String(Date.now()));
-            }
-            catch (storageError)
-            {
-                // zonder sessionStorage zou een mislukte toepassing een herlaad-lus geven: dan niet herladen
-                return;
-            }
-            window.__demeterSuppressUnloadLoader = true;
-            window.location.reload();
+                try
+                {
+                    window.sessionStorage.setItem(PROJECT_TOTALS_RELOAD_GUARD_KEY, String(Date.now()));
+                }
+                catch (storageError)
+                {
+                    // zonder sessionStorage zou een mislukte toepassing een herlaad-lus geven: dan niet herladen
+                    return;
+                }
+                window.__demeterSuppressUnloadLoader = true;
+                window.location.reload();
+            });
         }).catch(function (ensureError)
         {
             console.error(ensureError);
@@ -6984,7 +7129,7 @@
         {
             if (body.rows_changed === true)
             {
-                reloadAfterChanges('Statuswijzigingen uit BC verwerkt; pagina wordt ververst...');
+                reloadAfterChanges('Statuswijzigingen uit BC verwerkt; tabel wordt bijgewerkt...');
             }
             return;
         }
@@ -7027,7 +7172,7 @@
 
         if (failed === 0)
         {
-            reloadAfterChanges('Wijzigingen uit BC verwerkt; pagina wordt ververst...');
+            await reloadAfterChanges('Wijzigingen uit BC verwerkt; tabel wordt bijgewerkt...');
             return;
         }
         updateHistoryLoadNote(String(failed) + ' van ' + String(weeks.length) + ' gewijzigde weken konden niet opnieuw worden gelezen; dat gebeurt bij de volgende keer openen.');
