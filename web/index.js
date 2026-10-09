@@ -215,6 +215,8 @@
     let statusHintTimeoutId = null;
     let pageLoaderProgressTimerId = 0;
     let pageLoaderProgressRequestToken = '';
+    // Wordt de pagina verlaten/herladen (beforeunload)? Alleen dan mag de laad-overlay blijven staan.
+    let pageNavigationPending = false;
     // Afgeronde/mislukte voortgang die er al stond toen het volgen begon (bv. de 409 van de catch-up van de
     // vorige pagina bij een herlaad): niet opnieuw tonen. Alleen een overgang tijdens het volgen telt.
     let pageLoaderProgressFirstPoll = false;
@@ -391,6 +393,25 @@
             closeNotesModal();
         }
     });
+
+    if (pageLoader && typeof pageLoader.addEventListener === 'function')
+    {
+        // Vangnet: zonder navigatie onderweg kan de gebruiker de overlay altijd wegklikken.
+        pageLoader.addEventListener('click', function ()
+        {
+            if (!pageNavigationPending)
+            {
+                hidePageLoader();
+            }
+        });
+        document.addEventListener('keydown', function (event)
+        {
+            if (event && event.key === 'Escape' && !pageNavigationPending && pageLoader.classList.contains('is-visible'))
+            {
+                hidePageLoader();
+            }
+        });
+    }
 
     initializeMemoMenu();
     setupRowAnimationObserver();
@@ -1399,6 +1420,7 @@
 
         window.addEventListener('beforeunload', function (event)
         {
+            pageNavigationPending = true;
             if (window.__demeterSuppressUnloadLoader !== true && asyncLoadConfig.enabled && historyLoadRunning)
             {
                 // Dit tabblad stuurt de week-lus aan: weggaan stopt het laden. Vraag om bevestiging.
@@ -1493,6 +1515,9 @@
         }
 
         pageLoaderProgressRequestToken = '';
+        // Een nog lopende voortgangs-fetch mag na het stoppen niets meer tonen (anders bleef na het
+        // bijwerken in de tabel een 'Laden afgerond (100%)'-overlay staan; regressie #38, 9 okt).
+        pageLoaderProgressFetchToken++;
         pageLoaderShakePercent = 0;
         stopPageLoaderShake();
         stopPageLoaderElementShake();
@@ -1726,7 +1751,7 @@
             }
 
             const progress = await response.json();
-            if (!progress || typeof progress !== 'object')
+            if (!progress || typeof progress !== 'object' || fetchToken !== pageLoaderProgressFetchToken || token !== pageLoaderProgressRequestToken)
             {
                 return;
             }
@@ -1802,6 +1827,17 @@
             }
 
             updateHistoryLoadNote(noteText);
+            return;
+        }
+
+        if (!pageNavigationPending && (status === 'completed' || status === 'error'))
+        {
+            // Geen navigatie onderweg: een afgeronde/mislukte load hoort geen blokkerende overlay te geven.
+            hidePageLoader();
+            if (status === 'error' && String(text || '').trim() !== '')
+            {
+                updateHistoryLoadNote(text);
+            }
             return;
         }
 
@@ -6913,6 +6949,8 @@
                 return false;
             }
             applyPageRowsInPlace(body);
+            stopPageLoaderProgress();
+            hidePageLoader();
             updateHistoryLoadNote('');
             return true;
         }
