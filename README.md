@@ -129,3 +129,7 @@ De kolommen *Kosten project* en *Opbrengst project* komen uit een apart bestand 
 - **Gebruik**: de pagina-render en `load_month` (`project_totals_cumulative_by_job` en de rijen) zetten deze totalen op alle rijen van een project. Een herbouw is niet nodig.
 - **Werkordertotalen** (versie 2 van het bestand, `wo_totals`): *Kosten/Opbrengst/Resultaat werkorder* per `job|werkorder` over alle posten van de werkorder, ongeacht de kostenplaats of boekdatum van de post. Toegepast bij de pagina-render en bij de catch-up (de browser vervangt die rijen); niet op gewone weekrijen van `load_month`, want die telt de browser op. Rijen die al kloppen blijven ongewijzigd. Een bestand van versie 1 blijft de projecttotalen leveren tot de nieuwe opbouw (~40 s, na de pagina of via `ensure_project_totals`) klaar is.
 - **Uitzetten**: `define('DEMETER_PROJECT_TOTALS_FULL_ENABLED', false)`.
+
+## Gebruikersbeheer
+
+Vaste admins (`opesket@kvt.nl`, `tfalken@kvt.nl`, `milanscheenloop@kvt.nl`) beheren de allowlist via `admin_users.php`. Die lijst staat in `web/data/access.sqlite`. Zolang die tabel leeg is, geldt `$allowedUsers` uit `auth.php`.

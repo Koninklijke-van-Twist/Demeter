@@ -1,5 +1,39 @@
 <?php
 
+require_once __DIR__ . '/lib/UserAccess.php';
+require_once __DIR__ . '/lib/AllowedUsersStore.php';
+
+function kvt_managed_allowed_emails(): array
+{
+    try {
+        return (new AllowedUsersStore(__DIR__ . '/data/access.sqlite'))->listAllowedEmails();
+    } catch (Throwable) {
+        return [];
+    }
+}
+
+function kvt_session_email(): string
+{
+    return strtolower(trim((string) ($_SESSION['user']['email'] ?? '')));
+}
+
+/**
+ * true = toegang ok; false = weigeren. null = gebruik de oorspronkelijke auth.php-check.
+ */
+function kvt_access_decision(?array $authAllowedUsers = null): ?bool
+{
+    $email = kvt_session_email();
+    if (kvt_email_is_admin($email)) {
+        return true;
+    }
+    $managed = kvt_managed_allowed_emails();
+    if ($managed !== []) {
+        return in_array($email, $managed, true);
+    }
+
+    return null;
+}
+
 function is_trusted_requester(): bool
 {
     $remote = $_SERVER['REMOTE_ADDR'] ?? '';
@@ -20,6 +54,11 @@ function demeter_is_allowed_logged_in_user(): bool
     $allowedUsersList = isset($GLOBALS['allowedUsers']) && is_array($GLOBALS['allowedUsers'])
         ? $GLOBALS['allowedUsers']
         : (isset($allowedUsers) && is_array($allowedUsers) ? $allowedUsers : []);
+
+    $decision = kvt_access_decision($allowedUsersList);
+    if ($decision !== null) {
+        return $decision;
+    }
 
     if ($allowedUsersList === []) {
         return false;
