@@ -48,6 +48,9 @@
     // Ververs Nu (bovenaan i.v.m. TDZ): bevestigingstekst en status van het verversen na pageload.
     // Ververs Nu (bovenaan i.v.m. TDZ): de enige bevestiging, met de gemiddelde duur van de laatste 10 voltooide runs.
     const REFRESH_NOW_AVG_MINUTES = Number(asyncLoadConfig.refresh_now_avg_minutes) > 0 ? Math.round(Number(asyncLoadConfig.refresh_now_avg_minutes)) : 0;
+    // Handmatige Ververs Nu (zelf of meeliften): de laadbalk-modal blijft staan tot de run klaar is of faalt;
+    // de staptekst staat dan in de modal i.p.v. bovenaan de pagina.
+    let refreshModalActive = asyncLoadConfig.refresh_modal === true;
     const REFRESH_NOW_CONFIRM_MESSAGE = REFRESH_NOW_AVG_MINUTES > 0
         ? 'Dit kan even duren (gemiddeld ~' + REFRESH_NOW_AVG_MINUTES + ' minuten), weet je het zeker?'
         : 'Dit kan even duren, weet je het zeker?';
@@ -433,6 +436,10 @@
     updateSummaryCount();
     syncTableScrollWrapMaxHeight();
     hidePageLoader();
+    if (refreshModalActive)
+    {
+        showRefreshModal('Ververs Nu: laden gestart...');
+    }
     if (!asyncLoadConfig.enabled && cacheMeta.has_data === true && cacheMeta.history_complete === false)
     {
         // Cache van een niet afgeronde volledige verversing: niet als compleet tonen.
@@ -864,6 +871,7 @@
                         // Toon de uitleg van de server (bij een vastgelopen load staat die in progress.message).
                         const serverError = progress && typeof progress.error === 'string' ? progress.error.trim() : '';
                         updateHistoryLoadNote(serverError !== '' ? serverError : (message !== '' ? message : 'Bijwerken mislukt.'));
+                        finishRefreshModal(serverError !== '' ? serverError : (message !== '' ? message : 'Bijwerken mislukt.'));
                         stripLoadTokenFromUrl();
                         setRefreshNowButtonDisabled(false, '');
                         resolve();
@@ -1376,6 +1384,7 @@
                         {
                             if (status && status.running && status.active_load && status.active_load.token)
                             {
+                                showRefreshModal('Er loopt al een verversing; meeliften...');
                                 startHitchhikeActiveLoad(
                                     status.active_load.token,
                                     status.active_load.kind || 'refresh'
@@ -1872,6 +1881,10 @@
             }
 
             updateHistoryLoadNote(noteText);
+            if (refreshModalActive)
+            {
+                applyPageLoaderProgressVisuals(status === 'completed' ? 100 : percent, currentCallLabel);
+            }
             return;
         }
 
@@ -2175,7 +2188,7 @@
 
     function hidePageLoader ()
     {
-        if (!pageLoader)
+        if (!pageLoader || refreshModalActive)
         {
             return;
         }
@@ -5741,8 +5754,48 @@
         renderLoadStatsNote();
     }
 
+    function showRefreshModal (text)
+    {
+        refreshModalActive = true;
+        if (pageLoader)
+        {
+            pageLoader.classList.add('is-visible');
+        }
+        if (pageLoaderText && typeof text === 'string' && text.trim() !== '')
+        {
+            pageLoaderText.textContent = text;
+        }
+    }
+
+    // Einde van een handmatige Ververs Nu: bij succes de pagina met de nieuwe gegevens laden, bij een fout melden.
+    function finishRefreshModal (errorText)
+    {
+        if (!refreshModalActive)
+        {
+            return;
+        }
+        if (!errorText)
+        {
+            reloadPageWithoutRefreshNow();
+            return;
+        }
+        refreshModalActive = false;
+        hidePageLoader();
+        updateHistoryLoadNote('');
+        if (demeterModal)
+        {
+            demeterModal.alert({ title: 'Ververs Nu mislukt', message: String(errorText) });
+        }
+    }
+
     function updateHistoryLoadNote (message)
     {
+        if (refreshModalActive)
+        {
+            showRefreshModal(String(message || ''));
+            message = '';
+        }
+
         const note = document.getElementById('historyLoadNote');
         if (!note)
         {
@@ -7525,6 +7578,7 @@
             updateHistoryLoadNote('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             stopPageLoaderProgress();
             historyLoadRunning = false;
+            finishRefreshModal('Fout bij laden weken: ' + String(historyError && historyError.message ? historyError.message : historyError));
             setProjectTotalsIncompleteState('error');
             setRefreshNowButtonDisabled(false, '');
             return false;
@@ -7535,6 +7589,7 @@
         updateHistoryLoadNote('');
         historyLoadRunning = false;
         setProjectTotalsIncompleteState('');
+        finishRefreshModal(null);
 
         return true;
     }

@@ -1514,6 +1514,7 @@ $initialData = [
         'sync_changes_enabled' => false,
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
+        'refresh_modal' => $userRefreshNowRequested && ($asyncLoadEnabled || $hitchhikeActiveLoad),
         // Gemiddelde duur (min) van de laatste 10 voltooide Ververs Nu-runs, voor de bevestigingsmodal.
         'refresh_now_avg_minutes' => $selectedCompany !== '' && $selectedCostCenter !== '' ? demeter_refresh_durations_average_minutes($selectedCompany, $selectedCostCenter) : null,
         // Ververs Nu liftte mee op een catch-up (alleen de huidige week): daarna alsnog volledig verversen.
