@@ -43,8 +43,8 @@ check(api.formatSlowStepSuffix({ status: 'error', slow: true }) === '', 'fout: g
 // Voortgangs-poller: fout (vastgelopen) gaat voor op de backfill-tekst; traag-tekst wordt toegevoegd.
 const applyBlock = slice('    function applyLoadProgressToUi (text, percent, currentCallLabel, status, slowSuffix)', '    function startBackgroundLoadProgressPolling ()');
 let shown = '';
-const apply = new Function('asyncLoadConfig', 'hitchhikeLoadRunning', 'historyBackfillNote', 'updateHistoryLoadNote', 'showPageLoader', 'applyPageLoaderProgressVisuals',
-    applyBlock + '\nreturn applyLoadProgressToUi;')({ enabled: true }, false, 'Oudere historie teruglezen (incl. facturen): 2023-W05', function (t) { shown = t; }, function () {}, function () {});
+const apply = new Function('asyncLoadConfig', 'hitchhikeLoadRunning', 'historyBackfillNote', 'updateHistoryLoadNote', 'showPageLoader', 'applyPageLoaderProgressVisuals', 'refreshModalActive',
+    applyBlock + '\nreturn applyLoadProgressToUi;')({ enabled: true }, false, 'Oudere historie teruglezen (incl. facturen): 2023-W05', function (t) { shown = t; }, function () {}, function () {}, false);
 apply('Stap 9 van 10', 90, '', 'running', ' · deze stap duurt langer dan normaal');
 check(shown === 'Oudere historie teruglezen (incl. facturen): 2023-W05 · deze stap duurt langer dan normaal', 'backfill + traag: ' + shown);
 apply('Laden is vastgelopen: …', 0, '', 'error', '');
