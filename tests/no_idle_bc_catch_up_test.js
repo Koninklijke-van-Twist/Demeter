@@ -10,5 +10,5 @@ if (/startCatchUpCurrentWeek\s*\(/.test(body)) { console.error('FAIL idle-timer 
 // Nieuwere cache door een ander: de tabel bijwerken (9 okt), met herladen als vangnet.
 if (!/refreshRowsInPlace\s*\(\s*reloadPageWithoutRefreshNow\s*\)/.test(body)) { console.error('FAIL bijwerken bij nieuwere cache is weg'); process.exit(1); }
 // De page-open catch-up blijft bestaan.
-if (!/asyncLoadConfig\.catch_up_enabled\)\s*\{\s*startCatchUpCurrentWeek\(\)/.test(src)) { console.error('FAIL page-open catch-up is weg'); process.exit(1); }
+if (!/asyncLoadConfig\.catch_up_enabled\)\s*\{[^}]*?startCatchUpCurrentWeek\(\)/.test(src)) { console.error('FAIL page-open catch-up is weg'); process.exit(1); }
 console.log('ok   geen idle BC-catch-up; page-open catch-up en herladen blijven');
