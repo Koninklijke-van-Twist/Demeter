@@ -98,8 +98,16 @@ $newRows = make_rows(355, $costCenter, 'NEW');
 demeter_workorder_state_cache_save($company, $costCenter, [], $partialScan);
 demeter_workorder_state_cache_save_display_rows($company, $costCenter, $newRows);
 $page = demeter_workorder_state_cache_display_rows_for_page($company, $costCenter);
-check($page['previous'] === true && count($page['rows']) === 9675, 'onderbroken herbouw: nog steeds de vorige 9675 rijen, niet de 355 nieuwe');
+check($page['previous'] === true && count($page['rows']) === 9675 + 355, 'onderbroken herbouw: vorige 9675 rijen plus de 355 verse rijen (niet alleen de 355 nieuwe)');
 check(demeter_workorder_state_cache_needs_resume($company, $costCenter), 'onderbroken herbouw moet hervat worden');
+// Verse rij (herbouwde week of nightly-statusupdate) gaat voor de bevroren vorige rij (regressie WO2600494).
+$oldKey = array_key_first($oldRows);
+$freshRows = $newRows;
+$freshRows[$oldKey] = array_replace($oldRows[$oldKey], ['Status' => 'Afgesloten']);
+demeter_workorder_state_cache_save_display_rows($company, $costCenter, $freshRows);
+$page = demeter_workorder_state_cache_display_rows_for_page($company, $costCenter);
+check($page['previous'] === true && ($page['rows'][$oldKey]['Status'] ?? '') === 'Afgesloten', 'vorige rijen: verse status uit de nieuwe cache wint');
+demeter_workorder_state_cache_save_display_rows($company, $costCenter, $newRows);
 
 // 3) Herstart (bv. Ververs Nu) terwijl de herbouw onderbroken is: vorige complete rijen blijven.
 demeter_workorder_state_cache_begin_rebuild($company, $costCenter);

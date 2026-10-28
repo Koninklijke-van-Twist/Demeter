@@ -1555,6 +1555,16 @@ function demeter_workorder_state_cache_display_rows_for_page(string $company, st
         if ($stale || !is_array($monthScan) || !demeter_month_scan_history_complete($monthScan)) {
             $previousRows = demeter_workorder_state_cache_load_previous_display_rows($company, $costCenter);
             if ($previousRows !== []) {
+                // Verse rijen (al herbouwde weken, nightly/hourly-statusupdates) gaan voor: anders toont
+                // de pagina tot de herbouw klaar is een bevroren kopie (bv. 'Gecontroleerd' i.p.v. 'Afgesloten').
+                $currentRows = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
+                if ($currentRows !== []) {
+                    $previousRows = array_replace($previousRows, $currentRows);
+                    if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
+                        $previousRows = demeter_coalesce_display_rows_by_business_key($previousRows);
+                    }
+                }
+
                 return ['rows' => $previousRows, 'previous' => true];
             }
         } else {
