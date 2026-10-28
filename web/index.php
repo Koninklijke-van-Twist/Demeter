@@ -1326,15 +1326,9 @@ try {
             $forceFullReload = true;
         }
 
-        // Onderbroken volledige verversing (de aansturende browser is gestopt): automatisch verder gaan
-        // waar hij bleef (al gelezen weken worden overgeslagen), niet opnieuw beginnen en niets wissen.
-        if (!$refreshNowRequested && !$refreshBlocked
-            && demeter_workorder_state_cache_needs_resume($selectedCompany, $selectedCostCenter)
-        ) {
-            $refreshNowRequested = true;
-            $forceFullReload = false;
-            $rebuildResume = true;
-        }
+        // Onderbroken volledige verversing: bij het openen NIET meer automatisch hervatten (Tim 28 okt: alleen
+        // nightly.php en Ververs Nu laden). De vorige rijen (met verse rijen erover) blijven zichtbaar; de nightly
+        // (skip_if_cached) of de volgende Ververs Nu maakt de historie af.
 
         if ($refreshNowRequested) {
             $claimResult = demeter_active_load_claim(
@@ -1459,9 +1453,9 @@ if (!$refreshBlocked && demeter_active_load_is_fresh_running($bootActiveLoad)) {
 
 // Fase 1 (SHADOW): bij het openen van de pagina de werkorder-store bijwerken (alleen als die ouder is dan
 // 180 s, één schrijver onder lock). Pas NA het versturen van de pagina (fastcgi_finish_request), zodat Linda
-// niet wacht; het scherm leest de store nog niet. Uit: define('DEMETER_STORE_SHADOW_PAGE_SYNC', false).
+// niet wacht; het scherm leest de store nog niet. Standaard UIT (geen BC bij pageload); aan: define('DEMETER_STORE_SHADOW_PAGE_SYNC', true).
 if ($selectedCompany !== '' && $selectedCostCenter !== ''
-    && (!defined('DEMETER_STORE_SHADOW_PAGE_SYNC') || DEMETER_STORE_SHADOW_PAGE_SYNC)
+    && (defined('DEMETER_STORE_SHADOW_PAGE_SYNC') && DEMETER_STORE_SHADOW_PAGE_SYNC)
     && function_exists('fastcgi_finish_request')
 ) {
     require_once __DIR__ . '/bc_fetch/store_transport.php';
@@ -1501,15 +1495,17 @@ $initialData = [
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
-        'catch_up_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
+        // Geen automatische vulling bij het openen meer (Tim 28 okt): alleen nightly.php en Ververs Nu laden.
+        'catch_up_enabled' => false,
         'catch_up_week' => $syncLoadWeek,
         // Na de catch-up: page-open BC-delta (action=sync_changes) en daarna de geraakte weken opnieuw lezen.
         'project_totals_full_missing' => $cacheUsedForFirstPaint && $selectedCostCenter !== ''
             && demeter_project_totals_full_enabled() && empty($GLOBALS['demeter_project_totals_full_applied']),
-        'sync_changes_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== ''
-            && (!defined('DEMETER_WORKORDER_DELTA_ENABLED') || DEMETER_WORKORDER_DELTA_ENABLED),
+        'sync_changes_enabled' => false,
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
+        // Gemiddelde duur (min) van de laatste 10 voltooide Ververs Nu-runs, voor de bevestigingsmodal.
+        'refresh_now_avg_minutes' => $selectedCompany !== '' && $selectedCostCenter !== '' ? demeter_refresh_durations_average_minutes($selectedCompany, $selectedCostCenter) : null,
         // Ververs Nu liftte mee op een catch-up (alleen de huidige week): daarna alsnog volledig verversen.
         'hitchhike_retrigger_refresh_now' => $userRefreshNowRequested && $hitchhikeActiveLoad && $hitchhikeKind === 'catch_up',
         // Ververs Nu: werkorderstatussen live (max_age 0) in korte stappen verversen (action=status_refresh).

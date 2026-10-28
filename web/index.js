@@ -46,10 +46,11 @@
     const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
     // Herlaad-guard van de page-open BC-delta (bovenaan i.v.m. TDZ, zie #30).
     // Ververs Nu (bovenaan i.v.m. TDZ): bevestigingstekst en status van het verversen na pageload.
-    const REFRESH_NOW_CONFIRM_MESSAGE = 'Elke nacht wordt alles bijgewerkt; bij het openen van de pagina alleen de huidige week en recente wijzigingen. '
-        + 'Ververs Nu leest alle weken en werkorderstatussen opnieuw uit BC. Dit kan lang duren, weet u het zeker?';
-    const PAGE_LOAD_BUSY_TITLE = 'Bezig met laden…';
-    let pageLoadRefreshBusy = false;
+    // Ververs Nu (bovenaan i.v.m. TDZ): de enige bevestiging, met de gemiddelde duur van de laatste 10 voltooide runs.
+    const REFRESH_NOW_AVG_MINUTES = Number(asyncLoadConfig.refresh_now_avg_minutes) > 0 ? Math.round(Number(asyncLoadConfig.refresh_now_avg_minutes)) : 0;
+    const REFRESH_NOW_CONFIRM_MESSAGE = REFRESH_NOW_AVG_MINUTES > 0
+        ? 'Dit kan even duren (gemiddeld ~' + REFRESH_NOW_AVG_MINUTES + ' minuten), weet je het zeker?'
+        : 'Dit kan even duren, weet je het zeker?';
     const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
     const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
     let loadStatsFromCache = 0;
@@ -497,8 +498,6 @@
 
     if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)
     {
-        pageLoadRefreshBusy = true;
-        setRefreshNowButtonDisabled(true, PAGE_LOAD_BUSY_TITLE);
         startCatchUpCurrentWeek()
             .catch(function (catchUpError)
             {
@@ -513,12 +512,6 @@
             .catch(function (syncError)
             {
                 console.error(syncError);
-            })
-            .then(function ()
-            {
-                // Klaar of fout: knop weer actief.
-                pageLoadRefreshBusy = false;
-                setRefreshNowButtonDisabled(false, '');
             });
     }
 
@@ -660,11 +653,6 @@
 
     function setRefreshNowButtonDisabled (disabled, titleText)
     {
-        // Zolang het verversen na pageload loopt (catch-up + wijzigingsronde) blijft de knop uit.
-        if (!disabled && pageLoadRefreshBusy)
-        {
-            return;
-        }
         const button = document.getElementById('refreshNowButton');
         if (!button)
         {

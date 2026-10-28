@@ -33,12 +33,15 @@ function check (ok, label) { console.log((ok ? 'ok   ' : 'FAIL ') + label); if (
     check(api.progressText({ chunks_done: 2, chunks_total: 3, percent: 66 }) === 'Statussen verversen: 2 / 3 blokken (66%)', 'voortgang = chunks klaar / totaal');
 
     const src = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.js'), 'utf8');
-    check(src.includes('Dit kan lang duren, weet u het zeker?') && src.includes("confirmText: 'Ja'") && src.includes("cancelText: 'Annuleren'"), 'bevestigingsmodal Ja/Annuleren');
-    check(!src.includes('tien minuten') && (src.match(/message: REFRESH_NOW_CONFIRM_MESSAGE/g) || []).length === 1, 'één modal, geen onjuiste "elke tien minuten"-tekst');
-    check(/pageLoadRefreshBusy = true;\s*setRefreshNowButtonDisabled\(true, PAGE_LOAD_BUSY_TITLE\)/.test(src)
-        && /\.then\(function \(\)\s*\{[^}]*pageLoadRefreshBusy = false;\s*setRefreshNowButtonDisabled\(false, ''\)/.test(src)
-        && /if \(!disabled && pageLoadRefreshBusy\)/.test(src), 'knop uit tijdens verversen na pageload, weer aan na klaar of fout');
-    check(fs.readFileSync(path.join(__dirname, '..', 'web', 'index.php'), 'utf8').includes('.secondary-button:disabled'), 'uitgeschakelde knop is zichtbaar grijs');
+    check(src.includes("'Dit kan even duren (gemiddeld ~' + REFRESH_NOW_AVG_MINUTES + ' minuten), weet je het zeker?'")
+        && src.includes("'Dit kan even duren, weet je het zeker?'") && src.includes("confirmText: 'Ja'") && src.includes("cancelText: 'Annuleren'"), 'modal met gemiddelde duur, nette tekst zonder metingen');
+    check(!src.includes('tien minuten') && !src.includes('lang duren') && (src.match(/message: REFRESH_NOW_CONFIRM_MESSAGE/g) || []).length === 1, 'één Ververs Nu-modal');
+    check(!src.includes('pageLoadRefreshBusy'), 'geen uitgrijs-logica voor laden bij pageload meer');
+    const phpSrc = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.php'), 'utf8');
+    check(phpSrc.includes("'catch_up_enabled' => false,") && phpSrc.includes("'sync_changes_enabled' => false,")
+        && !phpSrc.includes('demeter_workorder_state_cache_needs_resume(') && phpSrc.includes("(defined('DEMETER_STORE_SHADOW_PAGE_SYNC') && DEMETER_STORE_SHADOW_PAGE_SYNC)"),
+        'pageload: geen catch-up, geen wijzigingsronde, geen auto-hervatten, geen store-sync');
+    check(phpSrc.includes('.secondary-button:disabled'), 'uitgeschakelde knop is zichtbaar grijs');
     check(/hitchhike_retrigger_refresh_now === true\)\s*\{\s*\/\/[^\n]*\n\s*reloadPageWithRefreshNow\(\)/.test(src), 'meelift op catch-up: daarna alsnog refresh_now=1');
     const php = fs.readFileSync(path.join(__dirname, '..', 'web', 'index.php'), 'utf8');
     check(php.includes("$hitchhikeKind === 'catch_up'") && php.includes('ignore_user_abort(true)'), 'server: retrigger-vlag alleen bij catch_up; ignore_user_abort in status_refresh');

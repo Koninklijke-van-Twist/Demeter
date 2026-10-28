@@ -174,7 +174,7 @@ check(strpos($index, 'demeter_workorder_state_cache_purge($selectedCompany, $sel
     && strpos($index, 'demeter_workorder_state_cache_begin_rebuild($selectedCompany, $selectedCostCenter)') !== false, 'pagina: force_full wist niets meer (begin_rebuild)');
 check(strpos($runner, 'demeter_workorder_state_cache_begin_rebuild($company, $costCenter)') !== false, 'nightly: force_full via begin_rebuild');
 check(preg_match('/demeter_month_scan_history_complete\(\$monthScan\)\)\s*\{[^}]*demeter_workorder_state_cache_finish_rebuild/', $loader) === 1, 'week-opslag ruimt vorige rijen op zodra de historie compleet is');
-check(strpos($index, 'demeter_workorder_state_cache_needs_resume($selectedCompany, $selectedCostCenter)') !== false, 'pagina hervat een onderbroken verversing');
+check(strpos($index, 'demeter_workorder_state_cache_needs_resume(') === false, 'pagina hervat niet zelf (nightly of Ververs Nu maakt het af)');
 check(strpos($index, "'resume_skip_scanned' => \$resumeRebuild && \$forceFull && !\$catchUp") !== false, 'load_month geeft resume door');
 check(strpos($index, 'demeter_workorder_state_cache_display_rows_for_page(') !== false, 'eerste paint via display_rows_for_page (vorige rijen tijdens herbouw)');
 check(strpos($index, "'keep_display_rows' => \$asyncLoadEnabled && \$cacheUsedForFirstPaint") !== false, 'tabel blijft staan tijdens herbouw');

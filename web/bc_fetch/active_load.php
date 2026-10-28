@@ -343,6 +343,11 @@ function demeter_active_load_complete_by_token(string $token): void
         }
 
         $now = time();
+        // Duur van een voltooide Ververs Nu-run vastleggen (alleen 'refresh' die nog liep: geen catch-up,
+        // geen afgebroken/vastgelopen run en geen tweede melding van een meelifter met dezelfde token).
+        if (($existing['kind'] ?? '') === 'refresh' && ($existing['status'] ?? '') === 'running' && (int) $existing['started_at'] > 0) {
+            demeter_refresh_durations_record((string) $existing['company'], (string) $existing['cost_center'], $now - (int) $existing['started_at']);
+        }
         $existing['status'] = 'completed';
         $existing['updated_at'] = $now;
         $existing['completed_at'] = $now;
@@ -477,4 +482,59 @@ function demeter_active_load_release_by_token(string $token): bool
     }
 
     return false;
+}
+
+/** Laatste 10 duren (s) van voltooide Ververs Nu-runs per bedrijf + kostenplaats (cache, niet in de repo). */
+const DEMETER_REFRESH_DURATIONS_KEEP = 10;
+
+function demeter_refresh_durations_path(string $company, string $costCenter): string
+{
+    return demeter_active_load_base_dir() . DIRECTORY_SEPARATOR . demeter_active_load_key($company, $costCenter) . '.refresh_durations';
+}
+
+/** @return list<int> */
+function demeter_refresh_durations_read(string $company, string $costCenter): array
+{
+    $decoded = demeter_active_load_read_file(demeter_refresh_durations_path($company, $costCenter));
+    $list = is_array($decoded['durations'] ?? null) ? $decoded['durations'] : [];
+
+    return array_values(array_filter(array_map('intval', $list), static function (int $d): bool { return $d > 0; }));
+}
+
+function demeter_refresh_durations_record(string $company, string $costCenter, int $seconds): void
+{
+    if ($company === '' || $costCenter === '' || $seconds <= 0) {
+        return;
+    }
+    $path = demeter_refresh_durations_path($company, $costCenter);
+    $lock = @fopen($path . '.lock', 'c');
+    if ($lock !== false) {
+        flock($lock, LOCK_EX);
+    }
+    try {
+        $list = demeter_refresh_durations_read($company, $costCenter);
+        $list[] = $seconds;
+        $list = array_slice($list, -DEMETER_REFRESH_DURATIONS_KEEP);
+        // Atomisch: tijdelijk bestand + rename.
+        $tmp = $path . '.' . getmypid() . '.tmp';
+        if (@file_put_contents($tmp, (string) json_encode(['durations' => $list, 'updated_at' => time()])) !== false) {
+            @rename($tmp, $path);
+        }
+    } finally {
+        if ($lock !== false) {
+            flock($lock, LOCK_UN);
+            fclose($lock);
+        }
+    }
+}
+
+/** Gemiddelde duur in hele minuten (min. 1), of null zonder metingen. */
+function demeter_refresh_durations_average_minutes(string $company, string $costCenter): ?int
+{
+    $list = demeter_refresh_durations_read($company, $costCenter);
+    if ($list === []) {
+        return null;
+    }
+
+    return max(1, (int) round(array_sum($list) / count($list) / 60));
 }
