@@ -1542,6 +1542,49 @@ function demeter_workorder_state_cache_load_previous_display_rows(string $compan
 }
 
 /**
+ * Legt verse display-rijen over de vorige rijen. Een verse rij vervangt de vorige rij met dezelfde
+ * rijsleutel of dezelfde businesskey (project|werkorder) in zijn geheel; er worden nooit velden of
+ * bedragen van twee rijen samengevoegd. Het bedrijf zit in het cachepad (per bedrijf/kostenplaats).
+ *
+ * @param array<string, array> $previousRows
+ * @param array<string, array> $freshRows
+ * @return array<string, array>
+ */
+function demeter_workorder_state_cache_overlay_fresh_rows(array $previousRows, array $freshRows): array
+{
+    if ($freshRows === []) {
+        return $previousRows;
+    }
+    $freshBusinessKeys = [];
+    foreach ($freshRows as $row) {
+        if (is_array($row)) {
+            $businessKey = demeter_workorder_business_key($row);
+            if ($businessKey !== '') {
+                $freshBusinessKeys[$businessKey] = true;
+            }
+        }
+    }
+    $result = [];
+    foreach ($previousRows as $rowKey => $row) {
+        if (!is_array($row) || isset($freshRows[$rowKey])) {
+            continue;
+        }
+        $businessKey = demeter_workorder_business_key($row);
+        if ($businessKey !== '' && isset($freshBusinessKeys[$businessKey])) {
+            continue;
+        }
+        $result[$rowKey] = $row;
+    }
+    foreach ($freshRows as $rowKey => $row) {
+        if (is_array($row)) {
+            $result[$rowKey] = $row;
+        }
+    }
+
+    return $result;
+}
+
+/**
  * Display-rijen voor de eerste paint. Loopt er een volledige herbouw (of is die onderbroken) en is de
  * nieuwe cache nog niet compleet, dan de vorige (complete) rijen tonen: pas wisselen als de herbouw klaar is.
  *
@@ -1557,12 +1600,15 @@ function demeter_workorder_state_cache_display_rows_for_page(string $company, st
             if ($previousRows !== []) {
                 // Verse rijen (al herbouwde weken, nightly/hourly-statusupdates) gaan voor: anders toont
                 // de pagina tot de herbouw klaar is een bevroren kopie (bv. 'Gecontroleerd' i.p.v. 'Afgesloten').
-                $currentRows = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
-                if ($currentRows !== []) {
-                    $previousRows = array_replace($previousRows, $currentRows);
-                    if (function_exists('demeter_coalesce_display_rows_by_business_key')) {
-                        $previousRows = demeter_coalesce_display_rows_by_business_key($previousRows);
-                    }
+                // Hele rijen vervangen (per rijsleutel én per project|werkorder), nooit velden of bedragen
+                // samenvoegen. Fout bij het lezen van de nieuwe cache: de vorige rijen tonen (fail safe).
+                try {
+                    $previousRows = demeter_workorder_state_cache_overlay_fresh_rows(
+                        $previousRows,
+                        demeter_workorder_state_cache_load_display_rows($company, $costCenter)
+                    );
+                } catch (Throwable $overlayError) {
+                    error_log('Demeter: verse rijen over vorige rijen leggen mislukt (' . $company . ' / ' . $costCenter . '): ' . $overlayError->getMessage());
                 }
 
                 return ['rows' => $previousRows, 'previous' => true];
