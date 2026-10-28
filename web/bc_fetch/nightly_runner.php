@@ -245,7 +245,24 @@ function demeter_nightly_refresh_open_workorder_statuses(string $company, string
         }
     }
 
-    $updated = demeter_workorder_state_cache_with_lock($company, $costCenter, static function () use ($company, $costCenter, $statusByPair): int {
+    $updated = demeter_workorder_apply_status_snapshots($company, $costCenter, $statusByPair);
+
+    return ['open_in_cache' => $openInCache, 'updated' => (int) $updated, 'not_found' => $notFound];
+}
+
+/**
+ * Past BC-statussnapshots (per project|werkorder, Job_No|Job_Task_No) toe op display-rijen, vorige
+ * display-rijen (tijdens een herbouw zichtbaar) en de state, onder de cache-lock. Gedeeld door de
+ * nightly en Ververs Nu (statusverversing). Het bedrijf zit in het cachepad.
+ *
+ * @param array<string, array> $statusByPair
+ */
+function demeter_workorder_apply_status_snapshots(string $company, string $costCenter, array $statusByPair): int
+{
+    if ($statusByPair === []) {
+        return 0;
+    }
+    return (int) demeter_workorder_state_cache_with_lock($company, $costCenter, static function () use ($company, $costCenter, $statusByPair): int {
         $changed = 0;
         $display = demeter_workorder_state_cache_load_display_rows($company, $costCenter);
         foreach ($display as $key => $row) {
@@ -271,6 +288,7 @@ function demeter_nightly_refresh_open_workorder_statuses(string $company, string
         if ($changed > 0) {
             demeter_workorder_state_cache_save_display_rows($company, $costCenter, $display);
         }
+        $changed += demeter_workorder_apply_status_snapshots_to_previous_rows($company, $costCenter, $statusByPair);
         $state = demeter_workorder_state_cache_load($company, $costCenter);
         if (is_array($state) && is_array($state['workorders'] ?? null)) {
             $stateChanged = false;
@@ -300,6 +318,52 @@ function demeter_nightly_refresh_open_workorder_statuses(string $company, string
 
         return $changed;
     });
+}
 
-    return ['open_in_cache' => $openInCache, 'updated' => (int) $updated, 'not_found' => $notFound];
+/**
+ * Zelfde statusupdate op het bestand met vorige rijen (alleen aanwezig tijdens/na een onderbroken herbouw).
+ */
+function demeter_workorder_apply_status_snapshots_to_previous_rows(string $company, string $costCenter, array $statusByPair): int
+{
+    $path = demeter_workorder_state_cache_previous_display_rows_path($company, $costCenter);
+    if (!is_file($path)) {
+        return 0;
+    }
+    $decoded = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($decoded)) {
+        return 0;
+    }
+    $wrapped = array_key_exists('version', $decoded) && array_key_exists('rows', $decoded);
+    $rows = $wrapped ? (is_array($decoded['rows']) ? $decoded['rows'] : []) : $decoded;
+    $changed = 0;
+    foreach ($rows as $key => $row) {
+        if (!is_array($row)) {
+            continue;
+        }
+        $snap = $statusByPair[demeter_workorder_pair_key((string) ($row['Job_No'] ?? ''), (string) ($row['Job_Task_No'] ?? ''))] ?? null;
+        if (!is_array($snap)) {
+            continue;
+        }
+        $status = trim((string) ($snap['Status'] ?? ''));
+        $doc = trim((string) ($snap['KVT_Document_Status'] ?? ''));
+        if (($status !== '' && $status !== (string) ($row['Status'] ?? '')) || ($doc !== '' && $doc !== (string) ($row['KVT_Document_Status'] ?? ''))) {
+            if ($status !== '') {
+                $rows[$key]['Status'] = $status;
+            }
+            if ($doc !== '') {
+                $rows[$key]['KVT_Document_Status'] = $doc;
+            }
+            $changed++;
+        }
+    }
+    if ($changed > 0) {
+        if ($wrapped) {
+            $decoded['rows'] = $rows;
+        } else {
+            $decoded = $rows;
+        }
+        demeter_workorder_state_cache_write_atomic($path, (string) json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+    }
+
+    return $changed;
 }

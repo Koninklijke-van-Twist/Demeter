@@ -995,6 +995,36 @@ if (($_GET['action'] ?? '') === 'page_rows') {
     }
 }
 
+if (($_GET['action'] ?? '') === 'status_refresh') {
+    // Ververs Nu: statussen van alle open werkorders live verversen. op=start start of lift mee; op=step
+    // verwerkt chunks tot ~20 s en geeft de voortgang (chunks klaar/totaal). De browser pollt step.
+    ini_set('display_errors', '0');
+    demeter_release_session_lock_if_active();
+    $GLOBALS['demeter_json_action'] = true;
+    try {
+        require_once __DIR__ . '/bc_fetch/status_refresh.php';
+        $srCompany = trim((string) ($_GET['company'] ?? ''));
+        $srCostCenter = trim((string) ($_GET['cost_center'] ?? ''));
+        $srOp = (string) ($_GET['op'] ?? 'step');
+        if ($srCompany === '' || $srCostCenter === '' || !in_array($srOp, ['start', 'step'], true)) {
+            throw new InvalidArgumentException('Ongeldige parameters voor status_refresh.');
+        }
+        // Tab dicht of request afgebroken: de lopende chunk afmaken en opslaan (geen halve status).
+        ignore_user_abort(true);
+        @set_time_limit(90);
+        if ($srOp === 'start') {
+            $srStart = demeter_status_refresh_start($srCompany, $srCostCenter);
+            demeter_send_json_response(['ok' => true, 'joined' => $srStart['joined']] + demeter_status_refresh_public($srStart['job']));
+        }
+        auth_set_current_company_context($srCompany, 300);
+        $srAuth = auth_get_auth_for_company($srCompany, 300);
+        demeter_send_json_response(['ok' => true] + demeter_status_refresh_step($srCompany, $srCostCenter, $srAuth));
+    } catch (Throwable $srError) {
+        error_log('Demeter status_refresh: ' . $srError->getMessage());
+        demeter_send_json_response(['ok' => false, 'error' => $srError->getMessage()]);
+    }
+}
+
 if (($_GET['action'] ?? '') === 'report_load_failure') {
     // De browser die een verversing aanstuurt geeft het op (week blijft mislukken): leg de fout vast in de
     // laadvoortgang, zodat meeliftende tabs de echte fout zien i.p.v. na 5 minuten 'vastgelopen'.
@@ -1207,6 +1237,8 @@ if ($selectedCostCenter === '' && $defaultCostCenterSetting !== '') {
 }
 
 $refreshNowRequested = strtolower(trim((string) ($_GET['refresh_now'] ?? ''))) === '1';
+// Ververs Nu door de gebruiker (niet automatisch hervatten): ook de werkorderstatussen live verversen.
+$userRefreshNowRequested = $refreshNowRequested;
 $forceFullReload = $refreshNowRequested;
 
 $callTimeLogSession = trim((string) ($_GET['call_time_log_session'] ?? ''));
@@ -1478,6 +1510,10 @@ $initialData = [
             && (!defined('DEMETER_WORKORDER_DELTA_ENABLED') || DEMETER_WORKORDER_DELTA_ENABLED),
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
+        // Ververs Nu liftte mee op een catch-up (alleen de huidige week): daarna alsnog volledig verversen.
+        'hitchhike_retrigger_refresh_now' => $userRefreshNowRequested && $hitchhikeActiveLoad && $hitchhikeKind === 'catch_up',
+        // Ververs Nu: werkorderstatussen live (max_age 0) in korte stappen verversen (action=status_refresh).
+        'status_refresh_enabled' => $userRefreshNowRequested && $selectedCompany !== '' && $selectedCostCenter !== '',
         'refresh_blocked' => $refreshBlocked || $asyncLoadEnabled || $hitchhikeActiveLoad,
         // Hervatten leest de weken ook volledig (force_full), maar slaat al gelezen weken over (resume).
         'force_full' => $forceFullReload || ($rebuildResume && $asyncLoadEnabled),
@@ -2631,6 +2667,7 @@ $initialData = [
 
 <body>
     <script src="demeter-modal.js?v=<?= urlencode((string) @filemtime(__DIR__ . '/demeter-modal.js')) ?>"></script>
+    <script src="status-refresh.js?v=<?= urlencode((string) @filemtime(__DIR__ . '/status-refresh.js')) ?>"></script>
     <div id="pageLoader" class="page-loader" aria-live="polite" aria-label="Laden">
         <div class="page-loader-content">
             <div class="page-loader-spinner" aria-hidden="true"></div>

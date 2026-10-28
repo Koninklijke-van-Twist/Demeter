@@ -474,6 +474,22 @@
         stripLoadTokenFromUrl();
     }
 
+    if (asyncLoadConfig.status_refresh_enabled === true && !asyncLoadConfig.hitchhike_retrigger_refresh_now
+        && window.DemeterStatusRefresh && loadedCostCenter !== '')
+    {
+        // Ververs Nu: ook de werkorderstatussen live verversen (los van de weken; zelfde job voor alle tabs).
+        window.DemeterStatusRefresh.run({
+            company: String(payload.company || ''),
+            costCenter: loadedCostCenter,
+            onDone: function ()
+            {
+                // Loopt in deze tab een (her)bouw, dan toont die bij 'klaar' de nieuwe rijen; anders nu bijwerken.
+                if (!asyncLoadConfig.enabled) { return refreshRowsInPlace(function () {}); }
+                return null;
+            }
+        }).catch(function (statusError) { console.error(statusError); });
+    }
+
     if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)
     {
         startCatchUpCurrentWeek()
@@ -641,6 +657,16 @@
         button.title = disabled ? String(titleText || 'Er loopt al een verversing') : '';
     }
 
+    function reloadPageWithRefreshNow ()
+    {
+        const redirectParams = new URLSearchParams(window.location.search);
+        redirectParams.delete('load_token');
+        redirectParams.delete('boot');
+        redirectParams.set('refresh_now', '1');
+        window.__demeterSuppressUnloadLoader = true;
+        window.location.replace('index.php?' + redirectParams.toString());
+    }
+
     function reloadPageWithoutRefreshNow ()
     {
         const redirectParams = new URLSearchParams(window.location.search);
@@ -786,6 +812,13 @@
                         stopPageLoaderProgress();
                         hitchhikeLoadRunning = false;
                         updateHistoryLoadNote('');
+                        if (kind === 'catch_up' && asyncLoadConfig.hitchhike_retrigger_refresh_now === true)
+                        {
+                            // Ververs Nu liftte mee op een catch-up (alleen de huidige week): nu alsnog volledig.
+                            reloadPageWithRefreshNow();
+                            resolve();
+                            return;
+                        }
                         if (kind === 'catch_up')
                         {
                             // Catch-up van een ander klaar: de tabel bijwerken i.p.v. herladen.
@@ -1388,7 +1421,27 @@
                 {
                     event.preventDefault();
                     costCenterSelect.focus();
+                    return;
                 }
+                if (refreshNowButton.dataset.confirmed === '1' || !window.DemeterModal || typeof window.DemeterModal.confirm !== 'function')
+                {
+                    return;
+                }
+                // Eerst bevestigen: Ververs Nu leest alles opnieuw, ook alle werkorderstatussen (enkele minuten).
+                event.preventDefault();
+                window.DemeterModal.confirm({
+                    title: 'Ververs Nu',
+                    message: 'Dit kan lang duren, weet u het zeker?',
+                    confirmText: 'Ja',
+                    cancelText: 'Annuleren'
+                }).then(function (confirmed)
+                {
+                    if (!confirmed) { return; }
+                    refreshNowButton.dataset.confirmed = '1';
+                    const form = refreshNowButton.form;
+                    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(refreshNowButton); }
+                    else { refreshNowButton.click(); }
+                });
             });
         }
 
