@@ -46,10 +46,11 @@
     const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
     // Herlaad-guard van de page-open BC-delta (bovenaan i.v.m. TDZ, zie #30).
     // Ververs Nu (bovenaan i.v.m. TDZ): bevestigingstekst en status van het verversen na pageload.
-    const REFRESH_NOW_CONFIRM_MESSAGE = 'Elke nacht wordt alles bijgewerkt; bij het openen van de pagina alleen de huidige week en recente wijzigingen. '
-        + 'Ververs Nu leest alle weken en werkorderstatussen opnieuw uit BC. Dit kan lang duren, weet u het zeker?';
-    const PAGE_LOAD_BUSY_TITLE = 'Bezig met laden…';
-    let pageLoadRefreshBusy = false;
+    // Ververs Nu (bovenaan i.v.m. TDZ): de enige bevestiging, met de gemiddelde duur van de laatste 10 voltooide runs.
+    const REFRESH_NOW_AVG_MINUTES = Number(asyncLoadConfig.refresh_now_avg_minutes) > 0 ? Math.round(Number(asyncLoadConfig.refresh_now_avg_minutes)) : 0;
+    const REFRESH_NOW_CONFIRM_MESSAGE = REFRESH_NOW_AVG_MINUTES > 0
+        ? 'Dit kan even duren (gemiddeld ~' + REFRESH_NOW_AVG_MINUTES + ' minuten), weet je het zeker?'
+        : 'Dit kan even duren, weet je het zeker?';
     const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
     const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
     let loadStatsFromCache = 0;
@@ -132,6 +133,12 @@
 
     let layoutStyle = loadedLayoutStyle;
     let keepProjectWorkordersTogether = loadedKeepProjectWorkordersTogether;
+    // Regels per pagina: per gebruiker server-side bewaard (cache/usersettings, zelfde mechanisme als de voorkeuren).
+    const ROWS_PER_PAGE_OPTIONS = [20, 50, 100, 200, 500];
+    let rowsPerPage = ROWS_PER_PAGE_OPTIONS.indexOf(Number(payload.rows_per_page)) >= 0 ? Number(payload.rows_per_page) : 50;
+    let currentPageIndex = 0;
+    const pagerElement = document.createElement('span');
+    pagerElement.className = 'table-pager';
     let columns = buildTableColumns();
     const rowsByKey = new Map();
     const rowLoadStates = new Map();
@@ -497,8 +504,6 @@
 
     if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)
     {
-        pageLoadRefreshBusy = true;
-        setRefreshNowButtonDisabled(true, PAGE_LOAD_BUSY_TITLE);
         startCatchUpCurrentWeek()
             .catch(function (catchUpError)
             {
@@ -513,12 +518,6 @@
             .catch(function (syncError)
             {
                 console.error(syncError);
-            })
-            .then(function ()
-            {
-                // Klaar of fout: knop weer actief.
-                pageLoadRefreshBusy = false;
-                setRefreshNowButtonDisabled(false, '');
             });
     }
 
@@ -660,11 +659,6 @@
 
     function setRefreshNowButtonDisabled (disabled, titleText)
     {
-        // Zolang het verversen na pageload loopt (catch-up + wijzigingsronde) blijft de knop uit.
-        if (!disabled && pageLoadRefreshBusy)
-        {
-            return;
-        }
         const button = document.getElementById('refreshNowButton');
         if (!button)
         {
@@ -2463,6 +2457,7 @@
                 memo_columns: memoColumns,
                 layout_style: layoutStyle,
                 keep_project_workorders_together: keepProjectWorkordersTogether,
+                rows_per_page: rowsPerPage,
                 cost_center: costCenterSelect ? String(costCenterSelect.value || '').trim() : ''
             })
         }).catch(function ()
@@ -2739,72 +2734,122 @@
         };
     }
 
+    /**
+     * Verdeelt eenheden (groepen of losse regels) over pagina's; geeft de startindex per pagina.
+     * Een groep komt nog bij de pagina zolang die onder de paginagrootte zit en het totaal de softcap
+     * (paginagrootte + 20%) niet overschrijdt; anders begint hij op een nieuwe pagina. Een groep groter
+     * dan de softcap wordt niet gesplitst. Losse regels (grootte 1) geven gewoon vaste pagina's.
+     */
+    function computePageStarts (unitSizes, pageSize)
+    {
+        const softCap = Math.floor(pageSize * 1.2);
+        const starts = [0];
+        let count = 0;
+        for (let i = 0; i < unitSizes.length; i++)
+        {
+            if (count > 0 && (count >= pageSize || count + unitSizes[i] > softCap))
+            {
+                starts.push(i);
+                count = 0;
+            }
+
+            count += unitSizes[i];
+        }
+
+        return starts;
+    }
+
     function renderRows ()
     {
         updateSummaryCount();
         tbody.innerHTML = '';
+        const useGroups = layoutStyle === 'projectgroups' || keepProjectWorkordersTogether;
+        let units;
         if (layoutStyle === 'projectgroups')
         {
-            const projectGroups = getVisibleProjectGroups();
-            let visibleRowCount = 0;
-
-            for (const group of projectGroups)
-            {
-                visibleRowCount += group.rows.length;
-                appendProjectGroupRows(group.rows, group.projectKey);
-            }
-
-            noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
-            syncRowDomMap();
-            return;
+            units = getVisibleProjectGroups();
+        }
+        else if (keepProjectWorkordersTogether)
+        {
+            units = buildProjectGroupsFromGlobalRows(getVisibleGlobalRows());
+        }
+        else
+        {
+            units = getVisibleSortedRows().map(function (row) { return { rows: [row] }; });
         }
 
-        if (keepProjectWorkordersTogether)
+        const starts = computePageStarts(units.map(function (unit) { return unit.rows.length; }), rowsPerPage);
+        currentPageIndex = Math.max(0, Math.min(currentPageIndex, starts.length - 1));
+        const pageUnits = units.slice(starts[currentPageIndex], currentPageIndex + 1 < starts.length ? starts[currentPageIndex + 1] : units.length);
+        let isFirstGroup = true;
+
+        for (const group of pageUnits)
         {
-            const groupedRows = getVisibleGlobalRows();
-            const groups = buildProjectGroupsFromGlobalRows(groupedRows);
-            let visibleRowCount = 0;
-            let isFirstGroup = true;
-
-            for (const group of groups)
+            if (layoutStyle === 'projectgroups')
             {
-                const groupSize = group.rows.length;
-                visibleRowCount += groupSize;
-                let isFirstInGroup = true;
+                appendProjectGroupRows(group.rows, group.projectKey);
+                continue;
+            }
 
-                for (const row of group.rows)
+            const groupSize = group.rows.length;
+            let isFirstInGroup = true;
+            for (const row of group.rows)
+            {
+                const projectCellConfig = useGroups && groupSize > 1
+                    ? { rowspan: groupSize, isFirst: isFirstInGroup }
+                    : null;
+                const tr = useGroups ? renderWorkorderRow(row, projectCellConfig) : renderWorkorderRow(row);
+                if (useGroups && !isFirstGroup && isFirstInGroup)
                 {
-                    const projectCellConfig = groupSize > 1
-                        ? { rowspan: groupSize, isFirst: isFirstInGroup }
-                        : null;
-                    const tr = renderWorkorderRow(row, projectCellConfig);
-
-                    if (!isFirstGroup && isFirstInGroup)
-                    {
-                        tr.classList.add('project-break-row');
-                    }
-
-                    tbody.appendChild(tr);
-                    isFirstInGroup = false;
+                    tr.classList.add('project-break-row');
                 }
 
-                isFirstGroup = false;
+                tbody.appendChild(tr);
+                isFirstInGroup = false;
             }
 
-            noSearchResults.style.display = visibleRowCount === 0 ? '' : 'none';
-            syncRowDomMap();
-            return;
+            isFirstGroup = false;
         }
 
-        const visibleRows = getVisibleSortedRows();
-        for (const row of visibleRows)
-        {
-            const tr = renderWorkorderRow(row);
-            tbody.appendChild(tr);
-        }
-
-        noSearchResults.style.display = visibleRows.length === 0 ? '' : 'none';
+        noSearchResults.style.display = units.length === 0 ? '' : 'none';
+        renderPager(starts.length);
         syncRowDomMap();
+    }
+
+    function renderPager (pageCount)
+    {
+        pagerElement.innerHTML = '';
+        const goTo = function (index)
+        {
+            currentPageIndex = index;
+            renderRows();
+        };
+        const prev = document.createElement('button');
+        prev.type = 'button';
+        prev.textContent = '‹';
+        prev.setAttribute('aria-label', 'Vorige pagina');
+        prev.disabled = currentPageIndex <= 0;
+        prev.addEventListener('click', function () { goTo(currentPageIndex - 1); });
+        const jump = document.createElement('select');
+        jump.setAttribute('aria-label', 'Ga naar pagina');
+        for (let i = 0; i < pageCount; i++)
+        {
+            const option = document.createElement('option');
+            option.value = String(i);
+            option.textContent = 'Pagina ' + (i + 1) + ' van ' + pageCount;
+            jump.appendChild(option);
+        }
+        jump.value = String(currentPageIndex);
+        jump.addEventListener('change', function () { goTo(Number(jump.value) || 0); });
+        const next = document.createElement('button');
+        next.type = 'button';
+        next.textContent = '›';
+        next.setAttribute('aria-label', 'Volgende pagina');
+        next.disabled = currentPageIndex >= pageCount - 1;
+        next.addEventListener('click', function () { goTo(currentPageIndex + 1); });
+        pagerElement.appendChild(prev);
+        pagerElement.appendChild(jump);
+        pagerElement.appendChild(next);
     }
 
     function syncRowDomMap ()
@@ -2828,7 +2873,8 @@
 
     function usesIncrementalRowRendering ()
     {
-        return layoutStyle === 'table' && !keepProjectWorkordersTogether;
+        // Met paginering staat alleen de huidige pagina in de DOM: altijd volledig per pagina renderen.
+        return false;
     }
 
     function replaceWorkorderRowTr (rowKey, row)
@@ -3623,9 +3669,33 @@
         {
             event.preventDefault();
             appliedSearchText = String(searchInput.value || '').trim().toLowerCase();
+            currentPageIndex = 0;
             renderRows();
         });
 
+        const rowsPerPageLabel = document.createElement('label');
+        rowsPerPageLabel.className = 'rows-per-page';
+        rowsPerPageLabel.textContent = 'Regels per pagina: ';
+        const rowsPerPageSelect = document.createElement('select');
+        for (const option of ROWS_PER_PAGE_OPTIONS)
+        {
+            const element = document.createElement('option');
+            element.value = String(option);
+            element.textContent = String(option);
+            rowsPerPageSelect.appendChild(element);
+        }
+        rowsPerPageSelect.value = String(rowsPerPage);
+        rowsPerPageSelect.addEventListener('change', function ()
+        {
+            rowsPerPage = Number(rowsPerPageSelect.value) || 50;
+            currentPageIndex = 0;
+            renderRows();
+            saveUserSettings();
+        });
+        rowsPerPageLabel.appendChild(rowsPerPageSelect);
+
+        searchForm.appendChild(pagerElement);
+        searchForm.appendChild(rowsPerPageLabel);
         searchForm.appendChild(resetSortButton);
         searchForm.appendChild(searchInput);
         searchForm.appendChild(searchButton);

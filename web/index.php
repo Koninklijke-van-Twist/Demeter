@@ -362,6 +362,13 @@ function normalize_keep_project_workorders_together(mixed $value): bool
     return true;
 }
 
+// Regels per pagina (dropdown in de tabel): alleen 20/50/100/200/500, standaard 50.
+function normalize_rows_per_page(mixed $value): int
+{
+    $n = (int) $value;
+    return in_array($n, [20, 50, 100, 200, 500], true) ? $n : 50;
+}
+
 function default_keep_project_workorders_together(): bool
 {
     return true;
@@ -462,7 +469,7 @@ function normalize_memo_column_settings(array $input): array
     return $normalized;
 }
 
-function save_user_settings(string $email, ?array $memoColumns, ?string $layoutStyle, mixed $keepProjectWorkordersTogether, ?string $costCenter = null): bool
+function save_user_settings(string $email, ?array $memoColumns, ?string $layoutStyle, mixed $keepProjectWorkordersTogether, ?string $costCenter = null, mixed $rowsPerPage = null): bool
 {
     $directory = __DIR__ . '/cache/usersettings';
     if (!is_dir($directory) && !mkdir($directory, 0775, true) && !is_dir($directory)) {
@@ -509,6 +516,7 @@ function save_user_settings(string $email, ?array $memoColumns, ?string $layoutS
         'layout_style' => $normalizedLayoutStyle,
         'keep_project_workorders_together' => $normalizedKeepProjectWorkordersTogether,
         'cost_center' => $normalizedCostCenter,
+        'rows_per_page' => normalize_rows_per_page($rowsPerPage ?? ($existing['rows_per_page'] ?? null)),
         'known_cost_centers' => $knownCostCenters,
         'updated_at' => gmdate('c'),
     ];
@@ -534,8 +542,9 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
         ? ($decoded['keep_project_workorders_together'] ?? null)
         : null;
     $costCenter = is_array($decoded) ? ($decoded['cost_center'] ?? null) : null;
+    $rowsPerPage = is_array($decoded) ? ($decoded['rows_per_page'] ?? null) : null;
 
-    if (!is_array($memoColumns) && $layoutStyle === null && $keepProjectWorkordersTogether === null && $costCenter === null) {
+    if (!is_array($memoColumns) && $layoutStyle === null && $keepProjectWorkordersTogether === null && $costCenter === null && $rowsPerPage === null) {
         http_response_code(400);
         echo json_encode(['ok' => false, 'error' => 'Ongeldige instellingen'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         exit;
@@ -546,7 +555,8 @@ if (($_GET['action'] ?? '') === 'save_user_settings') {
         is_array($memoColumns) ? $memoColumns : null,
         $layoutStyle === null ? null : normalize_layout_style($layoutStyle),
         $keepProjectWorkordersTogether,
-        is_string($costCenter) ? trim($costCenter) : null
+        is_string($costCenter) ? trim($costCenter) : null,
+        $rowsPerPage
     );
     if (!$saved) {
         http_response_code(500);
@@ -1326,15 +1336,9 @@ try {
             $forceFullReload = true;
         }
 
-        // Onderbroken volledige verversing (de aansturende browser is gestopt): automatisch verder gaan
-        // waar hij bleef (al gelezen weken worden overgeslagen), niet opnieuw beginnen en niets wissen.
-        if (!$refreshNowRequested && !$refreshBlocked
-            && demeter_workorder_state_cache_needs_resume($selectedCompany, $selectedCostCenter)
-        ) {
-            $refreshNowRequested = true;
-            $forceFullReload = false;
-            $rebuildResume = true;
-        }
+        // Onderbroken volledige verversing: bij het openen NIET meer automatisch hervatten (Tim 28 okt: alleen
+        // nightly.php en Ververs Nu laden). De vorige rijen (met verse rijen erover) blijven zichtbaar; de nightly
+        // (skip_if_cached) of de volgende Ververs Nu maakt de historie af.
 
         if ($refreshNowRequested) {
             $claimResult = demeter_active_load_claim(
@@ -1459,9 +1463,9 @@ if (!$refreshBlocked && demeter_active_load_is_fresh_running($bootActiveLoad)) {
 
 // Fase 1 (SHADOW): bij het openen van de pagina de werkorder-store bijwerken (alleen als die ouder is dan
 // 180 s, één schrijver onder lock). Pas NA het versturen van de pagina (fastcgi_finish_request), zodat Linda
-// niet wacht; het scherm leest de store nog niet. Uit: define('DEMETER_STORE_SHADOW_PAGE_SYNC', false).
+// niet wacht; het scherm leest de store nog niet. Standaard UIT (geen BC bij pageload); aan: define('DEMETER_STORE_SHADOW_PAGE_SYNC', true).
 if ($selectedCompany !== '' && $selectedCostCenter !== ''
-    && (!defined('DEMETER_STORE_SHADOW_PAGE_SYNC') || DEMETER_STORE_SHADOW_PAGE_SYNC)
+    && (defined('DEMETER_STORE_SHADOW_PAGE_SYNC') && DEMETER_STORE_SHADOW_PAGE_SYNC)
     && function_exists('fastcgi_finish_request')
 ) {
     require_once __DIR__ . '/bc_fetch/store_transport.php';
@@ -1501,15 +1505,17 @@ $initialData = [
     ],
     'async_load' => [
         'enabled' => $asyncLoadEnabled,
-        'catch_up_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== '',
+        // Geen automatische vulling bij het openen meer (Tim 28 okt): alleen nightly.php en Ververs Nu laden.
+        'catch_up_enabled' => false,
         'catch_up_week' => $syncLoadWeek,
         // Na de catch-up: page-open BC-delta (action=sync_changes) en daarna de geraakte weken opnieuw lezen.
         'project_totals_full_missing' => $cacheUsedForFirstPaint && $selectedCostCenter !== ''
             && demeter_project_totals_full_enabled() && empty($GLOBALS['demeter_project_totals_full_applied']),
-        'sync_changes_enabled' => !$asyncLoadEnabled && !$hitchhikeActiveLoad && $cacheUsedForFirstPaint && $selectedCostCenter !== ''
-            && (!defined('DEMETER_WORKORDER_DELTA_ENABLED') || DEMETER_WORKORDER_DELTA_ENABLED),
+        'sync_changes_enabled' => false,
         'hitchhike_enabled' => $hitchhikeActiveLoad,
         'hitchhike_kind' => $hitchhikeKind,
+        // Gemiddelde duur (min) van de laatste 10 voltooide Ververs Nu-runs, voor de bevestigingsmodal.
+        'refresh_now_avg_minutes' => $selectedCompany !== '' && $selectedCostCenter !== '' ? demeter_refresh_durations_average_minutes($selectedCompany, $selectedCostCenter) : null,
         // Ververs Nu liftte mee op een catch-up (alleen de huidige week): daarna alsnog volledig verversen.
         'hitchhike_retrigger_refresh_now' => $userRefreshNowRequested && $hitchhikeActiveLoad && $hitchhikeKind === 'catch_up',
         // Ververs Nu: werkorderstatussen live (max_age 0) in korte stappen verversen (action=status_refresh).
@@ -1545,6 +1551,7 @@ $initialData = [
     'memo_column_settings' => $memoColumnSettings,
     'layout_style' => $layoutStyleSetting,
     'keep_project_workorders_together' => $keepProjectWorkordersTogetherSetting,
+    'rows_per_page' => normalize_rows_per_page(load_user_settings_payload($currentUserEmail)['rows_per_page'] ?? null),
     'save_user_settings_url' => 'index.php?action=save_user_settings',
     'forget_cost_center_cache_url' => 'index.php?action=forget_cost_center_cache',
     'load_progress_status_url' => 'odata.php?action=load_progress',
@@ -2117,6 +2124,24 @@ $initialData = [
 
         .status-search-form button:hover {
             background: #1a438e;
+        }
+
+        .status-search-form select {
+            border: 1px solid #c8d3e1;
+            border-radius: 8px;
+            padding: 6px 8px;
+            font: inherit;
+        }
+
+        .table-pager {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .status-search-form button:disabled {
+            opacity: 0.45;
+            cursor: default;
         }
 
         .notes-btn {
