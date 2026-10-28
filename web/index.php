@@ -1939,6 +1939,12 @@ $initialData = [
             background: #f8fafc;
         }
 
+        .secondary-button:disabled {
+            opacity: .5;
+            cursor: not-allowed;
+            background: #f1f5f9;
+        }
+
         .workorder-data-row.is-row-loading {
             position: relative;
             z-index: 4;

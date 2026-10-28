@@ -45,6 +45,11 @@
     // van het script en leest deze waarde synchroon (anders TDZ: 'Cannot access … before initialization').
     const keepDisplayRowsDuringLoad = asyncLoadConfig.keep_display_rows === true;
     // Herlaad-guard van de page-open BC-delta (bovenaan i.v.m. TDZ, zie #30).
+    // Ververs Nu (bovenaan i.v.m. TDZ): bevestigingstekst en status van het verversen na pageload.
+    const REFRESH_NOW_CONFIRM_MESSAGE = 'Elke nacht wordt alles bijgewerkt; bij het openen van de pagina alleen de huidige week en recente wijzigingen. '
+        + 'Ververs Nu leest alle weken en werkorderstatussen opnieuw uit BC. Dit kan lang duren, weet u het zeker?';
+    const PAGE_LOAD_BUSY_TITLE = 'Bezig met laden…';
+    let pageLoadRefreshBusy = false;
     const CHANGES_RELOAD_GUARD_KEY = 'demeterChangesReloadAt';
     const CHANGES_RELOAD_GUARD_MS = 180 * 1000;
     let loadStatsFromCache = 0;
@@ -492,6 +497,8 @@
 
     if (!asyncLoadConfig.enabled && !asyncLoadConfig.hitchhike_enabled && asyncLoadConfig.catch_up_enabled)
     {
+        pageLoadRefreshBusy = true;
+        setRefreshNowButtonDisabled(true, PAGE_LOAD_BUSY_TITLE);
         startCatchUpCurrentWeek()
             .catch(function (catchUpError)
             {
@@ -506,6 +513,12 @@
             .catch(function (syncError)
             {
                 console.error(syncError);
+            })
+            .then(function ()
+            {
+                // Klaar of fout: knop weer actief.
+                pageLoadRefreshBusy = false;
+                setRefreshNowButtonDisabled(false, '');
             });
     }
 
@@ -647,6 +660,11 @@
 
     function setRefreshNowButtonDisabled (disabled, titleText)
     {
+        // Zolang het verversen na pageload loopt (catch-up + wijzigingsronde) blijft de knop uit.
+        if (!disabled && pageLoadRefreshBusy)
+        {
+            return;
+        }
         const button = document.getElementById('refreshNowButton');
         if (!button)
         {
@@ -1376,8 +1394,8 @@
 
                             return demeterModal.confirm({
                                 title: 'Ververs Nu',
-                                message: 'Gegevens worden al automatisch elke tien minuten actueel gehouden. Gebruik "Ververs Nu" alleen als je denkt dat de lijst problemen vertoont.',
-                                confirmText: 'OK',
+                                message: REFRESH_NOW_CONFIRM_MESSAGE,
+                                confirmText: 'Ja',
                                 cancelText: 'Annuleren'
                             }).then(function (confirmed)
                             {
@@ -1421,27 +1439,7 @@
                 {
                     event.preventDefault();
                     costCenterSelect.focus();
-                    return;
                 }
-                if (refreshNowButton.dataset.confirmed === '1' || !window.DemeterModal || typeof window.DemeterModal.confirm !== 'function')
-                {
-                    return;
-                }
-                // Eerst bevestigen: Ververs Nu leest alles opnieuw, ook alle werkorderstatussen (enkele minuten).
-                event.preventDefault();
-                window.DemeterModal.confirm({
-                    title: 'Ververs Nu',
-                    message: 'Dit kan lang duren, weet u het zeker?',
-                    confirmText: 'Ja',
-                    cancelText: 'Annuleren'
-                }).then(function (confirmed)
-                {
-                    if (!confirmed) { return; }
-                    refreshNowButton.dataset.confirmed = '1';
-                    const form = refreshNowButton.form;
-                    if (form && typeof form.requestSubmit === 'function') { form.requestSubmit(refreshNowButton); }
-                    else { refreshNowButton.click(); }
-                });
             });
         }
 
