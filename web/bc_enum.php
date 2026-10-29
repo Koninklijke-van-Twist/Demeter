@@ -72,3 +72,27 @@ if (!function_exists('demeter_sales_document_type_is_credit')) {
         return in_array($normalized, ['creditmemo', 'creditnota', 'returnorder', 'retourorder'], true);
     }
 }
+
+if (!function_exists('demeter_status_bc_dutch_label')) {
+    /**
+     * Werkorderstatus als NL-label zoals BC (via Mímir) het levert. De store bewaart canoniek
+     * Engels; zonder deze vertaling lekten Closed/Checked/... naar het scherm en de export.
+     * Onbekende waarden blijven ongewijzigd.
+     */
+    function demeter_status_bc_dutch_label(string $status): string
+    {
+        $map = [
+            'open' => 'Open',
+            'planned' => 'Gepland', 'gepland' => 'Gepland',
+            'in progress' => 'Onderhanden', 'onderhanden' => 'Onderhanden',
+            'checked' => 'Gecontroleerd', 'gecontroleerd' => 'Gecontroleerd',
+            'signed' => 'Ondertekend', 'ondertekend' => 'Ondertekend',
+            'completed' => 'Uitgevoerd', 'uitgevoerd' => 'Uitgevoerd',
+            'closed' => 'Afgesloten', 'afgesloten' => 'Afgesloten',
+            'cancelled' => 'Geannuleerd', 'canceled' => 'Geannuleerd', 'geannuleerd' => 'Geannuleerd',
+            'invoiced' => 'Gefactureerd', 'gefactureerd' => 'Gefactureerd',
+        ];
+
+        return $map[demeter_enum_normalize($status)] ?? $status;
+    }
+}

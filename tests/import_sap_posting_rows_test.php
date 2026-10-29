@@ -67,7 +67,11 @@ check(($postingOnly[0]['No'] ?? '') === 'Import SAP', "pseudo-rij toont nog stee
 check(($realRows[0]['Customer_Name'] ?? '') === 'Testklant B.V.', 'klantnaam valt terug op Sell_to_Name: ' . ($realRows[0]['Customer_Name'] ?? ''));
 check(($realRows[0]['Customer_Id'] ?? '') === 'C0001', 'klantnummer valt terug op Sell_to_Customer_No');
 $withBill = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => 'Factuurklant'])]], 'both')['rows'][0];
-check($withBill['Customer_Name'] === 'Factuurklant' && $withBill['Customer_Id'] === 'B0002', 'Bill-to blijft voorrang houden');
+check($withBill['Customer_Name'] === 'Testklant B.V.' && $withBill['Customer_Id'] === 'C0001', 'Sell-to heeft voorrang op Bill-to (KvT/70: 965 rijen)');
+$billOnly = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Sell_to_Customer_No' => '', 'Sell_to_Name' => '', 'Sell_to_Customer_Name' => '', 'Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => 'Factuurklant'])]], 'both')['rows'][0];
+check($billOnly['Customer_Name'] === 'Factuurklant' && $billOnly['Customer_Id'] === 'B0002', 'Sell-to leeg -> Bill-to-paar');
+$nietGebruiken = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Sell_to_Customer_No' => '16487', 'Sell_to_Name' => 'EQUANS Zuid-NL - NIET GEBRUIKEN', 'Bill_to_Customer_No' => '16457', 'Bill_to_Name' => 'EQUANS Zuid-Nederland BV'])]], 'both')['rows'][0];
+check($nietGebruiken['Customer_Id'] === '16487' && $nietGebruiken['Customer_Name'] === 'EQUANS Zuid-NL - NIET GEBRUIKEN', "Sell-to ook bij 'NIET GEBRUIKEN' (4079078)");
 // Bill-to-nummer zonder Bill-to-naam: nummer en naam samen van Sell-to (nooit Bill-to-nr + Sell-to-naam).
 $billNoName = demeter_build_workorder_rows_from_overview(['workorders' => [array_merge($realWorkorder, ['Bill_to_Customer_No' => 'B0002', 'Bill_to_Name' => ''])]], 'both')['rows'][0];
 check($billNoName['Customer_Id'] === 'C0001' && $billNoName['Customer_Name'] === 'Testklant B.V.', 'Bill-to zonder naam -> Sell-to-paar: ' . $billNoName['Customer_Id'] . ' ' . $billNoName['Customer_Name']);

@@ -482,8 +482,11 @@ class ProjectFinanceService
      * Aggregeert project- en werkordertotalen uit reeds opgehaalde ProjectPosten-rijen.
      *
      * @param list<array> $rows
+     * @param array<string, true> $taskWorkorderKeys Bekende werkorders als 'job_no|wo_no' (lowercase).
+     *        Posten zonder LVS_Work_Order_No waarvan Job_Task_No zo'n werkorder van hetzelfde project is,
+     *        tellen bij die werkorder. Leeg = oud gedrag (alleen LVS).
      */
-    public function aggregateProjectAndWorkorderFinanceFromProjectPostenRows(array $rows): array
+    public function aggregateProjectAndWorkorderFinanceFromProjectPostenRows(array $rows, array $taskWorkorderKeys = []): array
     {
         $projectCostSource = $this->getAmountSourceConfig('project', 'cost_source');
         $projectRevenueSource = $this->getAmountSourceConfig('project', 'revenue_source');
@@ -557,6 +560,20 @@ class ProjectFinanceService
             $jobTaskNo = trim((string) ($row[$workorderKeyField] ?? ''));
             if ($jobNo === '') {
                 continue;
+            }
+
+            // Fix KvT/70: inkoop-/verkoopfacturen e.d. hebben geen LVS_Work_Order_No, maar wel
+            // Job_Task_No = werkordernummer. Alleen koppelen als dat een werkorder van hetzelfde
+            // project is (sleutel job|wo); LVS gevuld = nooit ook nog op de taak matchen.
+            if ($jobTaskNo === '' && $taskWorkorderKeys !== []) {
+                $taskNo = trim((string) ($row['Job_Task_No'] ?? ''));
+                $isImportSap = self::descriptionStartsWithImportSap((string) ($row[$descriptionField] ?? ''));
+                if ($taskNo !== ''
+                    && (!$isImportSap || self::importSapTaskMatchEnabled())
+                    && isset($taskWorkorderKeys[self::normalizeMatchValue($jobNo) . '|' . self::normalizeMatchValue($taskNo)])
+                ) {
+                    $jobTaskNo = $taskNo;
+                }
             }
 
             $normalizedProjectNo = self::normalizeMatchValue($jobNo);
@@ -1327,6 +1344,16 @@ class ProjectFinanceService
 
         // NL (Mímir-caption) en EN (directe BC-enum) gelijkwaardig behandelen.
         return demeter_enum_values_equal($actualValue, $expectedValue);
+    }
+
+    /**
+     * Keuze Tim (29-10-2026): IMPORT SAP-posten met Job_Task_No = werkorder van hetzelfde project
+     * tellen bij die werkorder (niet meer als 'Geen werkorder'; nooit allebei).
+     * Omzetten: define('DEMETER_IMPORT_SAP_TASK_MATCH', false) in auth.php/config.
+     */
+    private static function importSapTaskMatchEnabled(): bool
+    {
+        return !defined('DEMETER_IMPORT_SAP_TASK_MATCH') || (bool) constant('DEMETER_IMPORT_SAP_TASK_MATCH');
     }
 
     private static function descriptionStartsWithImportSap(string $description): bool

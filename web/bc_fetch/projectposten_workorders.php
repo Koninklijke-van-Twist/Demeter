@@ -40,6 +40,7 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
     $pairKeysInPosten = [];
     $lvsWorkOrderNos = [];
     $emptyLvsPairs = [];
+    $taskWorkorderCandidates = [];
 
     foreach ($rows as $row) {
         if (!is_array($row)) {
@@ -70,6 +71,8 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
         }
 
         if ($lvsWorkOrderNo === '') {
+            // Kandidaat-werkordernummer via de taak (facturen zonder LVS): ophalen op No.
+            $taskWorkorderCandidates[strtolower($jobTaskNo)] = $jobTaskNo;
             $emptyLvsPairs[$pairKey] = [
                 'job_no' => $jobNo,
                 'job_task_no' => $jobTaskNo,
@@ -83,6 +86,7 @@ function bc_fetch_extract_workorder_keys_from_projectposten_rows(array $rows): a
         'pair_keys_in_posten' => $pairKeysInPosten,
         'lvs_work_order_nos' => array_values($lvsWorkOrderNos),
         'empty_lvs_pairs' => array_values($emptyLvsPairs),
+        'task_workorder_candidates' => array_values($taskWorkorderCandidates),
     ];
 }
 

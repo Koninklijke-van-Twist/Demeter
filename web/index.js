@@ -465,11 +465,15 @@
                     stripLoadTokenFromUrl();
                     return;
                 }
-                return finalizeRefreshAfterLoad();
+                return finalizeRefreshAfterLoad().then(function ()
+                {
+                    finishRefreshModal(null);
+                });
             })
             .catch(function (refreshError)
             {
                 console.error(refreshError);
+                finishRefreshModal('Weken geladen; memo\'s ophalen mislukt.');
                 // Ook als de memo's mislukken: de weken zijn geladen, dus geen load_token of
                 // blijvende 'Memo's ophalen...' meer.
                 stripLoadTokenFromUrl();
@@ -3255,13 +3259,8 @@
 
         for (const column of columns)
         {
-            const isProjectFinancialColumn = projectFinancialColumnKeys.has(column.key);
 
-            if (isProjectFinancialColumn && projectCellConfig !== null && projectCellConfig !== undefined && !projectCellConfig.isFirst)
-            {
-                continue;
-            }
-
+            // Projecttotalen staan op elke rij van het project (geen rowspan/overslaan meer).
             const td = document.createElement('td');
             td.classList.add('cell-pulse-target');
             if (compactColumnKeys.has(column.key))
@@ -3319,12 +3318,6 @@
                 td.classList.add('col-memo-remarks');
             }
 
-            if (isProjectFinancialColumn && projectCellConfig !== null && projectCellConfig !== undefined && projectCellConfig.isFirst && projectCellConfig.rowspan > 1)
-            {
-                td.rowSpan = projectCellConfig.rowspan;
-                td.style.verticalAlign = 'middle';
-                td.classList.add('project-finance-merged');
-            }
 
             if (column.key === 'Notes')
             {
@@ -4390,11 +4383,6 @@
 
     function getExportCellValue (row, key, isFirstProjectRow)
     {
-        if (projectFinancialColumnKeys.has(key) && !isFirstProjectRow)
-        {
-            return null;
-        }
-
         if (isMemoFieldKey(key))
         {
             const memoValue = getMemoFieldValue(row, key);
@@ -7589,7 +7577,7 @@
         updateHistoryLoadNote('');
         historyLoadRunning = false;
         setProjectTotalsIncompleteState('');
-        finishRefreshModal(null);
+        // Ververs Nu-modal pas na finalizeRefreshAfterLoad (memo's) sluiten/herladen, zie de .then hieronder.
 
         return true;
     }
