@@ -139,10 +139,10 @@ $GLOBALS['DEMETER_ODATA_BC_FETCH'] = static function (string $url): array {
 };
 $res = demeter_nightly_refresh_open_workorder_statuses($company, $cc, [], 180);
 $after = demeter_workorder_state_cache_load_display_rows($company, $cc);
-check($after['a']['Status'] === 'In Progress', 'open → In Progress bijgewerkt (oude week)');
-check($after['b']['Status'] === 'Invoiced', 'open → Invoiced gevonden via nummer-check');
+check($after['a']['Status'] === 'Onderhanden', 'open → In Progress bijgewerkt (oude week)');
+check($after['b']['Status'] === 'Gefactureerd', 'open → Invoiced gevonden via nummer-check');
 check($res['not_found'] === 1 && $res['open_in_cache'] === 3, 'verwijderde werkorder gemeld (not_found=1), 3 open in cache');
-check($after['d']['Status'] === 'Closed', 'afgesloten rij ongemoeid');
+check($after['d']['Status'] === 'Afgesloten', 'afgesloten rij ongemoeid');
 unset($GLOBALS['DEMETER_ODATA_BC_FETCH']);
 
 demeter_workorder_state_cache_purge($company, $cc);

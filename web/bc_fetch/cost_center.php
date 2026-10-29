@@ -509,9 +509,32 @@ function bc_fetch_filter_projectposten_rows_for_projects(array $rows, array $wor
  * @param list<array> $workorders
  * @return list<array>
  */
+/**
+ * Sleutels 'job_no|wo_no' (lowercase) van werkorders, voor de taak-koppeling van posten zonder LVS.
+ *
+ * @return array<string, true>
+ */
+function bc_fetch_task_workorder_keys(array $workorders): array
+{
+    $keys = [];
+    foreach ($workorders as $workorder) {
+        if (!is_array($workorder)) {
+            continue;
+        }
+        $jobNo = strtolower(trim((string) ($workorder['Job_No'] ?? '')));
+        $no = strtolower(trim((string) ($workorder['No'] ?? '')));
+        if ($jobNo !== '' && $no !== '') {
+            $keys[$jobNo . '|' . $no] = true;
+        }
+    }
+
+    return $keys;
+}
+
 function bc_fetch_filter_projectposten_rows_for_workorders(array $rows, array $workorders): array
 {
     $allowedNos = [];
+    $allowedJobNos = [];
     $allowedJobs = [];
     $pairCounts = [];
     $uniquePairNos = [];
@@ -529,6 +552,9 @@ function bc_fetch_filter_projectposten_rows_for_workorders(array $rows, array $w
         $jobNo = trim((string) ($workorder['Job_No'] ?? ''));
         if ($jobNo !== '') {
             $allowedJobs[strtolower($jobNo)] = true;
+        }
+        if ($jobNo !== '' && $no !== '') {
+            $allowedJobNos[strtolower($jobNo) . '|' . $no] = true;
         }
         $jobTaskNo = trim((string) ($workorder['Job_Task_No'] ?? ''));
         if ($jobNo === '' || $jobTaskNo === '') {
@@ -552,7 +578,7 @@ function bc_fetch_filter_projectposten_rows_for_workorders(array $rows, array $w
         return [];
     }
 
-    return array_values(array_filter($rows, static function ($row) use ($allowedNos, $uniquePairNos, $allowedJobs): bool {
+    return array_values(array_filter($rows, static function ($row) use ($allowedNos, $allowedJobNos, $uniquePairNos, $allowedJobs): bool {
         if (!is_array($row)) {
             return false;
         }
@@ -564,6 +590,11 @@ function bc_fetch_filter_projectposten_rows_for_workorders(array $rows, array $w
 
         $description = trim((string) ($row['Description'] ?? ''));
         $jobNo = trim((string) ($row['Job_No'] ?? ''));
+        // Lege LVS, Job_Task_No = werkorder (No) van hetzelfde project: hoort bij die werkorder.
+        $taskNo = strtolower(trim((string) ($row['Job_Task_No'] ?? '')));
+        if ($jobNo !== '' && $taskNo !== '' && isset($allowedJobNos[strtolower($jobNo) . '|' . $taskNo])) {
+            return true;
+        }
         if ($description !== '' && strncasecmp($description, 'IMPORT SAP', 10) === 0) {
             return $jobNo !== '' && isset($allowedJobs[strtolower($jobNo)]);
         }

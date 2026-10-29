@@ -387,29 +387,24 @@ function demeter_build_single_workorder_row(
 
     $rowKey = demeter_workorder_row_key($jobNo, $normalizedPopupWorkorderSourceKey);
 
-    // Klant: Bill-to, met terugval op Sell-to (bv. werkorders waar Bill-to in BC leeg is).
-    // Nummer en naam komen altijd uit hetzelfde paar: zonder Bill-to-naam valt het hele paar
-    // terug op Sell-to (nooit een Bill-to-nummer met een Sell-to-naam).
-    $customerId = trim((string) ($workorder['Bill_to_Customer_No'] ?? ''));
-    $customerName = trim((string) ($workorder['Bill_to_Name'] ?? ''));
+    // Klant: Sell-to (opdrachtgever, zoals BC de werkorder toont), met terugval op Bill-to als
+    // Sell-to leeg is. Ook klanten met 'NIET GEBRUIKEN' in de naam tonen we zoals BC ze levert.
+    // Nummer en naam komen altijd uit hetzelfde paar.
+    $customerId = trim((string) ($workorder['Sell_to_Customer_No'] ?? ''));
+    $customerName = trim((string) ($workorder['Sell_to_Name'] ?? ''));
     if ($customerName === '') {
-        $sellToId = trim((string) ($workorder['Sell_to_Customer_No'] ?? ''));
-        $sellToName = trim((string) ($workorder['Sell_to_Name'] ?? ''));
-        if ($sellToName === '') {
-            $sellToName = trim((string) ($workorder['Sell_to_Customer_Name'] ?? ''));
-        }
-        if ($sellToId !== '' || $sellToName !== '') {
-            $customerId = $sellToId;
-            $customerName = $sellToName;
-        }
-        // Anders: Bill-to-nummer zonder naam laten staan (geen naam van een andere klant).
+        $customerName = trim((string) ($workorder['Sell_to_Customer_Name'] ?? ''));
+    }
+    if ($customerId === '' && $customerName === '') {
+        $customerId = trim((string) ($workorder['Bill_to_Customer_No'] ?? ''));
+        $customerName = trim((string) ($workorder['Bill_to_Name'] ?? ''));
     }
 
     // 'Import SAP'-posten zonder werkorder zijn geen werkorder: eigen status, niet 'Open'
     // (ze telden als ~1900 extra open werkorders in KvT kostenplaats 70).
     $rowStatus = $isImportSapPseudoRow
         ? DEMETER_POSTING_ONLY_ROW_STATUS
-        : (string) ($workorder['Status'] ?? '');
+        : demeter_status_bc_dutch_label((string) ($workorder['Status'] ?? ''));
 
     return [
         'Row_Key' => $rowKey,
@@ -603,6 +598,13 @@ function demeter_coalesce_display_rows_by_business_key(array $rowsByKey, array $
     foreach ($orphanRows as $rowKey => $row) {
         if (!isset($coalesced[$rowKey])) {
             $coalesced[$rowKey] = $row;
+        }
+    }
+
+    // Status altijd als NL-label (oude cache/store-paden leverden canoniek Engels).
+    foreach ($coalesced as $rowKey => $row) {
+        if (is_array($row) && isset($row['Status']) && is_string($row['Status'])) {
+            $coalesced[$rowKey]['Status'] = demeter_status_bc_dutch_label($row['Status']);
         }
     }
 
@@ -1051,14 +1053,11 @@ function demeter_fetch_workorder_memos_for_row_refs(string $company, array $rowR
         }
 
         $rowKey = trim((string) ($ref['row_key'] ?? ''));
-        $compositeKey = demeter_workorder_bc_composite_key([
-            'No' => (string) ($ref['no'] ?? ''),
-            'Job_No' => (string) ($ref['job_no'] ?? ''),
-            'Job_Task_No' => (string) ($ref['job_task_no'] ?? ''),
-            'Start_Date' => (string) ($ref['start_date'] ?? ''),
-        ]);
+        // Sleutel = Job_No + No (uniek per bedrijf). Start_Date/Job_Task_No wijzigen in BC en
+        // gaven dan geen match → lege memo's die als 'geladen' bleven staan.
+        $compositeKey = strtolower(trim((string) ($ref['job_no'] ?? ''))) . '|' . strtolower(trim((string) ($ref['no'] ?? '')));
 
-        if ($compositeKey === '|||' || $rowKey === '') {
+        if ($compositeKey === '|' || $rowKey === '') {
             continue;
         }
 
@@ -1091,7 +1090,7 @@ function demeter_fetch_workorder_memos_for_row_refs(string $company, array $rowR
                 continue;
             }
 
-            $compositeKey = demeter_workorder_bc_composite_key($bcRow);
+            $compositeKey = strtolower(trim((string) ($bcRow['Job_No'] ?? ''))) . '|' . strtolower(trim((string) ($bcRow['No'] ?? '')));
             if (!isset($wantedCompositeKeys[$compositeKey])) {
                 continue;
             }

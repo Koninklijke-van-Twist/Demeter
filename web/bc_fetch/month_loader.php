@@ -926,7 +926,9 @@ function bc_fetch_execute_workorder_date_range_load(
     $missingNos = [];
     $lvsNosSet = [];
 
-    foreach ($lvsWorkOrderNos as $lvsNo) {
+    // Ook taaknummers van posten zonder LVS ophalen als werkorder-No (bestaat hij niet, dan komt er niets).
+    $taskWorkorderCandidates = is_array($extractedKeys['task_workorder_candidates'] ?? null) ? $extractedKeys['task_workorder_candidates'] : [];
+    foreach (array_merge($lvsWorkOrderNos, $taskWorkorderCandidates) as $lvsNo) {
         $normalizedLvs = strtolower(trim((string) $lvsNo));
         if ($normalizedLvs === '') {
             continue;
@@ -1052,7 +1054,10 @@ function bc_fetch_execute_workorder_date_range_load(
 
     if ($allProjectPostenRows !== []) {
         $filteredProjectPostenRows = bc_fetch_filter_projectposten_rows_for_workorders($allProjectPostenRows, $workorders);
-        $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows($filteredProjectPostenRows);
+        $rangeFinance = $financeService->aggregateProjectAndWorkorderFinanceFromProjectPostenRows(
+            $filteredProjectPostenRows,
+            bc_fetch_task_workorder_keys($workorders)
+        );
         // Projecttotalen over ALLE posten van het project (ook zonder werkordernummer of met een
         // Job/Task-paar dat bij meerdere werkorders hoort), zoals het BC-projecttotaal.
         // Werkordertotalen blijven op de werkorder-gefilterde rijen hierboven.

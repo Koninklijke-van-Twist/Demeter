@@ -12,7 +12,9 @@
  */
 function bc_fetch_werkorders_list_select(): string
 {
-    return implode(',', [
+    // Memo-velden zitten in dezelfde Werkorders-rij: meteen meenemen i.p.v. lazy laden
+    // (lazy laden dekte maar ~31% van de rijen in KvT/70).
+    return implode(',', array_merge([
         'No',
         'Task_Code',
         'Task_Description',
@@ -30,7 +32,7 @@ function bc_fetch_werkorders_list_select(): string
         'Sell_to_Customer_No',
         'Sell_to_Name',
         'Job_Dimension_1_Value',
-    ]);
+    ], bc_fetch_werkorder_memo_bc_fields()));
 }
 
 /**

@@ -150,7 +150,7 @@ check($r['status'] === 'synced', 'eerste keer: terugkijken vanaf de oudste weeks
 check(in_array($closedWeek, $r['dirty_weeks'], true), 'WO2610905-scenario: gesloten week ' . $closedWeek . ' staat op opnieuw laden');
 check(!in_array($oldWeek, $r['dirty_weeks'], true), 'statuswijziging oude week: geen weekherlading');
 $display = demeter_workorder_state_cache_load_display_rows($company, $cc);
-check(($display['PRJWOSTATUS|WOSTATUS']['Status'] ?? '') === 'Closed' && $r['status_updates'] === 1 && $r['rows_changed'] === true, 'statuswijziging oude week direct in de display-rij (Checked -> Closed)');
+check(($display['PRJWOSTATUS|WOSTATUS']['Status'] ?? '') === 'Afgesloten' && $r['status_updates'] === 1 && $r['rows_changed'] === true, 'statuswijziging oude week direct in de display-rij (Checked -> Closed)');
 $cp = demeter_workorder_delta_read($company, $cc);
 check($cp['posten_entry_no'] === 1000 && $cp['changelog_entry_no'] === 503, 'checkpoint: posten op hoogste Entry_No (1000), logboek tot laatst verwerkt (503)');
 $joined = implode("\n", $calls);

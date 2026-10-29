@@ -132,7 +132,7 @@ $company = 'Testbedrijf backfill ' . bin2hex(random_bytes(3));
 setup_cache($company, $cc, $weeks, $displayRows());
 $r = demeter_workorder_delta_page_open($company, $cc, $transport, $now);
 $display = demeter_workorder_state_cache_load_display_rows($company, $cc);
-check(($display['PRJWO2609608|WO2609608']['Status'] ?? '') === 'Completed', 'status gewijzigd na de weekscan (WO2609608) komt binnen bij de eerste sync');
+check(($display['PRJWO2609608|WO2609608']['Status'] ?? '') === 'Uitgevoerd', 'status gewijzigd na de weekscan (WO2609608) komt binnen bij de eerste sync');
 check(($display['PRJWO2609700|WO2609700']['Document_Status'] ?? '') === '30-GEFACTUREERD', 'documentstatus gewijzigd na de weekscan (WO2609700) komt binnen');
 check(in_array($newWeek, $r['dirty_weeks'], true), 'WO2610905 (aangemaakt na de weekscan, start ' . $newDay . ') zet week ' . $newWeek . ' op opnieuw laden');
 check(strpos(implode("\n", $calls), "'WOVOORSCAN'") === false, 'wijziging van vóór de oudste weekscan wordt niet opgehaald');
@@ -154,7 +154,7 @@ demeter_workorder_delta_write($company2, $cc, array_replace(demeter_workorder_de
 $calls = [];
 $r = demeter_workorder_delta_page_open($company2, $cc, $transport, $now);
 $display = demeter_workorder_state_cache_load_display_rows($company2, $cc);
-check(($display['PRJWO2609608|WO2609608']['Status'] ?? '') === 'Completed' && ($display['PRJWO2609700|WO2609700']['Document_Status'] ?? '') === '30-GEFACTUREERD', 'bestaand checkpoint: één keer terugkijken herstelt status en documentstatus');
+check(($display['PRJWO2609608|WO2609608']['Status'] ?? '') === 'Uitgevoerd' && ($display['PRJWO2609700|WO2609700']['Document_Status'] ?? '') === '30-GEFACTUREERD', 'bestaand checkpoint: één keer terugkijken herstelt status en documentstatus');
 check(in_array($newWeek, $r['dirty_weeks'], true), 'bestaand checkpoint: WO2610905 alsnog gevonden');
 $cp = demeter_workorder_delta_read($company2, $cc);
 check((int) $cp['changelog_entry_no'] === 7158700 && (int) ($cp['backfill_version'] ?? 0) === DEMETER_WORKORDER_DELTA_BACKFILL_VERSION, 'bestaand checkpoint: daarna weer op 7158700 met backfill_version');

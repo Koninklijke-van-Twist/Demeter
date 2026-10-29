@@ -23,7 +23,11 @@ if (!class_exists('DemeterStaleCacheVersionException')) {
  * v13: v12 werd niet afgedwongen (display-cache zonder versie + catch-up schreef een verse v12-state met
  * alleen de huidige week). Een versiewissel start nu een volledige herbouw van alle weken.
  */
-const DEMETER_WORKORDER_STATE_CACHE_VERSION = 13;
+/**
+ * v14: posten zonder LVS tellen via Job_Task_No = werkorder van hetzelfde project, memo's in de
+ * werkorder-query, klant = Sell-to, status als NL-label.
+ */
+const DEMETER_WORKORDER_STATE_CACHE_VERSION = 14;
 /** Aantal opeenvolgende lege weken voordat historisch laden stopt (~12 maanden). */
 const DEMETER_MONTH_SCAN_EMPTY_STOP_COUNT = 52;
 /** Maximale wachttijd (s) op de cache-lock van een parallelle week voordat de week faalt. */
