@@ -183,7 +183,9 @@ function bc_fetch_workorders_by_numbers(string $company, array $numbers, array $
     $normalized = [];
     foreach ($numbers as $number) {
         $trimmed = trim((string) $number);
-        if ($trimmed === '') {
+        // Werkorder.Nr. is Code[20]: een langere waarde (bijv. taak 'IMPORT SAP ARBEID JAAR 2024')
+        // kan geen werkorder zijn en laat BC het hele OR-filter afwijzen (FilterErrorException).
+        if ($trimmed === '' || mb_strlen($trimmed) > 20) {
             continue;
         }
         $normalized[strtolower($trimmed)] = $trimmed;
