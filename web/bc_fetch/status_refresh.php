@@ -86,7 +86,8 @@ function demeter_status_refresh_open_numbers(string $company, string $costCenter
             continue;
         }
         $no = trim((string) ($row['Bc_No'] ?? ($row['No'] ?? '')));
-        if ($no !== '' && trim((string) ($row['Job_No'] ?? '')) !== '') {
+        // Werkorder.Nr. is Code[20]: langere waarden zijn geen werkorder en breken het OR-filter in BC.
+        if ($no !== '' && mb_strlen($no) <= 20 && trim((string) ($row['Job_No'] ?? '')) !== '') {
             $nos[$no] = true;
         }
     }

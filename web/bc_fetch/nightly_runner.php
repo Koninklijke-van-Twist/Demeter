@@ -218,6 +218,11 @@ function demeter_nightly_refresh_open_workorder_statuses(string $company, string
             continue;
         }
         $openInCache++;
+        // Werkorder.Nr. is Code[20]: een langere waarde (bijv. taak 'IMPORT SAP OPBRENGSTEN') is geen
+        // werkorder en laat BC het hele OR-filter afwijzen (FilterErrorException).
+        if (mb_strlen($no) > 20) {
+            continue;
+        }
         if (!isset($statusByPair[$pairKey])) {
             $recheckNos[$no] = $pairKey;
         }
